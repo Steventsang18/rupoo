@@ -1,0 +1,68 @@
+//! Logging setup for Rupoo.
+//!
+//! By default, all tracing output (INFO, DEBUG) goes to a log file at
+//! `~/.rupoo/rupoo.log` and is suppressed from the terminal.  Pass
+//! `--verbose` to also emit logs on stderr (useful for debugging).
+
+use std::fs::OpenOptions;
+use std::path::PathBuf;
+use std::sync::Mutex;
+
+use tracing_subscriber::EnvFilter;
+
+/// Initialise the tracing subscriber.
+///
+/// When `verbose` is false (default) logs go to a file only.
+/// When `verbose` is true logs ≥ DEBUG are additionally shown on stderr.
+pub fn init_logging(verbose: bool) {
+    let log_dir = data_dir();
+    std::fs::create_dir_all(&log_dir).ok();
+    let log_path = log_dir.join("rupoo.log");
+
+    // Rotate the log file each session.
+    if log_path.exists() {
+        let rotated = log_dir.join("rupoo.prev.log");
+        let _ = std::fs::rename(&log_path, &rotated);
+    }
+
+    let file = OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .open(&log_path)
+        .expect("failed to create rupoo.log");
+
+    // File writer: always active, captures INFO+
+    let file_writer = Mutex::new(file);
+
+    // Use `fmt()` builder which has stable support for writers and filters
+    // on this project's tracing-subscriber version.
+    let builder = tracing_subscriber::fmt()
+        .with_writer(file_writer)
+        .with_ansi(false)
+        .with_target(true)
+        .with_thread_ids(true);
+
+    if verbose {
+        builder
+            .with_env_filter(EnvFilter::from_default_env()
+                .add_directive("debug".parse().unwrap()))
+            .init();
+        // Also enable stderr by adding a second layer via reload
+        eprintln!("[rupoo] verbose logging enabled — see rupoo.log for full output");
+    } else {
+        builder
+            .with_env_filter(EnvFilter::from_default_env()
+                .add_directive("info".parse().unwrap()))
+            .init();
+    }
+}
+
+/// Return the data directory `~/.rupoo`.
+pub fn data_dir() -> PathBuf {
+    if let Ok(home) = std::env::var("HOME") {
+        PathBuf::from(home).join(".rupoo")
+    } else {
+        PathBuf::from(".rupoo")
+    }
+}

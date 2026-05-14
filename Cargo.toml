@@ -1,0 +1,56 @@
+[package]
+name = "rupoo"
+version = "0.1.0"
+edition = "2021"
+
+[features]
+default = []
+gui = ["egui", "eframe", "open", "tray-icon"]
+
+[dependencies]
+tokio = { version = "1", features = ["full"] }
+rusqlite = { version = "0.31", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+anyhow = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+uuid = { version = "1", features = ["v4"] }
+chrono = { version = "0.4", features = ["serde"] }
+clap = { version = "4", features = ["derive"] }
+async-trait = "0.1"
+rig-core = "0.30"
+ratatui = "0.29"
+crossterm = "0.28"
+tui-textarea = "0.7"
+syntect = "5.3"
+egui = { version = "0.27", optional = true }
+tray-icon = { version = "0.24", optional = true }
+git2 = { version = "0.19", features = ["vendored-libgit2"] }
+rustyline = "14"
+indicatif = "0.17"
+console = "0.15"
+miette = { version = "7", features = ["fancy"] }
+eframe = { version = "0.27", features = ["default"], optional = true }
+open = { version = "5", optional = true }
+which = "8.0.2"
+reqwest = { version = "0.12", features = ["json", "rustls-tls"] }
+toml = "0.8"
+path_jail = "0.3"
+
+[package.metadata.bundle]
+name = "Yupoo"
+identifier = "com.plan-executor.agent"
+icon = []
+version = "0.1.0"
+category = "Developer Tools"
+short_description = "AI-powered plan execution agent"
+long_description = "A desktop AI assistant with plan execution, memory, and skills management."
+copyright = "Copyright 2026"
+departments = []
+minimum_system_version = "11.0"
+
+[dev-dependencies]
+tempfile = "3"
+chrono = "0.4"
