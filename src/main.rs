@@ -7,6 +7,7 @@ use rupoo::agent::Agent;
 use rupoo::db::TaskRepo;
 use rupoo::mcp::McpToolExecutor;
 use rupoo::skill::SkillManager;
+use rupoo::db::PlanSummary;
 use rupoo::task::{finish_step, think_step, tool_call_step, wait_for_input_step, Plan};
 
 mod cli;
@@ -102,6 +103,56 @@ enum GitAction {
 }
 
 #[derive(Subcommand)]
+enum ModelAction {
+    /// Show current LLM configuration
+    Show,
+    /// List available providers and their default models
+    List,
+    /// Set provider and optionally model (e.g., "anthropic/claude-sonnet-4")
+    Set {
+        /// Provider name, optionally with /model suffix
+        target: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+enum SessionAction {
+    /// List all plans
+    List {
+        /// Maximum plans to show (default: 10)
+        #[arg(long, default_value_t = 10)]
+        limit: usize,
+    },
+    /// Show plan details and steps
+    Show {
+        /// Plan ID
+        id: String,
+    },
+    /// Resume execution of a plan
+    Resume {
+        /// Plan ID
+        id: String,
+        /// Database path for the plan
+        #[arg(long, default_value = "agent.db")]
+        db: String,
+        /// Optional input for WaitForInput steps
+        #[arg(long)]
+        input: Option<String>,
+    },
+    /// Delete a plan and its checkpoints
+    Delete {
+        /// Plan ID
+        id: String,
+    },
+    /// Delete completed/failed plans older than N days
+    Prune {
+        /// Age in days (default: 30)
+        #[arg(long, default_value_t = 30)]
+        days: u64,
+    },
+}
+
+#[derive(Subcommand)]
 enum Commands {
     /// Run a single plan by ID
     Run {
@@ -145,6 +196,52 @@ enum Commands {
     },
     /// Start MCP protocol server over stdio
     McpServer,
+    /// Show system status overview
+    Status {
+        /// Short one-line output (for scripts)
+        #[arg(long)]
+        short: bool,
+        /// Database path (default: ./agent.db)
+        #[arg(long, default_value = "agent.db")]
+        db: String,
+    },
+    /// Show/switch LLM provider and model
+    Model {
+        #[command(subcommand)]
+        action: Option<ModelAction>,
+        /// Database path (default: ./agent.db)
+        #[arg(long, default_value = "agent.db")]
+        db: String,
+    },
+    /// List, show, resume, delete plans
+    Session {
+        #[command(subcommand)]
+        action: SessionAction,
+        /// Database path (default: ./agent.db)
+        #[arg(long, default_value = "agent.db")]
+        db: String,
+    },
+    /// Diagnose configuration and environment
+    Doctor {
+        /// Attempt to auto-fix warnings
+        #[arg(long)]
+        fix: bool,
+    },
+    /// View and follow agent logs
+    Logs {
+        /// Follow log file in real-time
+        #[arg(long)]
+        follow: bool,
+        /// Number of lines to show (default: 50)
+        #[arg(long, default_value_t = 50)]
+        lines: usize,
+        /// Filter by log level (e.g., WARN, ERROR)
+        #[arg(long)]
+        level: Option<String>,
+        /// Show previous session log instead
+        #[arg(long)]
+        prev: bool,
+    },
     /// Start in server mode (placeholder for future daemon)
     Serve {
         /// Database path (default: ./agent.db)
@@ -355,6 +452,21 @@ async fn run_cmd(cmd: Commands) -> anyhow::Result<()> {
                 info!("compile with --features gui for system tray support");
                 tokio::signal::ctrl_c().await?;
             }
+        }
+        Commands::Status { short, db } => {
+            crate::cli::cmds::status::run(&db, short).await?;
+        }
+        Commands::Model { action, db } => {
+            crate::cli::cmds::model::run(&db, action).await?;
+        }
+        Commands::Session { action, db } => {
+            crate::cli::cmds::session::run(&db, action).await?;
+        }
+        Commands::Doctor { fix } => {
+            crate::cli::cmds::doctor::run(fix).await?;
+        }
+        Commands::Logs { follow, lines, level, prev } => {
+            crate::cli::cmds::logs::run(follow, lines, level.as_deref(), prev).await?;
         }
     }
 
