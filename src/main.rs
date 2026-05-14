@@ -7,7 +7,6 @@ use rupoo::agent::Agent;
 use rupoo::db::TaskRepo;
 use rupoo::mcp::McpToolExecutor;
 use rupoo::skill::SkillManager;
-use rupoo::db::PlanSummary;
 use rupoo::task::{finish_step, think_step, tool_call_step, wait_for_input_step, Plan};
 
 mod cli;
