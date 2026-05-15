@@ -4,7 +4,7 @@ use tracing::{error, info, warn};
 
 use crate::db::TaskRepo;
 use crate::error::{AgentError, AgentResult};
-use crate::llm::{ChatMessage, ChatRole, LlmGateway};
+use crate::llm::{ChatMessage, ChatRole, LlmGateway, TokenUsage};
 use crate::task::{
     Checkpoint, CheckpointStatus, McpToolResult, Plan, PlanStatus, Step, StepStatus,
 };
@@ -75,6 +75,9 @@ pub struct Agent {
     tool_executor: Box<dyn ToolExecutor>,
     llm_gateway: Option<LlmGateway>,
     pub safety_ctx: SafetyContext,
+    /// Token usage from the most recent chat() call.
+    /// Uses Mutex for interior mutability (Cell is not Sync).
+    last_usage: std::sync::Mutex<Option<TokenUsage>>,
 }
 
 impl Agent {
@@ -84,7 +87,13 @@ impl Agent {
             tool_executor,
             llm_gateway: None,
             safety_ctx: SafetyContext::default(),
+            last_usage: std::sync::Mutex::new(None),
         }
+    }
+
+    /// Return token usage from the most recent think step, if available.
+    pub fn last_usage(&self) -> Option<TokenUsage> {
+        self.last_usage.lock().ok().and_then(|g| *g)
     }
 
     /// Attach an LLM gateway so Think steps produce real LLM responses.
@@ -345,7 +354,12 @@ impl Agent {
                 },
             ];
             match gateway.chat(&messages).await {
-                Ok(response) => response,
+                Ok((response, usage)) => {
+                    if let Ok(mut g) = self.last_usage.lock() {
+                        *g = Some(usage);
+                    }
+                    response
+                }
                 Err(e) => {
                     error!(error = %e, "LLM call failed, falling back to dummy");
                     format!("[think] processed: {instruction}")

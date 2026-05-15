@@ -25,6 +25,9 @@ impl std::fmt::Display for MessageRole {
 pub struct ChatMessage {
     pub role: MessageRole,
     pub content: String,
+    /// If true, this message is output from a slash command and should be
+    /// rendered with a distinct monospace style.
+    pub is_command_output: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -59,6 +62,7 @@ impl App {
         self.messages.push(ChatMessage {
             role: MessageRole::User,
             content: text,
+            is_command_output: false,
         });
     }
 
@@ -66,6 +70,15 @@ impl App {
         self.messages.push(ChatMessage {
             role: MessageRole::Assistant,
             content: text,
+            is_command_output: false,
+        });
+    }
+
+    pub fn add_command_output(&mut self, text: String) {
+        self.messages.push(ChatMessage {
+            role: MessageRole::Assistant,
+            content: text,
+            is_command_output: true,
         });
     }
 }

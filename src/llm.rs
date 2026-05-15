@@ -4,6 +4,22 @@ use tracing::info;
 use crate::error::{AgentError, AgentResult};
 
 // ---------------------------------------------------------------------------
+// Token usage
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct TokenUsage {
+    pub prompt_tokens: u32,
+    pub completion_tokens: u32,
+}
+
+impl TokenUsage {
+    pub fn total(&self) -> u32 {
+        self.prompt_tokens + self.completion_tokens
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Configuration
 // ---------------------------------------------------------------------------
 
@@ -98,10 +114,10 @@ impl LlmGateway {
         &self.config
     }
 
-    /// Send messages to the LLM and return the response text.
+    /// Send messages to the LLM and return the response text and token usage.
     /// The first System message is used as the agent's preamble.
     /// Subsequent messages are joined into a single prompt.
-    pub async fn chat(&self, messages: &[ChatMessage]) -> AgentResult<String> {
+    pub async fn chat(&self, messages: &[ChatMessage]) -> AgentResult<(String, TokenUsage)> {
         use rig::completion::request::Prompt;
 
         let (system, rest): (Vec<_>, Vec<_>) =
@@ -123,31 +139,47 @@ impl LlmGateway {
 
         // Rebuild agent per request (lightweight). Each provider returns
         // a different concrete type, so we keep prompting inside the match.
-        let response = match &self.config.provider {
+        let (text, prompt_tokens, completion_tokens): (String, u64, u64) = match &self.config.provider {
             LlmProvider::Anthropic => {
                 let agent = build_anthropic_agent(&self.config, preamble)?;
-                agent.prompt(&prompt).await
+                let response = agent.prompt(prompt)
+                    .extended_details()
+                    .await
+                    .map_err(|e| AgentError::Other(format!("LLM request failed: {e}")))?;
+                (response.output, response.total_usage.input_tokens, response.total_usage.output_tokens)
             }
             LlmProvider::OpenAI => {
                 let agent = build_openai_agent(&self.config, preamble)?;
-                agent.prompt(&prompt).await
+                let response = agent.prompt(prompt)
+                    .extended_details()
+                    .await
+                    .map_err(|e| AgentError::Other(format!("LLM request failed: {e}")))?;
+                (response.output, response.total_usage.input_tokens, response.total_usage.output_tokens)
             }
             LlmProvider::Ollama => {
                 let agent = build_ollama_agent(&self.config, preamble)?;
-                agent.prompt(&prompt).await
+                let response = agent.prompt(prompt)
+                    .extended_details()
+                    .await
+                    .map_err(|e| AgentError::Other(format!("LLM request failed: {e}")))?;
+                (response.output, response.total_usage.input_tokens, response.total_usage.output_tokens)
             }
         };
 
-        let text = response
-            .map_err(|e| AgentError::Other(format!("LLM request failed: {e}")))?;
+        let usage = TokenUsage {
+            prompt_tokens: prompt_tokens as u32,
+            completion_tokens: completion_tokens as u32,
+        };
 
         info!(
             provider = %self.config.provider,
             model = %self.config.model,
+            prompt_tokens = usage.prompt_tokens,
+            completion_tokens = usage.completion_tokens,
             "LLM response received"
         );
 
-        Ok(text)
+        Ok((text, usage))
     }
 }
 
@@ -158,7 +190,7 @@ impl LlmGateway {
 fn build_anthropic_agent(
     config: &LlmConfig,
     preamble: &str,
-) -> AgentResult<impl rig::completion::request::Prompt> {
+) -> AgentResult<rig::agent::Agent<rig::providers::anthropic::completion::CompletionModel>> {
     use rig::agent::AgentBuilder;
 
     let api_key = config.api_key.as_deref()
@@ -188,7 +220,7 @@ fn build_anthropic_agent(
 fn build_openai_agent(
     config: &LlmConfig,
     preamble: &str,
-) -> AgentResult<impl rig::completion::request::Prompt> {
+) -> AgentResult<rig::agent::Agent<rig::providers::openai::completion::CompletionModel>> {
     use rig::agent::AgentBuilder;
 
     let api_key = config.api_key.as_deref()
@@ -240,7 +272,7 @@ fn build_openai_agent(
 fn build_ollama_agent(
     config: &LlmConfig,
     preamble: &str,
-) -> AgentResult<impl rig::completion::request::Prompt> {
+) -> AgentResult<rig::agent::Agent<rig::providers::ollama::CompletionModel>> {
     use rig::agent::AgentBuilder;
 
     let base_url = config.base_url.as_deref().unwrap_or("http://localhost:11434");

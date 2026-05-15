@@ -40,8 +40,8 @@ enum SkillAction {
         /// Skill name
         name: String,
         /// Database path
-        #[arg(long, default_value = "agent.db")]
-        db: String,
+        #[arg(long)]
+        db: Option<String>,
     },
     /// Install the built-in skills
     InstallBuiltin,
@@ -54,9 +54,9 @@ enum SkillAction {
         /// Description (optional)
         #[arg(long, default_value = "Learned from completed plan")]
         description: String,
-        /// Database path (default: ./agent.db)
-        #[arg(long, default_value = "agent.db")]
-        db: String,
+        /// Database path (default: ~/.rupoo/agent.db)
+        #[arg(long)]
+        db: Option<String>,
     },
 }
 
@@ -158,18 +158,18 @@ enum Commands {
         /// Plan ID to execute
         #[arg(long)]
         task: String,
-        /// Database path (default: ./agent.db)
-        #[arg(long, default_value = "agent.db")]
-        db: String,
+        /// Database path (default: ~/.rupoo/agent.db)
+        #[arg(long)]
+        db: Option<String>,
         /// Input to provide if the plan is waiting for user input
         #[arg(long)]
         input: Option<String>,
     },
     /// Run the built-in demo plan
     Demo {
-        /// Database path (default: ./agent.db)
-        #[arg(long, default_value = "agent.db")]
-        db: String,
+        /// Database path (default: ~/.rupoo/agent.db)
+        #[arg(long)]
+        db: Option<String>,
     },
     /// Manage skills
     Skills {
@@ -189,9 +189,9 @@ enum Commands {
     /// Launch the desktop GUI
     #[cfg(feature = "gui")]
     Gui {
-        /// Database path (default: ./agent.db)
-        #[arg(long, default_value = "agent.db")]
-        db: String,
+        /// Database path (default: ~/.rupoo/agent.db)
+        #[arg(long)]
+        db: Option<String>,
     },
     /// Start MCP protocol server over stdio
     McpServer,
@@ -200,25 +200,25 @@ enum Commands {
         /// Short one-line output (for scripts)
         #[arg(long)]
         short: bool,
-        /// Database path (default: ./agent.db)
-        #[arg(long, default_value = "agent.db")]
-        db: String,
+        /// Database path (default: ~/.rupoo/agent.db)
+        #[arg(long)]
+        db: Option<String>,
     },
     /// Show/switch LLM provider and model
     Model {
         #[command(subcommand)]
         action: Option<ModelAction>,
-        /// Database path (default: ./agent.db)
-        #[arg(long, default_value = "agent.db")]
-        db: String,
+        /// Database path (default: ~/.rupoo/agent.db)
+        #[arg(long)]
+        db: Option<String>,
     },
     /// List, show, resume, delete plans
     Session {
         #[command(subcommand)]
         action: SessionAction,
-        /// Database path (default: ./agent.db)
-        #[arg(long, default_value = "agent.db")]
-        db: String,
+        /// Database path (default: ~/.rupoo/agent.db)
+        #[arg(long)]
+        db: Option<String>,
     },
     /// Diagnose configuration and environment
     Doctor {
@@ -243,9 +243,9 @@ enum Commands {
     },
     /// Start in server mode (placeholder for future daemon)
     Serve {
-        /// Database path (default: ./agent.db)
-        #[arg(long, default_value = "agent.db")]
-        db: String,
+        /// Database path (default: ~/.rupoo/agent.db)
+        #[arg(long)]
+        db: Option<String>,
         /// Port to listen on
         #[arg(long, default_value_t = 8080)]
         port: u16,
@@ -253,7 +253,7 @@ enum Commands {
 }
 
 // ---------------------------------------------------------------------------
-// Shared state between rustyline thread and async event loop
+// Shared state between REPL and async event loop
 // ---------------------------------------------------------------------------
 
 struct ReplState {
@@ -284,11 +284,13 @@ async fn main() -> anyhow::Result<()> {
 async fn run_cmd(cmd: Commands) -> anyhow::Result<()> {
     match cmd {
         Commands::Run { task, db, input } => {
+            let db = resolve_db(db);
             let (repo, agent) = build_engine(&db).await?;
             execute_plan(&repo, &agent, &task, input.as_deref()).await?;
         }
         #[cfg(feature = "gui")]
         Commands::Gui { db } => {
+            let db = resolve_db(db);
             launch_gui(&db)?;
         }
         Commands::Git { action } => match action {
@@ -370,6 +372,7 @@ async fn run_cmd(cmd: Commands) -> anyhow::Result<()> {
                 }
             }
             SkillAction::Run { name, db } => {
+                let db = resolve_db(db);
                 let manager = SkillManager::new(SkillManager::default_dir());
                 let skill = manager.load_skill(&name)?;
                 let plan = manager.skill_to_plan(&skill);
@@ -389,6 +392,7 @@ async fn run_cmd(cmd: Commands) -> anyhow::Result<()> {
                 description,
                 db,
             } => {
+                let db = resolve_db(db);
                 let repo = Arc::new(TaskRepo::new(&db)?);
                 let plan = repo.load_plan(&plan_id).await?;
                 let skill =
@@ -404,6 +408,7 @@ async fn run_cmd(cmd: Commands) -> anyhow::Result<()> {
             }
         },
         Commands::Demo { db } => {
+            let db = resolve_db(db);
             let (repo, agent) = build_engine(&db).await?;
 
             let plan = Plan::new(
@@ -453,12 +458,15 @@ async fn run_cmd(cmd: Commands) -> anyhow::Result<()> {
             }
         }
         Commands::Status { short, db } => {
+            let db = resolve_db(db);
             crate::cli::cmds::status::run(&db, short).await?;
         }
         Commands::Model { action, db } => {
+            let db = resolve_db(db);
             crate::cli::cmds::model::run(&db, action).await?;
         }
         Commands::Session { action, db } => {
+            let db = resolve_db(db);
             crate::cli::cmds::session::run(&db, action).await?;
         }
         Commands::Doctor { fix } => {
@@ -472,8 +480,18 @@ async fn run_cmd(cmd: Commands) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Resolve database path, defaulting to ~/.rupoo/agent.db.
+fn resolve_db(db: Option<String>) -> String {
+    db.unwrap_or_else(|| {
+        tracing_setup::data_dir()
+            .join("agent.db")
+            .to_string_lossy()
+            .to_string()
+    })
+}
+
 // ---------------------------------------------------------------------------
-// REPL — fully async, shared tokio runtime
+// REPL — crossterm raw-mode interactive session
 // ---------------------------------------------------------------------------
 
 async fn run_repl() -> anyhow::Result<()> {
@@ -486,132 +504,292 @@ async fn run_repl() -> anyhow::Result<()> {
 
     let rt_handle = tokio::runtime::Handle::current();
     tokio::task::spawn_blocking(move || {
-        run_tui(state, rt_handle)
+        run_repl_sync(state, rt_handle)
     }).await??;
 
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
-// TUI — ratatui-based interactive session
-// ---------------------------------------------------------------------------
-
-fn run_tui(
+/// Synchronous REPL loop using crossterm raw mode for custom terminal input.
+/// Prints a Claude Code-style 4-line prompt block each round.
+fn run_repl_sync(
     state: Arc<ReplState>,
     rt_handle: tokio::runtime::Handle,
 ) -> anyhow::Result<()> {
-    use crossterm::event::{self as cevent, Event, KeyCode, KeyModifiers};
-    use crossterm::terminal::{self as cterm, EnterAlternateScreen, LeaveAlternateScreen};
-    use ratatui::backend::CrosstermBackend;
-    use ratatui::Terminal;
+    use crossterm::terminal::{enable_raw_mode, disable_raw_mode};
+    use crossterm::event::{read, Event, KeyCode, KeyModifiers};
+    use std::io::Write;
 
-    // Enable raw mode + alternate screen
-    cterm::enable_raw_mode()?;
-    let mut stdout = std::io::stdout();
-    crossterm::execute!(stdout, EnterAlternateScreen)?;
+    let history_path = tracing_setup::data_dir().join("history.txt");
+    let mut history: Vec<String> = Vec::new();
 
-    let backend = CrosstermBackend::new(stdout);
-    let mut terminal = Terminal::new(backend)?;
+    // Load history
+    if let Ok(content) = std::fs::read_to_string(&history_path) {
+        history = content.lines().map(|l| l.to_string()).collect();
+    }
+    let mut history_index = history.len();
 
-    let mut app = crate::cli::app::App::new();
-    let (result_tx, result_rx) = std::sync::mpsc::channel::<String>();
+    // Banner
+    println!();
+    println!("  {}  Rupoo — AI Terminal Assistant", console::style("⚡").cyan());
+    println!("  {}  /help for commands  ·  Ctrl+C to quit", console::style("─").dim());
+    println!();
 
-    'tui: loop {
-        // Poll keyboard with 100 ms timeout
-        if cevent::poll(std::time::Duration::from_millis(100))? {
-            let event = cevent::read()?;
-            match &event {
-                Event::Key(key) => {
-                    // Ctrl+C → quit
-                    if key.code == KeyCode::Char('c')
-                        && key.modifiers == KeyModifiers::CONTROL
-                    {
-                        break 'tui;
+    // Session state
+    struct ReplSession {
+        total_tokens: u32,
+        started_at: std::time::Instant,
+        model_label: String,
+    }
+
+    let mut sess = ReplSession {
+        total_tokens: 0,
+        started_at: std::time::Instant::now(),
+        model_label: {
+            // Read current provider/model from DB
+            let db = tracing_setup::data_dir().join("agent.db");
+            let repo = rupoo::db::TaskRepo::new(db.to_str().unwrap_or("agent.db")).ok();
+            match repo {
+                Some(r) => {
+                    let provider = rt_handle.block_on(r.get_setting("active_provider"))
+                        .ok().flatten().unwrap_or_else(|| "none".into());
+                    let model = rt_handle.block_on(r.get_setting(&format!("model.{provider}")))
+                        .ok().flatten().unwrap_or_else(|| "default".into());
+                    format!("{}/{}", provider, model)
+                }
+                None => "unknown".into(),
+            }
+        },
+    };
+
+    // Shortcuts carousel (8 items, 3s each)
+    const SHORTCUTS: &[(&str, &str)] = &[
+        ("/status", "view system health overview"),
+        ("/model show", "check your current AI model"),
+        ("/session list", "browse your past plans"),
+        ("/doctor", "diagnose your environment"),
+        ("/logs 10", "peek at recent agent logs"),
+        ("/config set", "configure API keys & settings"),
+        ("/help", "list all available commands"),
+        ("/quit", "exit Rupoo"),
+    ];
+
+    fn current_shortcut() -> &'static (&'static str, &'static str) {
+        let secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let idx = (secs / 3) as usize % SHORTCUTS.len();
+        &SHORTCUTS[idx]
+    }
+
+    enable_raw_mode()?;
+
+    // Character-by-character input reader with history navigation
+    let read_input = |hist: &mut Vec<String>, hist_idx: &mut usize| -> std::io::Result<String> {
+        let mut buf = String::new();
+        let mut cursor = 0usize;
+
+        loop {
+            match read()? {
+                Event::Key(ke) => match ke.code {
+                    KeyCode::Char(c) if ke.modifiers == KeyModifiers::NONE || ke.modifiers == KeyModifiers::SHIFT => {
+                        let ch = if ke.modifiers == KeyModifiers::SHIFT {
+                            c.to_ascii_uppercase()
+                        } else {
+                            c
+                        };
+                        buf.insert(cursor, ch);
+                        cursor += 1;
+                        print!("\r\x1b[K> {}", buf);
+                        if cursor < buf.len() {
+                            print!("\x1b[{}D", (buf.len() - cursor) as u16);
+                        }
                     }
-
-                    // Ctrl+D → quit
-                    if key.code == KeyCode::Char('d')
-                        && key.modifiers == KeyModifiers::CONTROL
-                    {
-                        break 'tui;
+                    KeyCode::Enter => {
+                        let trimmed = buf.trim().to_string();
+                        if !trimmed.is_empty() && hist.last().map(|l| l != &trimmed).unwrap_or(true) {
+                            hist.push(trimmed.clone());
+                        }
+                        *hist_idx = hist.len();
+                        println!();
+                        return Ok(trimmed);
                     }
-
-                    // Enter (without Shift) → submit
-                    if key.code == KeyCode::Enter
-                        && !key.modifiers.contains(KeyModifiers::SHIFT)
-                    {
-                        let lines: Vec<String> = app.input.lines().to_vec();
-                        let text = lines.join("\n").trim().to_string();
-                        if !text.is_empty() {
-                            // Handle exit commands
-                            if text == "/exit" || text == "exit" || text == "quit" {
-                                break 'tui;
-                            }
-
-                            app.add_user_message(text.clone());
-                            app.input = tui_textarea::TextArea::default();
-                            app.loading = true;
-                            app.status = "Processing...".into();
-
-                            let state = state.clone();
-                            let tx = result_tx.clone();
-
-                            // Determine if slash command or NL
-                            if text.starts_with('/') {
-                                rt_handle.spawn(async move {
-                                    let result = handle_cmd(&state, &text).await
-                                        .unwrap_or_else(|e| format!("Error: {e}"));
-                                    let _ = tx.send(result);
-                                });
-                            } else {
-                                rt_handle.spawn(async move {
-                                    let result = execute_nl(&state, &text).await
-                                        .unwrap_or_else(|e| format!("Error: {e}"));
-                                    let _ = tx.send(result);
-                                });
+                    KeyCode::Backspace => {
+                        if cursor > 0 {
+                            buf.remove(cursor - 1);
+                            cursor -= 1;
+                            print!("\r\x1b[K> {}", buf);
+                            if cursor < buf.len() {
+                                print!("\x1b[{}D", (buf.len() - cursor) as u16);
                             }
                         }
-                        continue;
                     }
-
-                    // Tab → show help
-                    if key.code == KeyCode::Tab {
-                        app.show_help = !app.show_help;
-                        continue;
+                    KeyCode::Left => {
+                        if cursor > 0 { cursor -= 1; print!("\x1b[1D"); }
                     }
-
-                    // Esc → cancel loading
-                    if key.code == KeyCode::Esc && app.loading {
-                        app.loading = false;
-                        app.status = "Cancelled.".into();
-                        continue;
+                    KeyCode::Right => {
+                        if cursor < buf.len() { cursor += 1; print!("\x1b[1C"); }
                     }
-
-                    // All other keys → input widget
-                    app.input.input(event.clone());
-                }
+                    KeyCode::Up => {
+                        if *hist_idx > 0 {
+                            *hist_idx -= 1;
+                            buf = hist[*hist_idx].clone();
+                            cursor = buf.len();
+                            print!("\r\x1b[K> {}", buf);
+                        }
+                    }
+                    KeyCode::Down => {
+                        if *hist_idx < hist.len() - 1 {
+                            *hist_idx += 1;
+                            buf = hist[*hist_idx].clone();
+                            cursor = buf.len();
+                            print!("\r\x1b[K> {}", buf);
+                        } else {
+                            *hist_idx = hist.len();
+                            buf.clear();
+                            cursor = 0;
+                            print!("\r\x1b[K> ");
+                        }
+                    }
+                    KeyCode::Home | KeyCode::Char('a') if ke.modifiers.contains(KeyModifiers::CONTROL) => {
+                        if cursor > 0 { print!("\x1b[{}D", cursor as u16); cursor = 0; }
+                    }
+                    KeyCode::End | KeyCode::Char('e') if ke.modifiers.contains(KeyModifiers::CONTROL) => {
+                        if cursor < buf.len() {
+                            let right = (buf.len() - cursor) as u16;
+                            print!("\x1b[{}C", right);
+                            cursor = buf.len();
+                        }
+                    }
+                    KeyCode::Char('c') if ke.modifiers.contains(KeyModifiers::CONTROL) => {
+                        println!("^C");
+                        return Ok(String::new());
+                    }
+                    KeyCode::Char('d') if ke.modifiers.contains(KeyModifiers::CONTROL) => {
+                        if buf.is_empty() { return Ok(String::new()); }
+                    }
+                    KeyCode::Char('u') if ke.modifiers.contains(KeyModifiers::CONTROL) => {
+                        buf.clear(); cursor = 0;
+                        print!("\r\x1b[K> ");
+                    }
+                    KeyCode::Char('w') if ke.modifiers.contains(KeyModifiers::CONTROL) => {
+                        if cursor > 0 {
+                            let before = &buf[..cursor];
+                            if let Some(i) = before[..before.len().saturating_sub(1)].rfind(' ') {
+                                let keep = before[..=i].to_string();
+                                let after: String = buf[cursor..].to_string();
+                                cursor = keep.len();
+                                buf = keep + &after;
+                            } else {
+                                let after: String = buf[cursor..].to_string();
+                                buf = after;
+                                cursor = 0;
+                            }
+                            print!("\r\x1b[K> {}", buf);
+                            if cursor < buf.len() {
+                                print!("\x1b[{}D", (buf.len() - cursor) as u16);
+                            }
+                        }
+                    }
+                    _ => {}
+                },
                 _ => {}
             }
+            std::io::stdout().flush().ok();
         }
+    };
 
-        // Check for agent responses
-        while let Ok(response) = result_rx.try_recv() {
-            app.add_assistant_message(response);
-            app.loading = false;
-            app.status = "Ready".into();
-        }
+    // Main REPL loop
+    loop {
+        let sc = current_shortcut();
+        let elapsed = sess.started_at.elapsed();
+        let elapsed_str = format!("{:02}:{:02}",
+            elapsed.as_secs() / 60,
+            elapsed.as_secs() % 60);
+        let tok_str = if sess.total_tokens >= 1000 {
+            format!("{:.1}k", sess.total_tokens as f64 / 1000.0)
+        } else {
+            format!("{}", sess.total_tokens)
+        };
+        let plan_count = rt_handle
+            .block_on(state.repo.list_plans(1, 0))
+            .map(|p| p.len())
+            .unwrap_or(0);
 
-        // Render
-        if let Err(e) = terminal.draw(|f| crate::cli::ui::render(f, &app)) {
-            eprintln!("Render error: {e}");
+        // 1. Separator line
+        let dash = "─".repeat(60);
+        println!("  {}", console::style(&dash).dim());
+
+        // 2. User input line
+        print!("> ");
+        std::io::stdout().flush()?;
+
+        let input = read_input(&mut history, &mut history_index)?;
+
+        // 3. Separator line
+        println!("  {}", console::style(&dash).dim());
+
+        // 4. Status bar
+        println!("  {} /{} — {}  {}  ● {} | {} tok | ⏱ {} | 📦 {} plans",
+            console::style("⌘").dim(),
+            console::style(sc.0).cyan(),
+            console::style(sc.1).dim(),
+            console::style("│").dim(),
+            sess.model_label,
+            tok_str,
+            elapsed_str,
+            plan_count,
+        );
+
+        // Exit commands
+        if input == "/exit" || input == "/quit" || input == "exit" || input == "quit" {
+            println!("{}", console::style("Bye!").dim());
             break;
+        }
+
+        // Handle empty input
+        if input.is_empty() {
+            continue;
+        }
+
+        // Dispatch command or NL
+        if input.starts_with('/') {
+            let result = match rt_handle.block_on(handle_cmd(&state, &input)) {
+                Ok(out) => console::strip_ansi_codes(&out).to_string(),
+                Err(e) => format!("Error: {e}"),
+            };
+            if !result.is_empty() {
+                println!("{}\n", result);
+            }
+        } else {
+            let mut prog = crate::cli::progress::StepProgress::new();
+            let truncated: String = input.chars().take(40).collect();
+            prog.start("□", &format!("Thinking about: {truncated}"));
+            match rt_handle.block_on(execute_nl(&state, &input)) {
+                Ok(out) => {
+                    prog.complete();
+                    if let Some(u) = state.agent.last_usage() {
+                        sess.total_tokens += u.prompt_tokens + u.completion_tokens;
+                        crate::cli::progress::StepProgress::token_badge(u.prompt_tokens, u.completion_tokens);
+                    }
+                    crate::cli::progress::StepProgress::separator();
+                    crate::cli::progress::StepProgress::response(&out);
+                }
+                Err(e) => {
+                    prog.fail(&e.to_string());
+                }
+            }
         }
     }
 
-    // Cleanup
-    cterm::disable_raw_mode()?;
-    crossterm::execute!(std::io::stdout(), LeaveAlternateScreen)?;
-    terminal.show_cursor()?;
+    // Save history + cleanup
+    if let Ok(mut f) = std::fs::File::create(&history_path) {
+        for line in &history {
+            let _ = writeln!(f, "{}", line);
+        }
+    }
+    disable_raw_mode()?;
     Ok(())
 }
 
@@ -754,6 +932,83 @@ async fn handle_cmd(state: &ReplState, cmd: &str) -> anyhow::Result<String> {
                 }
                 _ => Ok("  Usage: /git status".into()),
             }
+        }
+        "/status" | "/st" => {
+            let db = tracing_setup::data_dir().join("agent.db");
+            crate::cli::cmds::status::output(db.to_str().unwrap_or("agent.db"), false).await
+        }
+        "/model" => {
+            let db = tracing_setup::data_dir().join("agent.db");
+            match args.first().copied().unwrap_or("show") {
+                "show" => {
+                    crate::cli::cmds::model::output(
+                        db.to_str().unwrap_or("agent.db"),
+                        Some(ModelAction::Show),
+                    ).await
+                }
+                "list" => {
+                    crate::cli::cmds::model::output(
+                        db.to_str().unwrap_or("agent.db"),
+                        Some(ModelAction::List),
+                    ).await
+                }
+                "set" => {
+                    let target = args.get(1).copied().map(|s| s.to_string());
+                    crate::cli::cmds::model::output(
+                        db.to_str().unwrap_or("agent.db"),
+                        Some(ModelAction::Set { target }),
+                    ).await
+                }
+                _ => Ok("  Usage: /model [show|list|set <provider>]".into()),
+            }
+        }
+        "/session" | "/s" | "/plans" => {
+            let db = tracing_setup::data_dir().join("agent.db");
+            match args.first().copied().unwrap_or("list") {
+                "list" => {
+                    let limit = args.get(1)
+                        .and_then(|s| s.parse::<usize>().ok())
+                        .unwrap_or(10);
+                    crate::cli::cmds::session::output(
+                        db.to_str().unwrap_or("agent.db"),
+                        SessionAction::List { limit },
+                    ).await
+                }
+                "show" => {
+                    let id = args.get(1).unwrap_or(&"").to_string();
+                    crate::cli::cmds::session::output(
+                        db.to_str().unwrap_or("agent.db"),
+                        SessionAction::Show { id },
+                    ).await
+                }
+                "delete" => {
+                    let id = args.get(1).unwrap_or(&"").to_string();
+                    crate::cli::cmds::session::output(
+                        db.to_str().unwrap_or("agent.db"),
+                        SessionAction::Delete { id },
+                    ).await
+                }
+                "prune" => {
+                    let days = args.get(1)
+                        .and_then(|s| s.parse::<u64>().ok())
+                        .unwrap_or(30);
+                    crate::cli::cmds::session::output(
+                        db.to_str().unwrap_or("agent.db"),
+                        SessionAction::Prune { days },
+                    ).await
+                }
+                _ => Ok("  Usage: /session [list|show <id>|delete <id>|prune [days]]".into()),
+            }
+        }
+        "/doctor" | "/diag" => {
+            crate::cli::cmds::doctor::output(true).await
+        }
+        "/logs" | "/log" => {
+            let lines = args.first()
+                .and_then(|s| s.parse::<usize>().ok())
+                .unwrap_or(50);
+            let level = args.get(1).copied();
+            crate::cli::cmds::logs::output(false, lines, level, false).await
         }
         _ => Ok(format!("  {} Unknown: {}. Try /help", style("?").yellow(), cmd)),
     }

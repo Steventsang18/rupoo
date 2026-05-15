@@ -58,11 +58,11 @@ fn render_chat(frame: &mut Frame, area: Rect, app: &App) {
             )),
             Line::from(Span::raw("")),
             Line::from(Span::styled(
-                "  Type a message below and press Enter to start.",
+                "  Send a message or type /help for commands.",
                 Style::default().fg(Color::DarkGray),
             )),
             Line::from(Span::styled(
-                "  /help  for available commands  ·  Ctrl+C to quit",
+                "  Ctrl+C to quit",
                 Style::default().fg(Color::DarkGray),
             )),
         ]));
@@ -70,18 +70,54 @@ fn render_chat(frame: &mut Frame, area: Rect, app: &App) {
         return;
     }
 
-    let mut text = Text::default();
+    // Build chat lines with distinct styling for command output
+    let mut lines: Vec<Line<'_>> = Vec::new();
+    let mut estimated_visual_lines: u16 = 0;
+
     for msg in &app.messages {
-        let role_style = match msg.role {
+        let role_label = format!(" {}", msg.role);
+        let header_style = match msg.role {
             MessageRole::User => Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
             MessageRole::Assistant => Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
         };
-        text.push_line(Line::from(Span::styled(format!(" {}", msg.role), role_style)));
-        text.push_line(Line::from(Span::raw(format!(" {}", msg.content))));
-        text.push_line(Line::from(""));
+
+        if msg.is_command_output {
+            // Command output header
+            lines.push(Line::from(Span::styled(
+                " ── cmd ──",
+                Style::default().fg(Color::Magenta).add_modifier(Modifier::DIM),
+            )));
+            // Command output body with distinct styling
+            lines.push(Line::from(Span::styled(
+                format!(" {}", msg.content),
+                Style::default().fg(Color::White),
+            )));
+            estimated_visual_lines += 1; // header
+            let cap = area.width.max(4) as usize - 4;
+            let body_lines = if cap > 0 { (msg.content.len() + cap - 1) / cap } else { 1 };
+            estimated_visual_lines += body_lines as u16;
+        } else {
+            // Normal message header
+            lines.push(Line::from(Span::styled(role_label, header_style)));
+            // Message body
+            lines.push(Line::from(Span::styled(
+                format!(" {}", msg.content),
+                Style::default().fg(Color::White),
+            )));
+            estimated_visual_lines += 1; // header
+            let cap = area.width.max(4) as usize - 4;
+            let body_lines = if cap > 0 { (msg.content.len() + cap - 1) / cap } else { 1 };
+            estimated_visual_lines += body_lines as u16;
+        }
+        lines.push(Line::from(""));
+        estimated_visual_lines += 1; // spacer
     }
 
-    let paragraph = Paragraph::new(text)
+    // Scroll to the bottom: offset = content_height - viewport_height
+    let scroll = estimated_visual_lines.saturating_sub(area.height);
+
+    let paragraph = Paragraph::new(Text::from(lines))
+        .scroll((scroll, 0))
         .block(Block::default().borders(Borders::TOP).border_style(Style::default().fg(Color::DarkGray)))
         .wrap(Wrap { trim: false });
     frame.render_widget(paragraph, area);
@@ -94,7 +130,6 @@ fn render_input(frame: &mut Frame, area: Rect, app: &App) {
         .borders(Borders::TOP)
         .border_style(Style::default().fg(Color::DarkGray));
 
-    // Constrain the inner area for the textarea
     let inner = input_block.inner(area);
     frame.render_widget(input_block, area);
     frame.render_widget(&app.input, inner);

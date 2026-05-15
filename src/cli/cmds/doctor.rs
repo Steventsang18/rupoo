@@ -32,7 +32,22 @@ fn status_summary(results: &[CheckResult]) -> (usize, usize, usize) {
 }
 
 pub async fn run(fix: bool) -> Result<()> {
-    println!("{}", style("Rupoo Diagnostics").bold());
+    let out = output(false).await?;
+    print!("{out}");
+    if fix {
+        let (_, warn, fail) = status_summary(&all_checks().await);
+        if warn + fail > 0 {
+            println!("\n{}", style("Attempting fixes...").yellow());
+            run_fixes().await?;
+        }
+    }
+    Ok(())
+}
+
+pub async fn output(show_hint: bool) -> Result<String> {
+    use std::fmt::Write;
+    let mut out = String::new();
+    writeln!(out, "{}", style("Rupoo Diagnostics").bold())?;
     let results = all_checks().await;
 
     for r in &results {
@@ -43,30 +58,29 @@ pub async fn run(fix: bool) -> Result<()> {
         } else {
             style("✗").red()
         };
-        println!("  {}  {}", icon, style(r.name).white().bold());
+        writeln!(out, "  {}  {}", icon, style(r.name).white().bold())?;
         if let Some(msg) = &r.message {
-            println!("{}", indent(msg, 4));
+            writeln!(out, "{}", indent(msg, 4))?;
         }
     }
 
-    println!("{}", style("─".repeat(50)).dim());
+    writeln!(out, "{}", style("─".repeat(50)).dim())?;
     let (pass, warn, fail) = status_summary(&results);
-    println!("{} {}  {} {}  {} {}",
+    writeln!(out, "{} {}  {} {}  {} {}",
         style("●").green(),
         style(format!("{pass} passed")).green(),
         style("●").yellow(),
         style(format!("{warn} warnings")).yellow(),
         if fail == 0 { style("●").green() } else { style("✗").red() },
         style(format!("{fail} errors")).red(),
-    );
+    )?;
 
-    if fix && (warn > 0 || fail > 0) {
-        println!("\n{}", style("Attempting fixes...").yellow());
-        run_fixes().await?;
-    } else if warn + fail > 0 && !fix {
-        println!("  {} Run with --fix to auto-resolve fixable issues.", style("→").dim());
+    let (_, warn, fail) = status_summary(&results);
+    if show_hint && warn + fail > 0 {
+        writeln!(out, "  {} Run with --fix to auto-resolve fixable issues.", style("→").dim())?;
     }
-    Ok(())
+
+    Ok(out)
 }
 
 async fn all_checks() -> Vec<CheckResult> {

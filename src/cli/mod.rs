@@ -1,3 +1,2 @@
-pub mod app;
-pub mod ui;
 pub mod cmds;
+pub mod progress;

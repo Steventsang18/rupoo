@@ -6,34 +6,42 @@ use chrono::Utc;
 use std::sync::Arc;
 
 pub async fn run(db_path: &str, action: crate::SessionAction) -> Result<()> {
-    let repo = Arc::new(TaskRepo::new(db_path)?);
-
-    match action {
-        crate::SessionAction::List { limit } => cmd_list(&repo, limit).await?,
-        crate::SessionAction::Show { id } => cmd_show(&repo, &id).await?,
-        crate::SessionAction::Resume { id, .. } => cmd_resume(&id).await?,
-        crate::SessionAction::Delete { id } => cmd_delete(&repo, &id).await?,
-        crate::SessionAction::Prune { days } => cmd_prune(&repo, days).await?,
-    }
+    let out = output(db_path, action).await?;
+    print!("{out}");
     Ok(())
 }
 
-async fn cmd_list(repo: &TaskRepo, limit: usize) -> Result<()> {
+pub async fn output(db_path: &str, action: crate::SessionAction) -> Result<String> {
+    let repo = Arc::new(TaskRepo::new(db_path)?);
+
+    match action {
+        crate::SessionAction::List { limit } => cmd_list_string(&repo, limit).await,
+        crate::SessionAction::Show { id } => cmd_show_string(&repo, &id).await,
+        crate::SessionAction::Resume { id, .. } => cmd_resume_string(&id).await,
+        crate::SessionAction::Delete { id } => cmd_delete_string(&repo, &id).await,
+        crate::SessionAction::Prune { days } => cmd_prune_string(&repo, days).await,
+    }
+}
+
+async fn cmd_list_string(repo: &TaskRepo, limit: usize) -> Result<String> {
+    use std::fmt::Write;
+    let mut out = String::new();
     let plans = repo.list_plans(limit, 0).await?;
     if plans.is_empty() {
-        println!("{} No plans found.", style("ℹ").yellow());
-        return Ok(());
+        writeln!(out, "{} No plans found.", style("ℹ").yellow())?;
+        return Ok(out);
     }
 
-    println!(
+    writeln!(
+        out,
         "{:<10} {:<30} {:<8} {:<16} {:<22}",
         style("ID").bold(),
         style("Name").bold(),
         style("Steps").bold(),
         style("Status").bold(),
         style("Updated").bold(),
-    );
-    println!("{}", style("─".repeat(86)).dim());
+    )?;
+    writeln!(out, "{}", style("─".repeat(86)).dim())?;
 
     for p in &plans {
         let short_id: String = p.id.chars().take(8).collect();
@@ -44,24 +52,27 @@ async fn cmd_list(repo: &TaskRepo, limit: usize) -> Result<()> {
             "Pending" => style("○ Pending").dim(),
             s => style(s).dim(),
         };
-        println!(
+        writeln!(
+            out,
             "{:<10} {:<30} {:<8} {:<16} {:<22}",
             style(short_id).dim(),
             &p.name,
             format!("{}/{}", p.current_step_index, p.total_steps),
             status,
             style(&p.updated_at).dim(),
-        );
+        )?;
     }
-    Ok(())
+    Ok(out)
 }
 
-async fn cmd_show(repo: &TaskRepo, plan_id: &str) -> Result<()> {
+async fn cmd_show_string(repo: &TaskRepo, plan_id: &str) -> Result<String> {
+    use std::fmt::Write;
     let plan = repo
         .load_plan(plan_id)
         .await
         .map_err(|_| anyhow::anyhow!("Plan not found: {}", plan_id))?;
 
+    let mut out = String::new();
     let status_icon = match &plan.status {
         PlanStatus::Completed => style("✓ Completed").green(),
         PlanStatus::Running => style("▶ Running").yellow(),
@@ -70,30 +81,33 @@ async fn cmd_show(repo: &TaskRepo, plan_id: &str) -> Result<()> {
         PlanStatus::WaitingForInput => style("⊘ Waiting").cyan(),
     };
 
-    println!(
+    writeln!(
+        out,
         "{} {}  {}",
         style("Plan:").cyan().bold(),
         style(&plan.name).white().bold(),
         style(&plan.id).dim()
-    );
-    println!(
+    )?;
+    writeln!(
+        out,
         "{}  {}  {}/{} steps",
         style("Status:").dim(),
         status_icon,
         plan.current_step_index,
         plan.steps.len(),
-    );
-    println!();
-    println!("{}", style("Steps:").dim());
+    )?;
+    writeln!(out)?;
+    writeln!(out, "{}", style("Steps:").dim())?;
     for (i, step) in plan.steps.iter().enumerate() {
-        println!(
+        writeln!(
+            out,
             "  {} [{}] {}",
             step_icon(step.status()),
             i,
             step_label(step),
-        );
+        )?;
     }
-    Ok(())
+    Ok(out)
 }
 
 fn step_icon(status: &StepStatus) -> String {
@@ -132,28 +146,31 @@ fn step_label(step: &Step) -> String {
     }
 }
 
-async fn cmd_resume(plan_id: &str) -> Result<()> {
-    println!("Use: rupoo run --task {} --db agent.db", plan_id);
-    println!("  or from TUI: /run {}", plan_id);
-    Ok(())
+async fn cmd_resume_string(plan_id: &str) -> Result<String> {
+    Ok(format!("Use: rupoo run --task {} --db agent.db\n  or from TUI: /run {}", plan_id, plan_id))
 }
 
-async fn cmd_delete(repo: &TaskRepo, plan_id: &str) -> Result<()> {
+async fn cmd_delete_string(repo: &TaskRepo, plan_id: &str) -> Result<String> {
+    use std::fmt::Write;
     repo.delete_plan(plan_id).await?;
-    println!("{} Plan {} deleted.", style("✓").green(), plan_id);
-    Ok(())
+    let mut out = String::new();
+    writeln!(out, "{} Plan {} deleted.", style("✓").green(), plan_id)?;
+    Ok(out)
 }
 
-async fn cmd_prune(repo: &TaskRepo, days: u64) -> Result<()> {
+async fn cmd_prune_string(repo: &TaskRepo, days: u64) -> Result<String> {
+    use std::fmt::Write;
     let before = (Utc::now() - chrono::Duration::days(days as i64)).to_rfc3339();
     let deleted = repo.prune_plans(&before).await?;
-    println!(
+    let mut out = String::new();
+    writeln!(
+        out,
         "{} Pruned {} completed/failed plans older than {} days.",
         style("✓").green(),
         deleted,
         days
-    );
-    Ok(())
+    )?;
+    Ok(out)
 }
 
 #[cfg(test)]

@@ -6,6 +6,14 @@ use rupoo::db::TaskRepo;
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 pub async fn run(db_path: &str, short: bool) -> Result<()> {
+    let out = output(db_path, short).await?;
+    print!("{out}");
+    Ok(())
+}
+
+pub async fn output(db_path: &str, short: bool) -> Result<String> {
+    use std::fmt::Write;
+    let mut out = String::new();
     let repo = Arc::new(TaskRepo::new(db_path)?);
 
     let plan_counts = repo.count_plans_by_status().await?;
@@ -25,48 +33,47 @@ pub async fn run(db_path: &str, short: bool) -> Result<()> {
     ).list_skills().unwrap_or_default();
 
     if short {
-        println!("{}", format_short_line(
+        writeln!(out, "{}", format_short_line(
             VERSION, total_plans as usize, &provider, &model, skills.len(),
-        ));
+        ))?;
     } else {
-        println!("{} {}", style("Rupoo").bold(), style(VERSION).dim());
+        writeln!(out, "{} {}", style("Rupoo").bold(), style(VERSION).dim())?;
 
-        let _total_icon = if has_key { "●" } else { "○" };
-        println!("  {}  {:<12} {}     {}",
+        writeln!(out, "  {}  {:<12} {}     {}",
             style("├──").dim(),
             style("Data").cyan(),
             style(db_path).white(),
             style("(WAL mode)").dim(),
-        );
-        println!("  {}  {:<12} {}",
+        )?;
+        writeln!(out, "  {}  {:<12} {}",
             style("├──").dim(),
             style("Plans").cyan(),
             build_status_counts(&plan_counts),
-        );
-        println!("  {}  {:<12} {}  {} / {}",
+        )?;
+        writeln!(out, "  {}  {:<12} {}  {} / {}",
             style("├──").dim(),
             style("LLM").cyan(),
             if has_key { style("●").green() } else { style("○").yellow() },
             style(&provider).white(),
             style(&model).dim(),
-        );
-        println!("  {}  {:<12} {} installed {}",
+        )?;
+        writeln!(out, "  {}  {:<12} {} installed {}",
             style("├──").dim(),
             style("Skills").cyan(),
             skills.len(),
             if skills.is_empty() { String::new() }
             else { format!("({})", skills.join(", ")) },
-        );
-        println!("  {}  {:<12} {} {}",
+        )?;
+        writeln!(out, "  {}  {:<12} {} {}",
             style("├──").dim(),
             style("Memory").cyan(),
             style("●").green(),
             style("entries (FTS5 indexed)").dim(),
-        );
-        print_git_status()?;
-        print_log_info()?;
+        )?;
+        out.push_str(&git_status_line()?);
+        out.push_str(&log_info_line()?);
     }
-    Ok(())
+    Ok(out)
 }
 
 fn build_status_counts(counts: &[(String, i64)]) -> String {
@@ -88,7 +95,9 @@ fn format_short_line(ver: &str, plans: usize, provider: &str, model: &str, skill
     format!("Rupoo {} | {} plans | {}/{} | {} skills", ver, plans, provider, model, skills)
 }
 
-fn print_git_status() -> Result<()> {
+fn git_status_line() -> Result<String> {
+    use std::fmt::Write;
+    let mut out = String::new();
     match rupoo::git::GitRepo::open(".") {
         Ok(git) => {
             let branch = git.current_branch().unwrap_or_default();
@@ -98,22 +107,24 @@ fn print_git_status() -> Result<()> {
             } else {
                 format!("{} uncommitted", files.len())
             };
-            println!("  {}  {:<12} {}  {}",
+            writeln!(out, "  {}  {:<12} {}  {}",
                 style("├──").dim(), style("Git").cyan(),
                 style(branch).green(), style(status).dim(),
-            );
+            )?;
         }
         Err(_) => {
-            println!("  {}  {:<12} {}",
+            writeln!(out, "  {}  {:<12} {}",
                 style("├──").dim(), style("Git").cyan(),
                 style("(not a git repository)").dim(),
-            );
+            )?;
         }
     }
-    Ok(())
+    Ok(out)
 }
 
-fn print_log_info() -> Result<()> {
+fn log_info_line() -> Result<String> {
+    use std::fmt::Write;
+    let mut out = String::new();
     let log_path = crate::tracing_setup::data_dir().join("rupoo.log");
     let size = if log_path.exists() {
         let meta = std::fs::metadata(&log_path)?;
@@ -125,11 +136,11 @@ fn print_log_info() -> Result<()> {
     } else {
         "none".into()
     };
-    println!("  {}  {:<12} {}  ({})",
+    writeln!(out, "  {}  {:<12} {}  ({})",
         style("└──").dim(), style("Log").cyan(),
         style(log_path.display()).dim(), style(size).dim(),
-    );
-    Ok(())
+    )?;
+    Ok(out)
 }
 
 #[cfg(test)]

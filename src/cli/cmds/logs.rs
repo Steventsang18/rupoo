@@ -4,26 +4,43 @@ use anyhow::Result;
 use console::style;
 
 pub async fn run(follow: bool, lines: usize, level: Option<&str>, prev: bool) -> Result<()> {
+    let out = output(follow, lines, level, prev).await?;
+    print!("{out}");
+
+    if follow {
+        let path = log_path(prev);
+        let content = fs::read_to_string(&path)?;
+        follow_file(&path, content.lines().count(), level).await?;
+    }
+
+    Ok(())
+}
+
+pub async fn output(follow: bool, lines: usize, level: Option<&str>, prev: bool) -> Result<String> {
+    use std::fmt::Write;
+    let mut out = String::new();
     let path = log_path(prev);
 
     if !path.exists() {
-        println!(
+        writeln!(
+            out,
             "{} No log file found at {}",
             style("ℹ").yellow(),
             path.display()
-        );
-        return Ok(());
+        )?;
+        return Ok(out);
     }
 
     if !follow {
-        println!(
+        writeln!(
+            out,
             "{} Showing last {} lines from {}",
             style("→").dim(),
             lines,
             path.display()
-        );
+        )?;
     }
-    println!("{}", style("─".repeat(60)).dim());
+    writeln!(out, "{}", style("─".repeat(60)).dim())?;
 
     let content = fs::read_to_string(&path)?;
     let all_lines: Vec<&str> = content.lines().collect();
@@ -35,14 +52,10 @@ pub async fn run(follow: bool, lines: usize, level: Option<&str>, prev: bool) ->
     let filtered = filter_lines(tail, level);
 
     for line in &filtered {
-        println!("{line}");
+        writeln!(out, "{line}")?;
     }
 
-    if follow {
-        follow_file(&path, all_lines.len(), level).await?;
-    }
-
-    Ok(())
+    Ok(out)
 }
 
 fn log_path(prev: bool) -> PathBuf {

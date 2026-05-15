@@ -10,18 +10,24 @@ const PROVIDER_KEYS: &[(&str, &str, &str, &str)] = &[
 ];
 
 pub async fn run(db_path: &str, action: Option<crate::ModelAction>) -> Result<()> {
+    let out = output(db_path, action).await?;
+    print!("{out}");
+    Ok(())
+}
+
+pub async fn output(db_path: &str, action: Option<crate::ModelAction>) -> Result<String> {
     let repo = Arc::new(TaskRepo::new(db_path)?);
     let action = action.unwrap_or(crate::ModelAction::Show);
 
     match action {
-        crate::ModelAction::Show => cmd_show(&repo).await?,
-        crate::ModelAction::List => cmd_list(&repo).await?,
-        crate::ModelAction::Set { target } => cmd_set(&repo, target.as_deref()).await?,
+        crate::ModelAction::Show => cmd_show_string(&repo).await,
+        crate::ModelAction::List => cmd_list_string(&repo).await,
+        crate::ModelAction::Set { target } => cmd_set_string(&repo, target.as_deref()).await,
     }
-    Ok(())
 }
 
-async fn cmd_show(repo: &TaskRepo) -> Result<()> {
+async fn cmd_show_string(repo: &TaskRepo) -> Result<String> {
+    use std::fmt::Write;
     let provider = repo.get_setting("active_provider").await?
         .unwrap_or_else(|| "none".into());
     let model = repo.get_setting(&format!("model.{provider}")).await?
@@ -29,30 +35,33 @@ async fn cmd_show(repo: &TaskRepo) -> Result<()> {
         .unwrap_or_else(|| "(unknown)".into());
     let api_key = repo.get_setting(&format!("api_key.{provider}")).await?;
 
-    println!("{}", style("Current LLM Configuration:").bold());
+    let mut out = String::new();
+    writeln!(out, "{}", style("Current LLM Configuration:").bold())?;
     let icon = if api_key.is_some() { "●" } else { "○" };
     let key_display = render_key_status(api_key.as_deref());
-    println!("  {}  {}  {} / {}",
+    writeln!(out, "  {}  {}  {} / {}",
         icon,
         style("Provider:").cyan(),
         style(&provider).white(),
         style(&model).dim(),
-    );
-    println!("  {}  {}  {}",
-        style("      "), // align with icon width
+    )?;
+    writeln!(out, "  {}  {}  {}",
+        style("      "),
         style("API Key:").cyan(),
         key_display,
-    );
-    Ok(())
+    )?;
+    Ok(out)
 }
 
-async fn cmd_list(repo: &TaskRepo) -> Result<()> {
-    println!("{:<12} {:<30} {:<22}  Status",
+async fn cmd_list_string(repo: &TaskRepo) -> Result<String> {
+    use std::fmt::Write;
+    let mut out = String::new();
+    writeln!(out, "{:<12} {:<30} {:<22}  Status",
         style("Provider").bold(),
         style("Default Model").bold(),
         style("Config Key").bold(),
-    );
-    println!("{}", style("─".repeat(76)).dim());
+    )?;
+    writeln!(out, "{}", style("─".repeat(76)).dim())?;
 
     for (name, model, key, _) in PROVIDER_KEYS {
         let key_val = repo.get_setting(key).await?;
@@ -63,23 +72,18 @@ async fn cmd_list(repo: &TaskRepo) -> Result<()> {
         } else {
             style("○ not set").yellow().to_string()
         };
-        println!("{:<12} {:<30} {:<22}  {}",
+        writeln!(out, "{:<12} {:<30} {:<22}  {}",
             name, model, key, status,
-        );
+        )?;
     }
-    Ok(())
+    Ok(out)
 }
 
-async fn cmd_set(repo: &TaskRepo, target: Option<&str>) -> Result<()> {
+async fn cmd_set_string(repo: &TaskRepo, target: Option<&str>) -> Result<String> {
+    use std::fmt::Write;
     let target = match target {
         Some(t) => t.to_owned(),
-        None => {
-            let input = show_interactive_picker(repo).await?;
-            if input.is_empty() {
-                return Ok(());
-            }
-            input
-        }
+        None => return Ok("  Usage: /model set <provider> (interactive picker not available in TUI)".into()),
     };
 
     let (provider, model) = parse_target(&target)
@@ -92,48 +96,28 @@ async fn cmd_set(repo: &TaskRepo, target: Option<&str>) -> Result<()> {
 
     repo.set_setting("active_provider", &provider).await?;
 
+    let mut out = String::new();
     match model {
         Some(m) => {
             repo.set_setting(&format!("model.{provider}"), m).await?;
-            println!("{} Provider switched to: {}", style("✓").green(), provider);
-            println!("{} Model set to: {}", style("✓").green(), m);
+            writeln!(out, "{} Provider switched to: {}", style("✓").green(), provider)?;
+            writeln!(out, "{} Model set to: {}", style("✓").green(), m)?;
         }
         None => {
             let default_model = provider_default_model(provider)
                 .ok_or_else(|| anyhow::anyhow!("No default model for {provider}"))?;
-            println!("{} Provider switched to: {} ({})", style("✓").green(), provider, default_model);
+            writeln!(out, "{} Provider switched to: {} ({})", style("✓").green(), provider, default_model)?;
         }
     }
 
     let key_name = format!("api_key.{provider}");
     if repo.get_setting(&key_name).await?.is_none() {
-        println!("  {} Tip: set API key with: rupoo config set {} <key>",
+        writeln!(out, "  {} Tip: set API key with: rupoo config set {} <key>",
             style("ℹ").yellow(),
             key_name,
-        );
+        )?;
     }
-    Ok(())
-}
-
-async fn show_interactive_picker(repo: &TaskRepo) -> Result<String> {
-    let current = repo.get_setting("active_provider").await?.unwrap_or_default();
-    println!("{}", style("Select a provider:").bold());
-    for (name, model, _, _) in PROVIDER_KEYS {
-        let marker = if *name == current { "❯" } else { " " };
-        println!("  {} {:<12} → {}  {}",
-            style(marker).green(),
-            style(name).white(),
-            style(model).dim(),
-            if *name == current { style("(current)").dim() } else { style("").dim() },
-        );
-    }
-    println!();
-    println!("Enter provider name or press Enter to cancel: ");
-
-    let mut input = String::new();
-    std::io::stdin().read_line(&mut input)?;
-    let input = input.trim().to_string();
-    Ok(input)
+    Ok(out)
 }
 
 // -- Pure helpers --
