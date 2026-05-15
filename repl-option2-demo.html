@@ -1,0 +1,222 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>REPL 方案二：完全 Async 化</title>
+<style>
+  body { font-family: 'SF Mono', 'Menlo', monospace; background: #1a1b26; color: #a9b1d6; padding: 20px; }
+  .terminal { max-width: 780px; margin: auto; background: #16161e; border-radius: 8px; box-shadow: 0 8px 32px rgba(0,0,0,0.4); overflow: hidden; }
+  .titlebar { background: #1f1f2e; padding: 8px 16px; display: flex; gap: 8px; align-items: center; border-bottom: 1px solid #2f2f44; }
+  .dot { width: 12px; height: 12px; border-radius: 50%; display: inline-block; }
+  .dot.r { background: #ff5f56; } .dot.y { background: #ffbd2e; } .dot.g { background: #27c93f; }
+  .title-text { color: #565f89; font-size: 13px; margin-left: 8px; }
+  .screen { padding: 16px 20px; min-height: 420px; }
+  .sep { color: #2f2f44; font-size: 12px; margin: 8px 0; }
+  .highlight-box { background: #2d2d44; border-radius: 6px; padding: 12px 16px; margin: 8px 0; border: 1px solid #414868; }
+  .highlight-box h4 { margin: 0 0 6px 0; color: #e0af68; }
+  .highlight-box code { display: block; color: #c0caf5; font-size: 13px; padding: 4px 0; }
+  .badge { display: inline-block; padding: 2px 8px; border-radius: 3px; font-size: 11px; font-weight: bold; margin: 1px; }
+  .badge.green { background: #73daca22; color: #73daca; border: 1px solid #73daca44; }
+  .badge.red { background: #f7768e22; color: #f7768e; border: 1px solid #f7768e44; }
+  .badge.yellow { background: #e0af6822; color: #e0af68; border: 1px solid #e0af6844; }
+  .thread-vis { display: flex; gap: 4px; align-items: center; margin: 12px 0; flex-wrap: wrap; }
+  .thread-block { padding: 6px 12px; border-radius: 4px; font-size: 11px; font-weight: bold; }
+  .thread-main { background: #3b4261; color: #c0caf5; }
+  .thread-io { background: #414868; color: #bb9af7; }
+  .thread-worker { background: #1a3a3a; color: #73daca; }
+  .arrow { color: #565f89; }
+  .prompt-line { display: flex; gap: 8px; align-items: center; margin: 4px 0; }
+  .prompt-char { color: #7aa2f7; font-weight: bold; font-size: 18px; }
+  .input { color: #c0caf5; font-size: 15px; }
+  .cursor { animation: blink 1s infinite; background: #c0caf5; width: 8px; height: 16px; display: inline-block; vertical-align: text-bottom; }
+  @keyframes blink { 50% { opacity: 0; } }
+  .status-bar { display: flex; gap: 12px; font-size: 11px; color: #565f89; margin: 6px 0; }
+  .status-bar span { padding: 1px 6px; background: #1a1b26; border-radius: 3px; }
+  .msg { margin: 6px 0; padding: 8px 12px; border-radius: 6px; font-size: 13px; }
+  .msg.system { background: #1a1b26; border-left: 3px solid #bb9af7; color: #c0caf5; }
+  .msg.incoming { background: #1a1b26; border-left: 3px solid #73daca; color: #73daca; }
+  .task-list { margin: 8px 0; }
+  .task-item { display: flex; gap: 8px; align-items: center; padding: 4px 0; font-size: 13px; }
+  .task-item .status { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
+  .task-item .status.running { background: #e0af68; animation: pulse 1.2s infinite; }
+  .task-item .status.done { background: #73daca; }
+  .task-item .status.waiting { background: #3b4261; }
+  @keyframes pulse { 50% { opacity: 0.3; } }
+  .split-panel { display: flex; gap: 16px; margin: 8px 0; }
+  .panel-left, .panel-right { flex: 1; background: #1a1b26; border-radius: 6px; padding: 10px; }
+  .panel-left { border: 1px solid #414868; }
+  .panel-right { border: 1px solid #3a4a3a; }
+  .time-tick { font-size: 10px; color: #565f89; font-family: monospace; }
+  .progress-bar { height: 3px; background: #2f2f44; border-radius: 2px; margin: 4px 0; overflow: hidden; }
+  .progress-fill { height: 100%; background: #73daca; border-radius: 2px; width: 0%; transition: width 0.3s; }
+</style>
+</head>
+<body>
+<div class="terminal">
+  <div class="titlebar">
+    <span class="dot r"></span><span class="dot y"></span><span class="dot g"></span>
+    <span class="title-text">rupoo — bash</span>
+  </div>
+  <div class="screen" id="screen">
+
+    <!-- 架构说明 -->
+    <div class="highlight-box">
+      <h4>方案二：完全 Async 化</h4>
+      <code>#![tokio::main]  →  run_repl() 作为 async fn 在 tokio 中运行</code>
+      <div class="thread-vis">
+        <span class="thread-block thread-main">tokio 主 task</span>
+        <span class="arrow">→</span>
+        <span class="thread-block thread-io">spawn_blocking (rustyline)</span>
+        <span class="arrow">→</span>
+        <span class="thread-block thread-worker">worker task (LLM)</span>
+      </div>
+      <div style="font-size:12px;color:#565f89;margin-top:4px;">
+        <span class="badge green">不阻塞 UI</span>
+        <span class="badge green">可并行</span>
+        <span class="badge yellow">更复杂的状态管理</span>
+        <span class="badge red">改动量约 3x</span>
+      </div>
+    </div>
+
+    <div class="sep">────────────────────────────────────────────────────────────</div>
+
+    <!-- 时间轴展示 -->
+    <div style="font-size:12px;color:#565f89;margin-bottom:8px;">
+      <span class="time-tick">T0</span> ──── <span class="time-tick">T1</span> ──── <span class="time-tick">T2</span> ──── <span class="time-tick">T3</span> ──── <span class="time-tick">T4</span>
+    </div>
+
+    <!-- 并行 Task 视图 -->
+    <div class="split-panel">
+      <div class="panel-left">
+        <div style="font-size:12px;color:#bb9af7;font-weight:bold;margin-bottom:8px;">📟 spawn_blocking (rustyline)</div>
+        <div class="task-list">
+          <div class="task-item">
+            <span class="status done"></span>
+            <span><span class="time-tick">T0</span> 显示提示符 <span style="color:#565f89;">❯</span></span>
+          </div>
+          <div class="task-item">
+            <span class="status done"></span>
+            <span><span class="time-tick">T1</span> 读取用户输入 <span style="color:#c0caf5;">"项目结构"</span></span>
+          </div>
+          <div class="task-item">
+            <span class="status done"></span>
+            <span><span class="time-tick">T2</span> 发送到主 task channel</span>
+          </div>
+          <div class="task-item">
+            <span class="status waiting"></span>
+            <span><span class="time-tick">T3</span> 等待主 task 响应...</span>
+          </div>
+          <div class="task-item">
+            <span class="status waiting"></span>
+            <span><span class="time-tick">T4</span> 显示下一个 ❯ 提示符</span>
+          </div>
+        </div>
+      </div>
+      <div class="panel-right">
+        <div style="font-size:12px;color:#73daca;font-weight:bold;margin-bottom:8px;">⚙ tokio worker (LLM 执行)</div>
+        <div class="task-list">
+          <div class="task-item">
+            <span class="status waiting"></span>
+            <span><span class="time-tick">T0</span> 空闲（等待输入）</span>
+          </div>
+          <div class="task-item">
+            <span class="status waiting"></span>
+            <span><span class="time-tick">T1</span> 空闲</span>
+          </div>
+          <div class="task-item">
+            <span class="status running"></span>
+            <span><span class="time-tick">T2</span> plan → agent.resume → LLM API</span>
+            <div class="progress-bar" style="width:60px;"><div class="progress-fill" style="width:45%;"></div></div>
+          </div>
+          <div class="task-item">
+            <span class="status running"></span>
+            <span><span class="time-tick">T3</span> LLM 响应 → checkpoint → 返回</span>
+            <div class="progress-bar" style="width:60px;"><div class="progress-fill" style="width:80%;"></div></div>
+          </div>
+          <div class="task-item">
+            <span class="status done"></span>
+            <span><span class="time-tick">T4</span> 结果发回 rustyline task</span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 通信机制 -->
+    <div style="font-size:12px;color:#565f89;margin:8px 0;padding:8px;background:#1a1b26;border-radius:4px;border:1px dashed #2f2f44;">
+      <strong style="color:#e0af68;">通信机制</strong>：
+      rustyline (spawn_blocking) ──<span style="color:#bb9af7;">tokio::sync::mpsc</span>──→ 主 task ──<span style="color:#73daca;">tokio task 内 await</span>──→ LLM 响应
+    </div>
+
+    <div class="sep">────────────────────────────────────────────────────────────</div>
+
+    <!-- 输出展示 -->
+    <div style="margin-top:8px; display:flex; gap:12px;">
+      <div style="min-width:0; flex:1; background:#1a1b26; border-radius:6px; padding:10px; border:1px solid #414868;">
+        <div style="font-size:12px;color:#565f89;margin-bottom:4px;">rustyline task 视图（不阻塞）</div>
+        <div class="prompt-line">
+          <span class="prompt-char">❯</span>
+          <span class="input">项目结构</span>
+          <span class="cursor"></span>
+        </div>
+        <div style="font-size:12px; color:#565f89; margin-top:4px;">
+          ↑ 输入已发送，等待 worker 返回
+        </div>
+        <div class="status-bar" style="margin-top:8px;">
+          <span style="color:#565f89;">💡 /help 查看命令</span>
+          <span>deepseek-v4-flash</span>
+          <span>耗时 0:24</span>
+        </div>
+        <div style="font-size:11px;color:#565f89;margin-top:6px;padding:4px;background:#16161e;border-radius:3px;">
+          提示符可正常响应 &lt;Tab&gt; / ↑↓ / Ctrl+C 等事件
+        </div>
+      </div>
+      <div style="min-width:0; flex:1; background:#1a1b26; border-radius:6px; padding:10px; border:1px solid #3a4a3a;">
+        <div style="font-size:12px;color:#73daca;margin-bottom:4px;">worker 异步执行中...</div>
+        <div style="font-size:12px; color:#565f89;">⠏ 正在调用 LLM</div>
+        <div style="font-size:11px; color:#565f89; margin-top:4px;">
+          [save_plan] ✅<br>
+          [resume] ✅<br>
+          [run_next_step] ⏳ LLM 请求发送...
+        </div>
+        <div class="progress-bar" style="width:100%;"><div class="progress-fill" style="width:35%;"></div></div>
+        <div style="font-size:11px;color:#565f89;margin-top:4px;">
+          elapsed: 3.2s &nbsp;|&nbsp; tokens: 127 ↑
+        </div>
+      </div>
+    </div>
+
+    <!-- 响应返回后的视图 -->
+    <div class="output" style="margin-top:10px;">
+      <div class="tag">RUPOO</div>
+      <div style="color:#73daca; font-size:14px;">项目结构分析：</div>
+      <div style="font-size:13px; line-height:1.6;">
+        <span style="color:#e0af68;">src/</span><br>
+        ├── <span style="color:#7aa2f7;">main.rs</span> — CLI 入口<br>
+        ├── <span style="color:#7aa2f7;">agent.rs</span> — 状态机<br>
+        └── ...
+      </div>
+    </div>
+
+    <!-- Next prompt ready -->
+    <div class="prompt-line" style="margin-top:8px;">
+      <span class="prompt-char">❯</span>
+      <span class="input" style="color:#565f89;">_</span>
+      <span class="cursor"></span>
+      <span style="font-size:11px;color:#565f89;margin-left:8px;">← worker 返回后，rustyline 收到消息并重新显示提示符</span>
+    </div>
+
+    <div class="sep">────────────────────────────────────────────────────────────</div>
+
+    <div class="footnote" style="background:#1a1b26; padding:12px; border-radius:6px; font-size:12px; color:#565f89; margin-top:8px;">
+      <strong>关键差异</strong><br>
+      • <code>spawn_blocking</code> 让 rustyline 在独立线程运行，主 tokio 不阻塞<br>
+      • 通信需要 <code>tokio::sync::mpsc</code> 或 <code>oneshot</code> 通道<br>
+      • 状态管理复杂：需要 <code>Arc&lt;Mutex&lt;...&gt;&gt;</code> 包裹共享状态或在 tokio task 间传递 ownership<br>
+      • 好处：LLM 执行期间，UI 仍可响应键盘事件<br>
+      • 代价：代码复杂度显著增加（拆分状态、通道协议、生命周期管理）
+    </div>
+
+  </div>
+</div>
+</body>
+</html>

@@ -1,0 +1,293 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Rupoo REPL 增强效果演示</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: #1a1a2e;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 30px 20px;
+    font-family: 'SF Mono', 'Fira Code', 'Cascadia Code', monospace;
+    gap: 20px;
+  }
+  .demo-title { color: #e0e0e0; font-size: 18px; font-weight: 600; letter-spacing: 1px; }
+  .demo-subtitle { color: #888; font-size: 13px; text-align: center; max-width: 680px; line-height: 1.6; }
+  .terminal {
+    background: #0d0d1a;
+    border-radius: 12px;
+    box-shadow: 0 20px 60px rgba(0,0,0,0.6), 0 0 0 1px rgba(255,255,255,0.05);
+    width: 820px;
+    max-width: 100%;
+    overflow: hidden;
+  }
+  .terminal-header {
+    background: #1e1e3a;
+    padding: 10px 16px; display: flex; align-items: center; gap: 8px;
+    border-bottom: 1px solid #2a2a4a;
+  }
+  .term-dot { width: 12px; height: 12px; border-radius: 50%; }
+  .term-dot.r { background: #ff5f57; }
+  .term-dot.y { background: #ffbd2e; }
+  .term-dot.g { background: #28c840; }
+  .term-title { color: #666; font-size: 12px; margin-left: 12px; }
+  .term-body { padding: 16px 20px 10px 20px; font-size: 13.5px; line-height: 1.6; overflow-x: auto; max-height: 780px; overflow-y: auto; }
+
+  .repl-banner { margin-bottom: 10px; }
+  .repl-banner .logo { color: #8be9fd; font-weight: 700; font-size: 14px; }
+  .repl-banner .sub { color: #6c7086; font-size: 12px; }
+
+  .message { margin: 10px 0; }
+  .header { font-weight: 600; font-size: 12px; margin-bottom: 2px; }
+  .header.user { color: #50fa7b; }
+  .header.assistant { color: #8be9fd; }
+
+  .msg-block { display: flex; gap: 10px; }
+  .msg-body { flex: 1; min-width: 0; }
+  .msg-tokens {
+    flex-shrink: 0; font-size: 10px; color: #444;
+    text-align: right; padding-top: 2px;
+    min-width: 95px; white-space: nowrap;
+    transition: color 0.3s;
+  }
+  .msg-tokens.live { color: #f1fa8c; }
+  .msg-tokens.done { color: #6c7086; }
+  .msg-text { color: #cdd6f4; white-space: pre-wrap; }
+  @keyframes blink { 0%,100% { opacity: 1; } 35% { opacity: 0.15; } }
+  .blink { animation: blink 1s step-end infinite; }
+
+  .step { margin: 3px 0; display: flex; align-items: flex-start; gap: 6px; }
+  .step-icon { flex-shrink: 0; width: 18px; text-align: center; font-size: 13px; }
+  .step-icon.done { color: #50fa7b; }
+  .step-label.done { color: #cdd6f4; }
+  .step-result { color: #cdd6f4; font-size: 12px; margin-left: 24px; margin-bottom: 4px;
+    border-left: 1px solid #2a2a4a; padding-left: 8px; }
+  .sep { color: #2a2a4a; margin: 6px 0; }
+
+  /* ===== INPUT AREA ===== */
+  .input-area {
+    border-top: 1px solid #2a2a4a;
+    padding: 8px 20px 10px 20px;
+    background: #08081a;
+  }
+  .input-line { display: flex; align-items: center; gap: 6px; margin-bottom: 6px; }
+  .input-prompt { color: #50fa7b; font-weight: 700; font-size: 15px; flex-shrink: 0; }
+  .input-field {
+    flex: 1; color: #f8f8f2; background: transparent; border: none; outline: none;
+    font-family: inherit; font-size: 13.5px; caret-color: #f8f8f2;
+  }
+  .input-field::placeholder { color: #444; }
+
+  /* Footer bar */
+  .input-footer {
+    display: flex; justify-content: space-between; align-items: center;
+    min-height: 22px; font-size: 11.5px;
+  }
+
+  /* Left: rotating shortcuts - NEW: command + natural language */
+  .shortcuts { display: flex; gap: 6px; align-items: center; }
+  .shortcuts .label { color: #444; font-size: 10px; }
+  .shortcut-item { white-space: nowrap; transition: all 0.3s; }
+  .shortcut-item .cmd { color: #8be9fd; }
+  .shortcut-item .hint { color: #6c7086; margin-left: 4px; font-size: 11px; }
+  .shortcut-item .divider { color: #333; margin: 0 2px; }
+
+  @keyframes fadeIn {
+    from { opacity: 0.1; transform: translateY(2px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+  .shortcut-item.active { animation: fadeIn 0.35s ease-out; }
+
+  .nav-dots { display: flex; gap: 3px; margin-left: 8px; }
+  .nav-dot { width: 4px; height: 4px; border-radius: 50%; background: #333; cursor: pointer; }
+  .nav-dot.active { background: #6272a4; }
+
+  /* Right: status */
+  .status-info { display: flex; gap: 10px; align-items: center; color: #6c7086; font-size: 11px; }
+  .status-info .tag { display: inline-flex; align-items: center; gap: 4px; }
+  .status-info .dot { color: #50fa7b; font-size: 8px; }
+  .status-info .model { color: #8be9fd; }
+  .status-info .val { color: #cdd6f4; }
+  .status-info .sep-dot { color: #333; }
+
+  .term-body::-webkit-scrollbar { width: 6px; }
+  .term-body::-webkit-scrollbar-track { background: transparent; }
+  .term-body::-webkit-scrollbar-thumb { background: #2a2a4a; border-radius: 3px; }
+</style>
+</head>
+<body>
+
+<div class="demo-title">Rupoo REPL — 增强版 UI 方案</div>
+<div class="demo-subtitle">
+  输入栏下方：左边快捷指令轮播 <span style="color:#6272a4;">(命令+自然语言说明)</span>  /  右边状态信息面板<br>
+  AI 回复：每条右侧显示实时流式 token 消耗
+</div>
+
+<div class="terminal">
+  <div class="terminal-header">
+    <span class="term-dot r"></span>
+    <span class="term-dot y"></span>
+    <span class="term-dot g"></span>
+    <span class="term-title">rupoo — enhanced REPL</span>
+  </div>
+  <div class="term-body">
+
+    <!-- Conversation messages -->
+    <div class="repl-banner">
+      <span class="logo">⚡ Rupoo</span>
+      <span class="sub">— AI Terminal Assistant  ·  Ctrl+C to quit</span>
+    </div>
+
+    <!-- Message: User -->
+    <div class="message">
+      <div class="header user">You</div>
+      <div class="msg-text">帮我把 bcrypt 换成 argon2</div>
+    </div>
+
+    <!-- Message: AI response with token badge (completed) -->
+    <div class="message">
+      <div class="header assistant">Rupoo</div>
+      <div class="msg-block">
+        <div class="msg-body">
+          <div class="step"><span class="step-icon done">✓</span><span class="step-label done">分析 auth 模块结构</span></div>
+          <div class="step-result">src/auth/mod.rs — 142 lines, 2 public functions</div>
+          <div class="step"><span class="step-icon done">✓</span><span class="step-label done">添加 argon2 依赖</span></div>
+          <div class="step"><span class="step-icon done">✓</span><span class="step-label done">重写 hash/verify 函数</span></div>
+          <div class="step"><span class="step-icon done">✓</span><span class="step-label done">运行测试 — 14 通过</span></div>
+          <div class="sep">──────────────</div>
+          <div class="msg-text">已完成 argon2 迁移，API 保持兼容。</div>
+        </div>
+        <!-- Completed: gray tokens -->
+        <div class="msg-tokens done">↑ 342 · ↓ 1,280 tok</div>
+      </div>
+    </div>
+
+    <!-- Message: Streaming AI response with live token -->
+    <div class="message">
+      <div class="header assistant">Rupoo</div>
+      <div class="msg-block">
+        <div class="msg-body">
+          <div class="step"><span class="step-icon done">✓</span><span class="step-label done">Fetching project structure</span></div>
+          <div class="step-result">Found 12 crates, 48 source files, 7,800+ lines</div>
+          <div class="msg-text">
+Rupoo 是一个基于 Rust 的 AI 计划执行引擎，核心架构分为
+6 层：<span style="color:#82aaff;">REPL</span>, <span style="color:#82aaff;">Agent</span>, <span style="color:#82aaff;">LLM Gateway</span>, <span style="color:#82aaff;">Tool System</span>, <span style="color:#82aaff;">Persistence</span>, <span style="color:#82aaff;">Security</span>。
+          </div>
+        </div>
+        <!-- Streaming: yellow + blinking dot -->
+        <div class="msg-tokens live">↑ 523 · ↓ 312 tok <span class="blink">●</span></div>
+      </div>
+    </div>
+
+  </div>
+
+  <!-- ===== INPUT AREA ===== -->
+  <div class="input-area">
+
+    <div class="input-line">
+      <span class="input-prompt">❯</span>
+      <input class="input-field" type="text" placeholder="Type a message... or try a shortcut" disabled>
+    </div>
+
+    <div class="input-footer">
+
+      <!-- LEFT: rotating shortcut (command + natural language) -->
+      <div class="shortcuts">
+        <span class="label">⌘</span>
+
+        <span class="shortcut-item active" id="s0">
+          <span class="cmd">/status</span>
+          <span class="divider">—</span>
+          <span class="hint">view system health overview</span>
+        </span>
+        <span class="shortcut-item" id="s1" style="display:none;">
+          <span class="cmd">/model show</span>
+          <span class="divider">—</span>
+          <span class="hint">check your current AI model</span>
+        </span>
+        <span class="shortcut-item" id="s2" style="display:none;">
+          <span class="cmd">/session list</span>
+          <span class="divider">—</span>
+          <span class="hint">browse your past plans</span>
+        </span>
+        <span class="shortcut-item" id="s3" style="display:none;">
+          <span class="cmd">/doctor</span>
+          <span class="divider">—</span>
+          <span class="hint">diagnose your environment</span>
+        </span>
+        <span class="shortcut-item" id="s4" style="display:none;">
+          <span class="cmd">/logs 10</span>
+          <span class="divider">—</span>
+          <span class="hint">peek at recent agent logs</span>
+        </span>
+        <span class="shortcut-item" id="s5" style="display:none;">
+          <span class="cmd">/config set</span>
+          <span class="divider">—</span>
+          <span class="hint">configure API keys &amp; settings</span>
+        </span>
+        <span class="shortcut-item" id="s6" style="display:none;">
+          <span class="cmd">/help</span>
+          <span class="divider">—</span>
+          <span class="hint">list all available commands</span>
+        </span>
+        <span class="shortcut-item" id="s7" style="display:none;">
+          <span class="cmd">/quit</span>
+          <span class="divider">—</span>
+          <span class="hint">exit Rupoo</span>
+        </span>
+
+        <div class="nav-dots">
+          <span class="nav-dot active" data-i="0"></span>
+          <span class="nav-dot" data-i="1"></span>
+          <span class="nav-dot" data-i="2"></span>
+          <span class="nav-dot" data-i="3"></span>
+          <span class="nav-dot" data-i="4"></span>
+          <span class="nav-dot" data-i="5"></span>
+          <span class="nav-dot" data-i="6"></span>
+          <span class="nav-dot" data-i="7"></span>
+        </div>
+      </div>
+
+      <!-- RIGHT: model + session status -->
+      <div class="status-info">
+        <span class="tag"><span class="dot">●</span><span class="model">deepseek-v4-flash</span></span>
+        <span class="sep-dot">|</span>
+        <span class="tag"><span class="val">1.6k</span> tok</span>
+        <span class="sep-dot">|</span>
+        <span class="tag">⏱ <span class="val">12:34</span></span>
+        <span class="sep-dot">|</span>
+        <span class="tag">📦 <span class="val">14</span> plans</span>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+(function() {
+  const items = document.querySelectorAll('.shortcut-item');
+  const dots = document.querySelectorAll('.nav-dot');
+  let current = 0;
+
+  function show(i) {
+    items.forEach((el, idx) => {
+      el.style.display = idx === i ? '' : 'none';
+      el.classList.toggle('active', idx === i);
+    });
+    dots.forEach((dot, idx) => dot.classList.toggle('active', idx === i));
+    current = i;
+  }
+
+  setInterval(() => show((current + 1) % items.length), 3000);
+
+  dots.forEach(dot => {
+    dot.addEventListener('click', () => show(parseInt(dot.dataset.i)));
+  });
+})();
+</script>
+
+</body>
+</html>

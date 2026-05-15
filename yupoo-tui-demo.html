@@ -1,0 +1,518 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Yupoo TUI Demo — ratatui</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600;700&display=swap');
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    background: #1a1b26;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    min-height: 100vh;
+    font-family: 'JetBrains Mono', 'SF Mono', 'Fira Code', monospace;
+    padding: 20px;
+  }
+
+  /* ── Terminal frame ── */
+  .terminal {
+    width: 960px;
+    max-width: 100%;
+    background: #0f0f1a;
+    border-radius: 12px;
+    box-shadow: 0 20px 60px rgba(0,0,0,0.6), 0 0 0 1px rgba(255,255,255,0.06);
+    overflow: hidden;
+  }
+
+  /* ── Title bar ── */
+  .titlebar {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 12px 16px;
+    background: #1a1b2e;
+    border-bottom: 1px solid #2a2b3e;
+  }
+  .titlebar .dots { display: flex; gap: 6px; }
+  .titlebar .dot {
+    width: 12px; height: 12px;
+    border-radius: 50%;
+  }
+  .titlebar .dot.r { background: #ff5f57; }
+  .titlebar .dot.y { background: #febc2e; }
+  .titlebar .dot.g { background: #28c840; }
+
+  .titlebar .title-text {
+    flex: 1;
+    text-align: center;
+    color: #565f89;
+    font-size: 13px;
+    letter-spacing: 0.5px;
+  }
+  .titlebar .title-text span { color: #7aa2f7; font-weight: 600; }
+
+  /* ── Main layout (two panels) ── */
+  .body { display: flex; min-height: 420px; }
+
+  /* ── Left panel: conversation / output ── */
+  .panel-left {
+    flex: 1;
+    padding: 12px 14px;
+    background: #0f0f1a;
+    border-right: 1px solid #1e1e32;
+    overflow-y: auto;
+    max-height: 500px;
+  }
+
+  /* ── Right panel: status / info ── */
+  .panel-right {
+    width: 260px;
+    padding: 12px 14px;
+    background: #121222;
+    border-left: 1px solid #1e1e32;
+    overflow-y: auto;
+    max-height: 500px;
+  }
+
+  /* ── Chat / output styling ── */
+  .msg { margin-bottom: 10px; line-height: 1.6; }
+  .msg .tag {
+    display: inline-block;
+    font-size: 11px;
+    font-weight: 700;
+    padding: 0 6px;
+    border-radius: 3px;
+    margin-right: 6px;
+    letter-spacing: 0.3px;
+  }
+
+  /* user input */
+  .msg.user .tag   { background: #3b4261; color: #c0caf5; }
+  .msg.user .text  { color: #c0caf5; }
+
+  /* assistant / think */
+  .msg.assistant .tag { background: #1a3a3a; color: #73daca; }
+  .msg.assistant .text { color: #a9b1d6; }
+
+  /* tool call */
+  .msg.tool .tag   { background: #2d2a3e; color: #bb9af7; }
+  .msg.tool .text  { color: #565f89; font-size: 12px; }
+
+  /* system / info */
+  .msg.system .tag { background: #2a2a2a; color: #9aa5ce; }
+  .msg.system .text { color: #565f89; font-style: italic; }
+
+  /* wait for input */
+  .msg.wait .tag   { background: #3a3020; color: #e0af68; }
+  .msg.wait .text  { color: #e0af68; }
+
+  .text { font-size: 13px; }
+
+  /* code snippets inside messages */
+  .text code {
+    background: #1a1b2e;
+    padding: 0 4px;
+    border-radius: 2px;
+    color: #7dcfff;
+    font-family: inherit;
+    font-size: 12px;
+  }
+
+  /* ── Progress bar ── */
+  .progress-wrap {
+    margin: 8px 0;
+  }
+  .progress-label {
+    display: flex;
+    justify-content: space-between;
+    color: #565f89;
+    font-size: 11px;
+    margin-bottom: 3px;
+  }
+  .progress-bar {
+    height: 14px;
+    background: #1a1b2e;
+    border-radius: 7px;
+    overflow: hidden;
+  }
+  .progress-fill {
+    height: 100%;
+    width: 60%;
+    background: linear-gradient(90deg, #7aa2f7, #73daca);
+    border-radius: 7px;
+    transition: width 0.4s;
+    position: relative;
+  }
+  .progress-fill::after {
+    content: '';
+    position: absolute;
+    top: 0; left: 0; right: 0; bottom: 0;
+    background: linear-gradient(90deg, transparent 0%, rgba(255,255,255,0.15) 50%, transparent 100%);
+    animation: shimmer 2s infinite;
+  }
+  @keyframes shimmer {
+    0% { transform: translateX(-100%); }
+    100% { transform: translateX(100%); }
+  }
+
+  /* ── Tabs (right panel) ── */
+  .tabs {
+    display: flex;
+    gap: 2px;
+    margin-bottom: 10px;
+  }
+  .tab {
+    flex: 1;
+    text-align: center;
+    padding: 5px;
+    font-size: 11px;
+    border-radius: 4px 4px 0 0;
+    color: #565f89;
+    background: transparent;
+    cursor: default;
+    font-weight: 600;
+  }
+  .tab.active {
+    background: #1a1b2e;
+    color: #7aa2f7;
+  }
+
+  /* ── Right panel items ── */
+  .stat-row {
+    display: flex;
+    justify-content: space-between;
+    font-size: 11px;
+    padding: 4px 0;
+    border-bottom: 1px solid #1a1b2e;
+  }
+  .stat-row .label { color: #565f89; }
+  .stat-row .value { color: #c0caf5; font-weight: 600; }
+  .stat-row .value.green { color: #73daca; }
+  .stat-row .value.blue  { color: #7aa2f7; }
+  .stat-row .value.yellow { color: #e0af68; }
+
+  .section-title {
+    color: #3b4261;
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    margin: 10px 0 6px;
+    font-weight: 700;
+  }
+
+  /* ── Step list ── */
+  .step-item {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 3px 0;
+    font-size: 12px;
+    color: #565f89;
+  }
+  .step-item .icon { font-size: 10px; }
+  .step-item.done { color: #565f89; }
+  .step-item.done .icon { color: #73daca; }
+  .step-item.active { color: #c0caf5; }
+  .step-item.active .icon { color: #7aa2f7; }
+  .step-item.pending { color: #3b4261; }
+
+  /* ── Spinner ── */
+  .spinner {
+    display: inline-block;
+    animation: spin 0.8s steps(8) infinite;
+    color: #7aa2f7;
+  }
+  @keyframes spin {
+    from { transform: rotate(0deg); }
+    to   { transform: rotate(360deg); }
+  }
+
+  /* ── Input bar ── */
+  .input-bar {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 10px 14px;
+    background: #1a1b2e;
+    border-top: 1px solid #2a2b3e;
+  }
+  .input-bar .prompt {
+    color: #7aa2f7;
+    font-weight: 700;
+    font-size: 13px;
+  }
+  .input-bar input {
+    flex: 1;
+    background: transparent;
+    border: none;
+    outline: none;
+    color: #c0caf5;
+    font-family: inherit;
+    font-size: 13px;
+  }
+  .input-bar input::placeholder { color: #3b4261; }
+
+  .input-bar .hint {
+    color: #3b4261;
+    font-size: 11px;
+    font-style: italic;
+  }
+
+  /* ── Scrollbar ── */
+  ::-webkit-scrollbar { width: 4px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb { background: #2a2b3e; border-radius: 2px; }
+
+  /* ── Buttons in panel ── */
+  .action-btn {
+    display: block;
+    width: 100%;
+    text-align: left;
+    padding: 5px 8px;
+    margin: 2px 0;
+    background: transparent;
+    border: none;
+    color: #565f89;
+    font-family: inherit;
+    font-size: 11px;
+    border-radius: 4px;
+  }
+  .action-btn:hover { background: #1a1b2e; color: #c0caf5; }
+
+  /* ── Footer binding ── */
+  .footer {
+    padding: 6px 14px;
+    background: #0a0a18;
+    border-top: 1px solid #1a1b2e;
+    display: flex;
+    justify-content: space-between;
+    font-size: 10px;
+    color: #3b4261;
+  }
+  .footer kbd {
+    background: #1a1b2e;
+    padding: 1px 5px;
+    border-radius: 2px;
+    font-family: inherit;
+    font-size: 10px;
+    color: #565f89;
+  }
+
+  /* ── Responsive ── */
+  @media (max-width: 700px) {
+    .body { flex-direction: column; }
+    .panel-right { width: 100%; border-left: none; border-top: 1px solid #1e1e32; max-height: 200px; }
+  }
+</style>
+</head>
+<body>
+
+<div class="terminal">
+
+  <!-- Title bar -->
+  <div class="titlebar">
+    <div class="dots">
+      <div class="dot r"></div>
+      <div class="dot y"></div>
+      <div class="dot g"></div>
+    </div>
+    <div class="title-text">
+      <span>Yupoo</span>  —  AI Plan Executor Agent  (ratatui demo)
+    </div>
+  </div>
+
+  <!-- Body -->
+  <div class="body">
+
+    <!-- Left panel: conversation -->
+    <div class="panel-left">
+      <!-- User message -->
+      <div class="msg user">
+        <span class="tag">YOU</span>
+        <span class="text">查看当前目录结构</span>
+      </div>
+
+      <!-- Assistant thinking with spinner -->
+      <div class="msg assistant">
+        <span class="tag">YUPOO</span>
+        <span class="text">
+          <span class="spinner">⠋</span> Thinking...
+        </span>
+      </div>
+
+      <!-- Tool call -->
+      <div class="msg tool">
+        <span class="tag">TOOL</span>
+        <span class="text">list_directory(<span style="color:#9ece6a;">"path"</span>: <span style="color:#e0af68;">"."</span>)</span>
+      </div>
+
+      <!-- Tool result (shown collapsed) -->
+      <div class="msg tool" style="padding-left: 60px;">
+        <span class="text" style="color:#565f89;">
+          → 12 entries · <code>Cargo.toml</code> <code>src/</code> <code>tests/</code> <code>target/</code> …
+        </span>
+      </div>
+
+      <!-- Assistant final response -->
+      <div class="msg assistant">
+        <span class="tag">YUPOO</span>
+        <span class="text">
+          当前目录包含 <b style="color:#73daca;">12</b> 个项目：<br>
+          · <code>Cargo.toml</code> — Rust 项目配置<br>
+          · <code>src/</code> — 源代码（<code>main.rs</code>, <code>agent.rs</code>, <code>llm.rs</code> 等 12 个模块）<br>
+          · <code>tests/</code> — 集成测试<br>
+          · <code>target/</code> — 编译输出<br>
+          · <code>.skills/</code> — 技能定义文件<br>
+          · <code>agent.db</code> — SQLite 数据库
+        </span>
+      </div>
+
+      <!-- User second message -->
+      <div class="msg user">
+        <span class="tag">YOU</span>
+        <span class="text">读一下 <code>Cargo.toml</code>，分析依赖结构</span>
+      </div>
+
+      <!-- Wait for input simulation -->
+      <div class="msg wait">
+        <span class="tag">WAIT</span>
+        <span class="text">确认要读取 Cargo.toml？<span style="color:#565f89;">(输入 yes 继续)</span></span>
+      </div>
+
+      <!-- User responds -->
+      <div class="msg user">
+        <span class="tag">YOU</span>
+        <span class="text">yes</span>
+      </div>
+
+      <!-- Progress bar – plan execution -->
+      <div class="progress-wrap">
+        <div class="progress-label">
+          <span>计划执行进度</span>
+          <span>6 / 8 步骤 <span style="color:#73daca;">✓</span></span>
+        </div>
+        <div class="progress-bar">
+          <div class="progress-fill" style="width: 75%;"></div>
+        </div>
+      </div>
+
+      <!-- Final result -->
+      <div class="msg assistant">
+        <span class="tag">YUPOO</span>
+        <span class="text">
+          项目依赖分析完成。<br><br>
+          <span style="color:#565f89;">核心依赖</span><br>
+          · <code>rig-core 0.30</code> — LLM 框架（Anthropic / OpenAI / Ollama）<br>
+          · <code>rusqlite 0.31</code> — SQLite 数据库（含 FTS5）<br>
+          · <code>clap 4</code> — CLI 参数解析<br>
+          · <code>rustyline 14</code> — Readline 交互<br>
+          · <code>git2 0.19</code> — Git 集成<br><br>
+          <span style="color:#565f89;">构建大小</span><br>
+          · Release 二进制: <b style="color:#73daca;">9.6 MB</b><br>
+          · 总依赖数: ~617 crates<br>
+          · 测试: <b style="color:#73daca;">34/34</b> 通过
+        </span>
+      </div>
+
+      <!-- Auto-learned skill -->
+      <div class="msg system">
+        <span class="tag">INFO</span>
+        <span class="text">计划完成 → 自动学习技能 <code>auto-c536</code> (8 steps)</span>
+      </div>
+
+    </div>
+
+    <!-- Right panel: status / info -->
+    <div class="panel-right">
+      <div class="tabs">
+        <div class="tab active">状态</div>
+        <div class="tab">步骤</div>
+        <div class="tab">记忆</div>
+      </div>
+
+      <div class="section-title">当前计划</div>
+      <div class="stat-row">
+        <span class="label">计划名</span>
+        <span class="value blue">项目分析</span>
+      </div>
+      <div class="stat-row">
+        <span class="label">状态</span>
+        <span class="value green">Running</span>
+      </div>
+      <div class="stat-row">
+        <span class="label">步骤</span>
+        <span class="value">6 / 8</span>
+      </div>
+      <div class="stat-row">
+        <span class="label">LLM</span>
+        <span class="value yellow">DeepSeek V4 Flash</span>
+      </div>
+      <div class="stat-row">
+        <span class="label">Tokens</span>
+        <span class="value">1,284 / 2,048</span>
+      </div>
+
+      <div class="section-title">步骤</div>
+      <div class="step-item done">
+        <span class="icon">✓</span> Think: 分析目录结构
+      </div>
+      <div class="step-item done">
+        <span class="icon">✓</span> ToolCall: list_directory
+      </div>
+      <div class="step-item done">
+        <span class="icon">✓</span> Think: 评估结果
+      </div>
+      <div class="step-item done">
+        <span class="icon">✓</span> WaitForInput: 确认
+      </div>
+      <div class="step-item active">
+        <span class="icon"><span class="spinner">⠋</span></span> ToolCall: file_read
+      </div>
+      <div class="step-item pending">
+        <span class="icon">·</span> Think: 分析依赖
+      </div>
+      <div class="step-item pending">
+        <span class="icon">·</span> ToolCall: echo
+      </div>
+      <div class="step-item pending">
+        <span class="icon">·</span> Finish
+      </div>
+
+      <div class="section-title">技能 (3 可用)</div>
+      <div class="stat-row" style="border: none;">
+        <span class="label" style="color:#bb9af7;">⚡ code-review</span>
+        <span class="value" style="color:#565f89;">审查代码</span>
+      </div>
+      <div class="stat-row" style="border: none;">
+        <span class="label" style="color:#bb9af7;">⚡ generate-readme</span>
+        <span class="value" style="color:#565f89;">生成 README</span>
+      </div>
+      <div class="stat-row" style="border: none;">
+        <span class="label" style="color:#bb9af7;">⚡ auto-c536</span>
+        <span class="value" style="color:#565f89;">自动学习</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- Input bar -->
+  <div class="input-bar">
+    <span class="prompt">❯</span>
+    <input type="text" placeholder="输入 /help 查看命令，或直接输入你想做的事…" value="分析 src/ 目录的代码结构" readonly>
+    <span class="hint">tab 补全</span>
+  </div>
+
+  <!-- Footer -->
+  <div class="footer">
+    <span>DeepSeek · step 6/8 · plan: <span style="color:#73daca;">项目分析</span></span>
+    <span><kbd>Tab</kbd> 补全  <kbd>↑↓</kbd> 历史  <kbd>Ctrl+C</kbd> 取消  <kbd>Ctrl+D</kbd> 退出</span>
+  </div>
+
+</div>
+
+</body>
+</html>
