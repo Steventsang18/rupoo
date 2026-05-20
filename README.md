@@ -1,269 +1,271 @@
 # Rupoo — AI-powered Terminal Assistant
 
-Rupoo 是一个运行在终端中的 AI 助手，支持计划执行、技能管理、长期记忆、安全沙箱、Git 集成和 MCP 协议——全部通过自然语言或 TUI 交互。
+Rupoo is a terminal-based AI assistant that supports plan execution, skill management, long-term memory, a secure sandbox, Git integration, and the MCP protocol — all through natural language or TUI interaction.
 
 ```
 Version:  0.2.0        Language: Rust 2021
 Tests:    106 ✅       Binary:   ~14 MB (release, ARM64)
 TUI:      ratatui      LLM:      Anthropic / OpenAI / DeepSeek / Ollama
-DB:       SQLite (FTS5)  Safety:  path_jail 沙箱 + SSRF 防护
+DB:       SQLite (FTS5)  Safety:  path_jail sandbox + SSRF protection
 ```
 
 ---
 
-## 快速开始
+## Quick Start
 
-### 安装
+### Installation
 
 ```bash
-# 从源码安装
+# Install from source
 cargo install --path .
 
-# 或直接运行编译好的二进制
+# Or run the compiled binary directly
 cargo run --release
 ```
 
-### 配置 LLM
+### Configure LLM
 
 ```bash
 # Anthropic Claude
 rupoo config set api_key.anthropic sk-ant-xxx
 rupoo config set model.anthropic claude-sonnet-4-20250514
 
-# OpenAI / DeepSeek 等兼容接口
+# OpenAI / DeepSeek and other compatible APIs
 rupoo config set api_key.openai sk-xxx
 rupoo config set model.openai deepseek-chat
 rupoo config set base_url.openai https://api.deepseek.com/v1
 
-# Ollama 本地模型
-# 无需 API Key，Ollama 默认 http://localhost:11434
+# Ollama local models
+# No API key needed — Ollama defaults to http://localhost:11434
 ```
 
-### 启动
+### Launch
 
 ```bash
-# 交互式 TUI（默认）
+# Interactive TUI (default)
 rupoo
 
-# TUI 快捷键
-# Ctrl+P   命令面板
-# Ctrl+C   退出
-# Tab      切换焦点（输入区 ↔ 侧栏）
-# ↑/↓      输入历史
-# Shift+↑/↓  聊天区滚动（或鼠标滚轮）
-# PgUp/PgDn  大幅滚动
+# TUI keyboard shortcuts
+# Ctrl+P   Command palette
+# Ctrl+C   Exit
+# Tab      Switch focus (input area ↔ sidebar)
+# ↑/↓      Input history
+# Shift+↑/↓   Scroll chat area (or mouse wheel)
+# PgUp/PgDn   Scroll by larger increments
 ```
 
 ---
 
-## 命令行接口
+## Command Line Interface
 
 ```
 rupoo [OPTIONS] [COMMAND]
 ```
 
-### 全局选项
+### Global Options
 
-| 选项 | 说明 |
-|------|------|
-| `--verbose` | 在 stderr 输出调试日志 |
+| Option | Description |
+|--------|-------------|
+| `--verbose` | Output debug logs to stderr |
 
-### 子命令
+### Subcommands
 
-| 命令 | 说明 |
-|------|------|
-| _(无)_ | 进入交互式 TUI（三栏布局） |
-| `run --task <id>` | 执行一个已保存的 Plan |
-| `demo` | 运行内置演示 Plan |
-| `status [--short]` | 显示系统状态概览 |
-| `model [show|list|set]` | 查看/切换 LLM 提供商和模型 |
-| `session [list|show|resume|delete|prune]` | 管理执行计划 |
-| `skills [list|show|run|install-builtin|learn]` | 技能系统管理 |
-| `config [set|get|list]` | 配置管理与 API Keys |
-| `git [status|commit|pr]` | Git 集成 |
-| `doctor [--fix]` | 诊断环境和配置问题 |
-| `logs [--follow] [--lines N] [--level LEVEL]` | 查看运行日志 |
-| `mcp-server` | 启动 MCP 协议服务器（JSON-RPC over stdio） |
-| `serve --port <port>` | 服务器模式 |
+| Command | Description |
+|---------|-------------|
+| _(none)_ | Launch the interactive TUI (three-column layout) |
+| `run --task <id>` | Execute a saved Plan |
+| `demo` | Run the built-in demo Plan |
+| `status [--short]` | Display system status overview |
+| `model [show\|list\|set]` | View/switch LLM providers and models |
+| `session [list\|show\|resume\|delete\|prune]` | Manage execution plans |
+| `skills [list\|show\|run\|install-builtin\|learn]` | Skill system management |
+| `config [set\|get\|list]` | Configuration and API key management |
+| `git [status\|commit\|pr]` | Git integration |
+| `doctor [--fix]` | Diagnose environment and configuration issues |
+| `logs [--follow] [--lines N] [--level LEVEL]` | View runtime logs |
+| `mcp-server` | Start an MCP protocol server (JSON-RPC over stdio) |
+| `serve --port <port>` | Server mode |
 
 ---
 
-## 架构
+## Architecture
 
 ```
 ┌─ CLI (clap) ─────────────────────────────────────────────┐
 │  rupoo  →  TUI (ratatui + crossterm)                     │
-│         →  子命令 (status/model/session/doctor/logs...)   │
+│         →  Subcommands (status/model/session/doctor/logs…)│
 └──────────────────────┬───────────────────────────────────┘
                        │
 ┌──────────────────────▼───────────────────────────────────┐
-│  Agent 状态机                                              │
+│  Agent State Machine                                      │
 │  Think → ToolCall → WaitForInput → Finish               │
 │  + Exec / HttpRequest / BrowserAction                    │
 ├──────────────────────────────────────────────────────────┤
 │  LLM Gateway (rig-core)                                  │
-│  Anthropic / OpenAI / Ollama 统一接口                     │
+│  Anthropic / OpenAI / Ollama unified interface           │
 ├──────────────────────────────────────────────────────────┤
 │  Tool Executor Layer                                     │
-│  McpToolExecutor → rig_tools (Echo, FileRead/Write, Ls) │
+│  McpToolExecutor → rig_tools (Echo, FileRead/Write, Ls)  │
 │  + MCP Server (JSON-RPC stdio)                          │
 ├──────────────────────────────────────────────────────────┤
 │  SafetyContext                                           │
-│  path_jail 沙箱 · 命令黑名单 · SSRF 防护 · 超时保护        │
+│  path_jail sandbox · Command blocklist · SSRF protection │
+│  · Timeout protection                                    │
 ├──────────────────────────────────────────────────────────┤
 │  SQLite (WAL + FTS5)                                     │
-│  Plan 持久化 · Checkpoint 崩溃恢复 · 会话历史 · 长期记忆    │
+│  Plan persistence · Checkpoint crash recovery · Session  │
+│  history · Long-term memory                              │
 └──────────────────────────────────────────────────────────┘
 ```
 
-### 模块说明
+### Module Overview
 
-| 模块 | 行数 | 职责 |
-|------|------|------|
-| `main.rs` | 700+ | CLI 入口，命令分发，`build_engine` |
-| `agent.rs` | 840+ | Agent 状态机，7 种 Step 类型，崩溃恢复 |
-| `db.rs` | 890 | SQLite 层，Plan CRUD + Checkpoints + FTS5 记忆 |
-| `llm.rs` | 350 | LLM 网关，统一 Anthropic/OpenAI/Ollama |
-| `cli/mod.rs` | 680 | TUI 事件循环，Agent 桥接线程 |
-| `cli/app.rs` | 370 | TUI 应用状态，会话管理，消息路由 |
-| `cli/ui.rs` | 420 | TUI 渲染：三栏布局、气泡、代码块、状态栏 |
-| `cli/handlers.rs` | 380 | 输入模式策略（Chat/Thinking/Approval/Palette） |
-| `safety.rs` | 250 | 安全沙箱、path_jail、SSRF、命令黑名单 |
-| `mcp.rs` | 250+ | MCP Tool 调度器 + JSON-RPC 客户端 |
-| `mcp_server.rs` | 380 | MCP 服务器（复用 McpToolExecutor） |
-| `rig_tools.rs` | 400 | Echo / FileRead / FileWrite / ListDir 工具 |
-| `task.rs` | 340 | Step/Plan/Checkpoint 类型定义 |
-| `memory.rs` | 140 | 长期记忆（FTS5 全文搜索） |
-| `skill.rs` | 390 | 技能系统（JSON 文件 + 自动学习） |
-| `git.rs` | 240 | Git 集成（git2 + gh CLI） |
-| `error.rs` | 34 | 统一错误类型 |
+| Module | Lines | Responsibility |
+|--------|-------|----------------|
+| `main.rs` | 700+ | CLI entry point, command dispatch, `build_engine` |
+| `agent.rs` | 840+ | Agent state machine, 7 Step types, crash recovery |
+| `db.rs` | 890 | SQLite layer, Plan CRUD + Checkpoints + FTS5 memory |
+| `llm.rs` | 350 | LLM gateway, unified Anthropic/OpenAI/Ollama |
+| `cli/mod.rs` | 680 | TUI event loop, Agent bridge thread |
+| `cli/app.rs` | 370 | TUI application state, session management, message routing |
+| `cli/ui.rs` | 420 | TUI rendering: three-column layout, bubbles, code blocks, status bar |
+| `cli/handlers.rs` | 380 | Input mode strategies (Chat/Thinking/Approval/Palette) |
+| `safety.rs` | 250 | Security sandbox, path_jail, SSRF, command blocklist |
+| `mcp.rs` | 250+ | MCP Tool dispatcher + JSON-RPC client |
+| `mcp_server.rs` | 380 | MCP server (reuses McpToolExecutor) |
+| `rig_tools.rs` | 400 | Echo / FileRead / FileWrite / ListDir tools |
+| `task.rs` | 340 | Step/Plan/Checkpoint type definitions |
+| `memory.rs` | 140 | Long-term memory (FTS5 full-text search) |
+| `skill.rs` | 390 | Skill system (JSON files + auto-learning) |
+| `git.rs` | 240 | Git integration (git2 + gh CLI) |
+| `error.rs` | 34 | Unified error types |
 
-### 安全架构
+### Security Architecture
 
-| 防护层 | 实现 |
-|--------|------|
-| 命令黑名单 | 20+ 危险命令（sudo, rm, mkfs, dd 等） |
-| 文件路径沙箱 | `path_jail` crate，防 `../../etc/passwd`、符号链接逃逸 |
-| SSRF 防护 | 封锁 localhost/127.0.0.1/0.0.0.0/`[::1]`/169.254.x.x/nip.io |
-| 超时保护 | 命令 30s / HTTP 30s / 浏览器 30s |
-| 环境变量清洗 | 仅保留 PATH/HOME/USER/SHELL/LANG/TERM |
-| 输出截断 | 命令 10K / 文件读取 4K |
-| 多路径安全 | McpToolExecutor + LLM Agent + MCP Server 三重防护 |
+| Protection Layer | Implementation |
+|------------------|----------------|
+| Command blocklist | 20+ dangerous commands blocked (sudo, rm, mkfs, dd, etc.) |
+| File path sandbox | `path_jail` crate — prevents `../../etc/passwd`, symlink escapes |
+| SSRF protection | Blocks localhost/127.0.0.1/0.0.0.0/`[::1]`/169.254.x.x/nip.io |
+| Timeout protection | Command 30s / HTTP 30s / Browser 30s |
+| Environment sanitization | Only PATH/HOME/USER/SHELL/LANG/TERM preserved |
+| Output truncation | Command output 10K / file reads 4K |
+| Multi-path security | Triple protection: McpToolExecutor + LLM Agent + MCP Server |
 
 ---
 
-## 核心特性
+## Core Features
 
-### Plan 执行引擎
+### Plan Execution Engine
 
-支持 7 种步骤类型：
+Supports 7 step types:
 
-| 步骤 | 说明 |
-|------|------|
-| Think | LLM 推理，带有 FTS5 记忆检索上下文 |
-| ToolCall | 调用内置工具（文件读写、目录列表、Echo） |
-| WaitForInput | 等待用户输入后继续 |
-| Exec | 执行外部命令（受安全沙箱限制） |
-| HttpRequest | HTTP GET/POST 请求（带 SSRF 防护） |
-| BrowserAction | 浏览器自动化（Navigate/Screenshot/Click/GetText） |
-| Finish | 完成计划，自动触发技能学习 |
+| Step | Description |
+|------|-------------|
+| Think | LLM reasoning with FTS5 memory retrieval for context |
+| ToolCall | Invoke built-in tools (file read/write, directory listing, Echo) |
+| WaitForInput | Pause and wait for user input before continuing |
+| Exec | Run external commands (restricted by the security sandbox) |
+| HttpRequest | HTTP GET/POST requests (with SSRF protection) |
+| BrowserAction | Browser automation (Navigate/Screenshot/Click/GetText) |
+| Finish | Complete the plan, triggers automatic skill learning |
 
-### 崩溃恢复
+### Crash Recovery
 
-- **心跳 Checkpoint**：长时间操作前写入 Running 状态 CP
-- **事务原子性**：`record_step_completion` 在单 SQLite 事务中更新 Plan + Checkpoint
-- **三层恢复**：`reset_running_plans→get_last_checkpoint→按状态决定恢复点`
+- **Heartbeat Checkpoint**: Writes a Running-state checkpoint before long-running operations
+- **Transactional atomicity**: `record_step_completion` updates Plan + Checkpoint in a single SQLite transaction
+- **Three-tier recovery**: `reset_running_plans → get_last_checkpoint → resume point determined by state`
 
 ### TUI
 
-- **三栏布局**：左侧会话列表、中心聊天区、右侧状态面板
-- **消息气泡**：用户/助手/系统三色区分
-- **代码块高亮**：代码边框渲染 + 预折行
-- **输入历史**：↑/↓ 导航前 100 条输入
-- **自动滚动**：新消息自动滚到底部，手动翻看后发消息恢复
-- **窗口自适应**：终端大小变化自动重新布局、重新折行
+- **Three-column layout**: Session list on the left, chat area in the center, status panel on the right
+- **Message bubbles**: Three colors distinguish user / assistant / system messages
+- **Code block highlighting**: Code rendered with borders and pre-wrapping
+- **Input history**: ↑/↓ navigates through the last 100 inputs
+- **Auto-scroll**: New messages auto-scroll to the bottom; manual scroll resets after sending a new message
+- **Adaptive layout**: Automatically re-layouts and re-wraps when terminal size changes
 
-### 技能系统
+### Skill System
 
-- **JSON 文件管理**：`~/.skills/*.json`
-- **内置技能**：code-review, generate-readme
-- **自动学习**：Plan 执行完成后自动抽取为可复用技能
-- **手动学习**：`rupoo skills learn <plan_id> <skill_name>`
+- **JSON file management**: `~/.skills/*.json`
+- **Built-in skills**: code-review, generate-readme
+- **Auto-learning**: Automatically extracted as a reusable skill after Plan execution completes
+- **Manual learning**: `rupoo skills learn <plan_id> <skill_name>`
 
-### 长期记忆
+### Long-term Memory
 
-- **FTS5 全文搜索**：支持 BM25 相关性排序
-- **会话持久化**：SQLite 存储 UI 会话历史
-- **上下文注入**：Think 步骤自动检索相关记忆
-
----
-
-## 依赖
-
-| Crate | 用途 |
-|-------|------|
-| tokio | 异步运行时 |
-| clap | CLI 解析 |
-| ratatui + crossterm | TUI 框架 |
-| rig-core 0.30 | LLM 多提供商网关 |
-| rusqlite (WAL + FTS5) | SQLite 数据库 |
-| git2 | Git 操作 |
-| reqwest | HTTP 客户端 |
-| path_jail | 文件路径安全 |
-| tui-textarea | TUI 输入组件 |
-| serde + serde_json | 序列化 |
-| tracing + tracing-subscriber | 日志 |
-| uuid | Plan / Step ID |
-| chrono | 时间戳 |
-| crossbeam-channel | 跨线程通信 |
+- **FTS5 full-text search**: Supports BM25 relevance ranking
+- **Session persistence**: SQLite stores UI session history
+- **Context injection**: Think steps automatically retrieve relevant memories
 
 ---
 
-## 测试
+## Dependencies
+
+| Crate | Purpose |
+|-------|---------|
+| tokio | Async runtime |
+| clap | CLI argument parsing |
+| ratatui + crossterm | TUI framework |
+| rig-core 0.30 | Multi-provider LLM gateway |
+| rusqlite (WAL + FTS5) | SQLite database |
+| git2 | Git operations |
+| reqwest | HTTP client |
+| path_jail | File path security |
+| tui-textarea | TUI input component |
+| serde + serde_json | Serialization |
+| tracing + tracing-subscriber | Logging |
+| uuid | Plan / Step IDs |
+| chrono | Timestamps |
+| crossbeam-channel | Cross-thread communication |
+
+---
+
+## Testing
 
 ```bash
-# 全部测试
+# Run all tests
 cargo test
 
-# 仅库测试
+# Library tests only
 cargo test --lib
 
-# 仅集成测试
+# Integration tests only
 cargo test --test db_test
 cargo test --test crash_recovery_test
 cargo test --test cli_db_test
 
-# 执行计划
+# Execute the demo plan
 cargo run --release demo
 ```
 
-106 项测试覆盖：
-- 54 单元测试（Agent、DB、LLM、MCP、Safety、Memories、Skills、Git）
-- 33 main crate 测试（CLI 命令 + TUI handler）
-- 4 CLI-DB 集成测试
-- 2 崩溃恢复集成测试
-- 13 DB 集成测试
+106 tests covering:
+- 54 unit tests (Agent, DB, LLM, MCP, Safety, Memories, Skills, Git)
+- 33 main crate tests (CLI commands + TUI handler)
+- 4 CLI-DB integration tests
+- 2 crash recovery integration tests
+- 13 DB integration tests
 
 ---
 
-## 构建
+## Building
 
 ```bash
-# 开发构建
+# Development build
 cargo build
 
-# 发布构建（推荐）
+# Release build (recommended)
 cargo build --release
 
-# 带 GUI 支持
+# With GUI support
 cargo build --release --features gui
 
-# 二进制大小
+# Binary size
 # ~14 MB (release, ARM64)
 ```
 
 ---
 
-## 许可证
+## License
 
 MIT
