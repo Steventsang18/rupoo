@@ -18,6 +18,16 @@ Cargo.lock
 # Local config (contains API keys)
 rupoo-config.toml
 
+# Demo HTML pages
+*.html
+!docs/**/*.html
+
+# Internal dev notes
+*.md
+!README.md
+!CONTRIBUTING.md
+!docs/**/*.md
+
 # OS
 .DS_Store
 Thumbs.db
