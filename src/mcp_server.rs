@@ -19,7 +19,10 @@ use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, BufWriter};
 use tracing::{error, info};
 
+use crate::agent::safety::SafetyContext;
+use crate::agent::ToolExecutor;
 use crate::error::{AgentError, AgentResult};
+use crate::mcp::McpToolExecutor;
 
 // ---------------------------------------------------------------------------
 // JSON-RPC types
@@ -65,27 +68,27 @@ struct McpToolDescription {
 }
 
 // ---------------------------------------------------------------------------
-// Tool registry
+// Tool metadata (for tools/list only; execution delegates to McpToolExecutor)
 // ---------------------------------------------------------------------------
 
-/// A registered tool in the MCP server.
 struct McpToolEntry {
     name: &'static str,
     description: &'static str,
     parameters: serde_json::Value,
-    handler: Box<dyn Fn(serde_json::Value) -> AgentResult<String> + Send + Sync>,
 }
 
 struct McpServer {
     tools: Vec<McpToolEntry>,
     initialized: bool,
+    executor: McpToolExecutor,
 }
 
 impl McpServer {
-    fn new() -> Self {
+    fn new(safety_ctx: SafetyContext) -> Self {
         Self {
             tools: Self::builtin_tools(),
             initialized: false,
+            executor: McpToolExecutor::with_safety(safety_ctx),
         }
     }
 
@@ -104,12 +107,6 @@ impl McpServer {
                     },
                     "required": ["message"]
                 }),
-                handler: Box::new(|params| {
-                    let msg = params.get("message")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("");
-                    Ok(format!("echo: {msg}"))
-                }),
             },
             McpToolEntry {
                 name: "file_read",
@@ -123,22 +120,6 @@ impl McpServer {
                         }
                     },
                     "required": ["path"]
-                }),
-                handler: Box::new(|params| {
-                    let path = params.get("path")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("");
-                    match std::fs::read_to_string(path) {
-                        Ok(content) => {
-                            let end = content.floor_char_boundary(4096);
-                            if end < content.len() {
-                                Ok(format!("{}...(truncated {end} bytes)", &content[..end]))
-                            } else {
-                                Ok(content)
-                            }
-                        }
-                        Err(e) => Err(AgentError::Other(format!("cannot read '{}': {e}", path))),
-                    }
                 }),
             },
             McpToolEntry {
@@ -158,18 +139,6 @@ impl McpServer {
                     },
                     "required": ["path", "content"]
                 }),
-                handler: Box::new(|params| {
-                    let path = params.get("path")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("");
-                    let content = params.get("content")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("");
-                    match std::fs::write(path, content) {
-                        Ok(()) => Ok(format!("wrote {} bytes to '{}'", content.len(), path)),
-                        Err(e) => Err(AgentError::Other(format!("cannot write '{}': {e}", path))),
-                    }
-                }),
             },
             McpToolEntry {
                 name: "list_directory",
@@ -184,37 +153,12 @@ impl McpServer {
                     },
                     "required": ["path"]
                 }),
-                handler: Box::new(|params| {
-                    let path = params.get("path")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or(".");
-                    match std::fs::read_dir(path) {
-                        Ok(entries) => {
-                            let mut listing = String::new();
-                            for entry in entries.flatten() {
-                                let name = entry.file_name().to_string_lossy().to_string();
-                                let kind = if entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
-                                    "dir"
-                                } else {
-                                    "file"
-                                };
-                                listing.push_str(&format!("  [{kind}] {name}\n"));
-                            }
-                            if listing.is_empty() {
-                                Ok("(empty directory)".into())
-                            } else {
-                                Ok(listing)
-                            }
-                        }
-                        Err(e) => Err(AgentError::Other(format!("cannot list '{}': {e}", path))),
-                    }
-                }),
             },
         ]
     }
 
     /// Handle a JSON-RPC request and return an optional response.
-    fn handle_request(&mut self, req: JsonRpcRequest) -> Option<JsonRpcResponse> {
+    async fn handle_request(&mut self, req: JsonRpcRequest) -> Option<JsonRpcResponse> {
         let id = req.id.clone().unwrap_or(serde_json::Value::Null);
 
         match req.method.as_str() {
@@ -237,10 +181,7 @@ impl McpServer {
                     error: None,
                 })
             }
-            "notifications/initialized" => {
-                // Notification: no response expected
-                None
-            }
+            "notifications/initialized" => None,
             "tools/list" => {
                 if !self.initialized {
                     return Some(self.error_response(id, -32000, "Not initialized"));
@@ -281,33 +222,32 @@ impl McpServer {
                     .cloned()
                     .unwrap_or(serde_json::Value::Object(Default::default()));
 
-                match self.tools.iter().find(|t| t.name == name) {
-                    Some(tool) => {
-                        match (tool.handler)(arguments) {
-                            Ok(text) => Some(JsonRpcResponse {
-                                jsonrpc: "2.0",
-                                id,
-                                result: Some(serde_json::json!({
-                                    "content": [{"type": "text", "text": text}]
-                                })),
-                                error: None,
-                            }),
-                            Err(e) => Some(JsonRpcResponse {
-                                jsonrpc: "2.0",
-                                id,
-                                result: Some(serde_json::json!({
-                                    "content": [{"type": "text", "text": format!("Error: {e}")}],
-                                    "isError": true
-                                })),
-                                error: None,
-                            }),
-                        }
+                // Delegate to McpToolExecutor (which applies path_jail + safety checks)
+                match self.executor.execute_tool(&name, arguments).await {
+                    Ok(mcp_result) => {
+                        let text = if mcp_result.success {
+                            mcp_result.content
+                        } else {
+                            format!("Error: {}", mcp_result.error.unwrap_or_default())
+                        };
+                        Some(JsonRpcResponse {
+                            jsonrpc: "2.0",
+                            id,
+                            result: Some(serde_json::json!({
+                                "content": [{"type": "text", "text": text}]
+                            })),
+                            error: None,
+                        })
                     }
-                    None => Some(self.error_response(
+                    Err(e) => Some(JsonRpcResponse {
+                        jsonrpc: "2.0",
                         id,
-                        -32602,
-                        &format!("Unknown tool: '{name}'"),
-                    )),
+                        result: Some(serde_json::json!({
+                            "content": [{"type": "text", "text": format!("Error: {e}")}],
+                            "isError": true
+                        })),
+                        error: None,
+                    }),
                 }
             }
             _ => Some(self.error_response(
@@ -340,11 +280,20 @@ impl McpServer {
 pub async fn run_mcp_server() -> AgentResult<()> {
     info!("MCP server starting on stdio");
 
+    let safety_ctx = {
+        let config_path = std::path::Path::new("rupoo-config.toml");
+        if config_path.exists() {
+            SafetyContext::from_config(config_path)
+        } else {
+            SafetyContext::default()
+        }
+    };
+
     let stdin = tokio::io::stdin();
     let reader = BufReader::new(stdin);
     let mut lines = reader.lines();
 
-    let mut server = McpServer::new();
+    let mut server = McpServer::new(safety_ctx);
 
     while let Some(line) = lines.next_line().await.map_err(|e| {
         AgentError::Other(format!("stdin read error: {e}"))
@@ -371,7 +320,7 @@ pub async fn run_mcp_server() -> AgentResult<()> {
             }
         };
 
-        if let Some(resp) = server.handle_request(req) {
+        if let Some(resp) = server.handle_request(req).await {
             write_response(&resp).await;
         }
     }
@@ -382,13 +331,11 @@ pub async fn run_mcp_server() -> AgentResult<()> {
 
 async fn write_response(resp: &JsonRpcResponse) {
     let json = serde_json::to_string(resp).unwrap_or_default();
-    // Use BufWriter to allow writing to stdout
     let stdout = tokio::io::stdout();
     let mut writer = BufWriter::new(stdout);
     if let Err(e) = writer.write_all(format!("{json}\n").as_bytes()).await {
         error!(error = %e, "failed to write MCP response");
     }
-    // Flush so client receives immediately
     let _ = writer.flush().await;
 }
 
@@ -396,42 +343,44 @@ async fn write_response(resp: &JsonRpcResponse) {
 mod tests {
     use super::*;
 
-    #[test]
-    fn test_tool_list_requires_init() {
-        let mut server = McpServer::new();
+    fn make_server() -> McpServer {
+        McpServer::new(SafetyContext::default())
+    }
+
+    #[tokio::test]
+    async fn test_tool_list_requires_init() {
+        let mut server = make_server();
         let req = JsonRpcRequest {
             id: Some(serde_json::json!(1)),
             method: "tools/list".into(),
             params: None,
         };
-        let resp = server.handle_request(req);
+        let resp = server.handle_request(req).await;
         assert!(resp.is_some());
         let r = resp.unwrap();
         assert!(r.error.is_some());
         assert_eq!(r.error.unwrap().code, -32000);
     }
 
-    #[test]
-    fn test_initialize_then_list() {
-        let mut server = McpServer::new();
+    #[tokio::test]
+    async fn test_initialize_then_list() {
+        let mut server = make_server();
 
-        // Initialize
         let init = JsonRpcRequest {
             id: Some(serde_json::json!(1)),
             method: "initialize".into(),
             params: None,
         };
-        let resp = server.handle_request(init);
+        let resp = server.handle_request(init).await;
         assert!(resp.is_some());
         assert!(resp.unwrap().result.is_some());
 
-        // List tools
         let list = JsonRpcRequest {
             id: Some(serde_json::json!(2)),
             method: "tools/list".into(),
             params: None,
         };
-        let resp = server.handle_request(list);
+        let resp = server.handle_request(list).await;
         assert!(resp.is_some());
         let r = resp.unwrap();
         let result_val = r.result.unwrap();
@@ -442,18 +391,16 @@ mod tests {
         assert!(names.contains(&"file_read"));
     }
 
-    #[test]
-    fn test_tool_call_echo() {
-        let mut server = McpServer::new();
+    #[tokio::test]
+    async fn test_tool_call_echo() {
+        let mut server = make_server();
 
-        // Initialize
         server.handle_request(JsonRpcRequest {
             id: Some(serde_json::json!(1)),
             method: "initialize".into(),
             params: None,
-        });
+        }).await;
 
-        // Call echo
         let call = JsonRpcRequest {
             id: Some(serde_json::json!(2)),
             method: "tools/call".into(),
@@ -462,7 +409,7 @@ mod tests {
                 "arguments": {"message": "hello mcp"}
             })),
         };
-        let resp = server.handle_request(call);
+        let resp = server.handle_request(call).await;
         assert!(resp.is_some());
         let r = resp.unwrap();
         let result_val = r.result.unwrap();
@@ -470,16 +417,46 @@ mod tests {
         assert_eq!(content[0]["text"].as_str().unwrap(), "echo: hello mcp");
     }
 
-    #[test]
-    fn test_unknown_method() {
-        let mut server = McpServer::new();
+    #[tokio::test]
+    async fn test_unknown_method() {
+        let mut server = make_server();
         let req = JsonRpcRequest {
             id: Some(serde_json::json!(1)),
             method: "unknown_method".into(),
             params: None,
         };
-        let resp = server.handle_request(req);
+        let resp = server.handle_request(req).await;
         assert!(resp.is_some());
         assert!(resp.unwrap().error.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_file_jail_applied() {
+        let mut server = make_server();
+
+        server.handle_request(JsonRpcRequest {
+            id: Some(serde_json::json!(1)),
+            method: "initialize".into(),
+            params: None,
+        }).await;
+
+        // file_read with path traversal should be rejected
+        let call = JsonRpcRequest {
+            id: Some(serde_json::json!(2)),
+            method: "tools/call".into(),
+            params: Some(serde_json::json!({
+                "name": "file_read",
+                "arguments": {"path": "../../../etc/passwd"}
+            })),
+        };
+        let resp = server.handle_request(call).await;
+        assert!(resp.is_some());
+        // McpToolExecutor applies path_jail, so traversal is blocked.
+        let r = resp.unwrap();
+        let result_val = r.result.unwrap();
+        let content = result_val["content"].as_array().unwrap();
+        let text = content[0]["text"].as_str().unwrap();
+        assert!(text.contains("blocked") || text.contains("denied") || text.contains("Error"),
+            "expected path to be blocked, got: {text}");
     }
 }

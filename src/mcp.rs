@@ -1,39 +1,124 @@
 //! MCP tool executor — bridges plan-level ToolCall steps with
 //! rig_tools implementations.
 //!
-//! This module delegates to `rig_tools.rs` for all actual tool logic,
-//! avoiding code duplication between the two tool systems.
+//! Architecture: a typed enum replaces the old Box<dyn Fn> dispatch.
+//! Each variant holds the concrete tool struct, with async execute
+//! implemented directly via match, eliminating both the closure heap
+//! allocation and the nested Runtime::block_on per call.
 
 use std::collections::HashMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use tokio::sync::Mutex;
-use tracing::info;
+use tokio::sync::RwLock;
 
+use crate::agent::safety::SafetyContext;
 use crate::agent::ToolExecutor;
 use crate::error::{AgentError, AgentResult};
 use crate::task::McpToolResult;
 
-// Bring rig Tool trait into scope for .call() method.
+use crate::rig_tools::{
+    EchoArgs,
+    FileReadArgs,
+    FileWriteArgs,
+    ListDirArgs,
+};
+
 use rig::tool::Tool;
 
-// ---------------------------------------------------------------------------
-// MCP tool registry (delegates to rig_tools)
-// ---------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
+// ToolKind enum — replaces Box<dyn Fn> dispatch
+// -----------------------------------------------------------------------------
 
-/// A dispatcher that maps tool names to rig_tools Tool implementations.
-/// Used by the Agent for explicit ToolCall steps.
-pub struct McpToolExecutor {
-    registry: Arc<Mutex<HashMap<String, ToolDispatchEntry>>>,
+enum ToolKind {
+    Echo,
+    FileRead,
+    FileWrite,
+    ListDir,
 }
 
-struct ToolDispatchEntry {
-    #[allow(dead_code)]
-    name: String,
-    #[allow(dead_code)]
-    description: String,
-    call_fn: Box<dyn Fn(serde_json::Value) -> AgentResult<serde_json::Value> + Send + Sync>,
+impl ToolKind {
+    fn name(&self) -> &'static str {
+        match self {
+            ToolKind::Echo => "echo",
+            ToolKind::FileRead => "file_read",
+            ToolKind::FileWrite => "file_write",
+            ToolKind::ListDir => "list_directory",
+        }
+    }
+
+    fn description(&self) -> &'static str {
+        match self {
+            ToolKind::Echo => "Echo back a message",
+            ToolKind::FileRead => "Read the contents of a file at the given path",
+            ToolKind::FileWrite => "Write content to a file. Overwrites existing content.",
+            ToolKind::ListDir => "List entries in a directory",
+        }
+    }
+
+    async fn execute(&self, params: serde_json::Value) -> Result<serde_json::Value, String> {
+        match self {
+            ToolKind::Echo => {
+                let args: EchoArgs = serde_json::from_value(params)
+                    .map_err(|e| format!("bad args: {e}"))?;
+                let output = crate::rig_tools::EchoTool::new().call(args).await
+                    .map_err(|e| e.to_string())?;
+                serde_json::to_value(McpToolResult {
+                    success: true,
+                    content: output.result,
+                    error: None,
+                }).map_err(|e| e.to_string())
+            }
+            ToolKind::FileRead => {
+                let args: FileReadArgs = serde_json::from_value(params)
+                    .map_err(|e| format!("bad args: {e}"))?;
+                let output = crate::rig_tools::FileReadTool::new().call(args).await
+                    .map_err(|e| e.to_string())?;
+                serde_json::to_value(McpToolResult {
+                    success: output.success,
+                    content: output.content,
+                    error: output.error,
+                }).map_err(|e| e.to_string())
+            }
+            ToolKind::FileWrite => {
+                let args: FileWriteArgs = serde_json::from_value(params)
+                    .map_err(|e| format!("bad args: {e}"))?;
+                let output = crate::rig_tools::FileWriteTool::new().call(args).await
+                    .map_err(|e| e.to_string())?;
+                serde_json::to_value(McpToolResult {
+                    success: output.success,
+                    content: format!("{} bytes written", output.bytes_written),
+                    error: output.error,
+                }).map_err(|e| e.to_string())
+            }
+            ToolKind::ListDir => {
+                let args: ListDirArgs = serde_json::from_value(params)
+                    .map_err(|e| format!("bad args: {e}"))?;
+                let output = crate::rig_tools::ListDirTool::new().call(args).await
+                    .map_err(|e| e.to_string())?;
+                let content = output.entries.iter()
+                    .map(|e| format!("{} ({})", e.name, e.kind))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                serde_json::to_value(McpToolResult {
+                    success: output.success,
+                    content,
+                    error: output.error,
+                }).map_err(|e| e.to_string())
+            }
+        }
+    }
+}
+
+// -----------------------------------------------------------------------------
+// McpToolExecutor — holds ToolKind enum variants in a RwLock registry
+// -----------------------------------------------------------------------------
+
+/// A dispatcher that maps tool names to typed ToolKind variants.
+/// Used by the Agent for explicit ToolCall steps and by the MCP server.
+pub struct McpToolExecutor {
+    registry: Arc<RwLock<HashMap<String, Arc<ToolKind>>>>,
+    safety_ctx: SafetyContext,
 }
 
 impl Default for McpToolExecutor {
@@ -45,9 +130,13 @@ impl Default for McpToolExecutor {
 impl McpToolExecutor {
     pub fn new() -> Self {
         let mut tools = HashMap::new();
-        Self::register_builtin(&mut tools);
+        tools.insert("echo".into(), Arc::new(ToolKind::Echo));
+        tools.insert("file_read".into(), Arc::new(ToolKind::FileRead));
+        tools.insert("file_write".into(), Arc::new(ToolKind::FileWrite));
+        tools.insert("list_directory".into(), Arc::new(ToolKind::ListDir));
         Self {
-            registry: Arc::new(Mutex::new(tools)),
+            registry: Arc::new(RwLock::new(tools)),
+            safety_ctx: SafetyContext::default(),
         }
     }
 
@@ -55,144 +144,29 @@ impl McpToolExecutor {
         Self::new()
     }
 
-    fn register_builtin(tools: &mut HashMap<String, ToolDispatchEntry>) {
-        // Echo
-        tools.insert(
-            "echo".into(),
-            ToolDispatchEntry {
-                name: "echo".into(),
-                description: "Echo back a message".into(),
-                call_fn: Box::new(|params| {
-                    let msg = params
-                        .get("message")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("");
-                    Ok(serde_json::json!({
-                        "success": true,
-                        "content": format!("echo: {msg}"),
-                        "error": null
-                    }))
-                }),
-            },
-        );
-
-        // File read — delegates to crate::rig_tools::FileReadTool
-        tools.insert(
-            "file_read".into(),
-            ToolDispatchEntry {
-                name: "file_read".into(),
-                description: "Read the contents of a file at the given path".into(),
-                call_fn: Box::new(|params| {
-                    let rt = tokio::runtime::Runtime::new()
-                        .map_err(|e| AgentError::Other(e.to_string()))?;
-                    rt.block_on(async {
-                        let path = params
-                            .get("path")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("")
-                            .to_string();
-                        let tool = crate::rig_tools::FileReadTool;
-                        let args = crate::rig_tools::FileReadArgs { path };
-                        match tool.call(args).await {
-                            Ok(output) => Ok(serde_json::json!({
-                                "success": output.success,
-                                "content": output.content,
-                                "error": output.error
-                            })),
-                            Err(e) => Ok(serde_json::json!({
-                                "success": false,
-                                "content": "",
-                                "error": format!("tool error: {e}")
-                            })),
-                        }
-                    })
-                }),
-            },
-        );
-
-        // File write — delegates to crate::rig_tools::FileWriteTool
-        tools.insert(
-            "file_write".into(),
-            ToolDispatchEntry {
-                name: "file_write".into(),
-                description: "Write content to a file".into(),
-                call_fn: Box::new(|params| {
-                    let rt = tokio::runtime::Runtime::new()
-                        .map_err(|e| AgentError::Other(e.to_string()))?;
-                    rt.block_on(async {
-                        let path = params
-                            .get("path")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("")
-                            .to_string();
-                        let content = params
-                            .get("content")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("")
-                            .to_string();
-                        let tool = crate::rig_tools::FileWriteTool;
-                        let args = crate::rig_tools::FileWriteArgs { path, content };
-                        match tool.call(args).await {
-                            Ok(output) => Ok(serde_json::json!({
-                                "success": output.success,
-                                "bytes_written": output.bytes_written,
-                                "error": output.error
-                            })),
-                            Err(e) => Ok(serde_json::json!({
-                                "success": false,
-                                "error": format!("tool error: {e}")
-                            })),
-                        }
-                    })
-                }),
-            },
-        );
-
-        // List directory — delegates to crate::rig_tools::ListDirTool
-        tools.insert(
-            "list_directory".into(),
-            ToolDispatchEntry {
-                name: "list_directory".into(),
-                description: "List entries in a directory".into(),
-                call_fn: Box::new(|params| {
-                    let rt = tokio::runtime::Runtime::new()
-                        .map_err(|e| AgentError::Other(e.to_string()))?;
-                    rt.block_on(async {
-                        let path = params
-                            .get("path")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("")
-                            .to_string();
-                        let tool = crate::rig_tools::ListDirTool;
-                        let args = crate::rig_tools::ListDirArgs { path };
-                        match tool.call(args).await {
-                            Ok(output) => {
-                                let entries: Vec<String> = output
-                                    .entries
-                                    .iter()
-                                    .map(|e| format!("[{}] {}", e.kind, e.name))
-                                    .collect();
-                                Ok(serde_json::json!({
-                                    "success": output.success,
-                                    "content": entries.join("\n"),
-                                    "error": output.error
-                                }))
-                            }
-                            Err(e) => Ok(serde_json::json!({
-                                "success": false,
-                                "content": "",
-                                "error": format!("tool error: {e}")
-                            })),
-                        }
-                    })
-                }),
-            },
-        );
+    /// Create with a pre-configured SafetyContext for file jail enforcement.
+    pub fn with_safety(safety_ctx: SafetyContext) -> Self {
+        let mut tools = HashMap::new();
+        tools.insert("echo".into(), Arc::new(ToolKind::Echo));
+        tools.insert("file_read".into(), Arc::new(ToolKind::FileRead));
+        tools.insert("file_write".into(), Arc::new(ToolKind::FileWrite));
+        tools.insert("list_directory".into(), Arc::new(ToolKind::ListDir));
+        Self {
+            registry: Arc::new(RwLock::new(tools)),
+            safety_ctx,
+        }
     }
 
+    /// Return all registered tool names.
     pub async fn list_tools(&self) -> Vec<String> {
-        let reg = self.registry.lock().await;
+        let reg = self.registry.read().await;
         reg.keys().cloned().collect()
+    }
+
+    /// Return tool descriptions for MCP server.
+    pub async fn list_tools_with_desc(&self) -> Vec<(&'static str, &'static str)> {
+        let reg = self.registry.read().await;
+        reg.values().map(|t| (t.name(), t.description())).collect()
     }
 }
 
@@ -203,14 +177,18 @@ impl ToolExecutor for McpToolExecutor {
         tool_name: &str,
         params: serde_json::Value,
     ) -> AgentResult<McpToolResult> {
-        // Acquire lock once, call synchronously, then drop
-        let result = {
-            let reg = self.registry.lock().await;
-            let entry = reg.get(tool_name).ok_or_else(|| {
+        // Apply file jail for file operations before dispatching
+        let params = apply_path_jail_to_params(tool_name, params, &self.safety_ctx)?;
+
+        let entry = {
+            let reg = self.registry.read().await;
+            reg.get(tool_name).map(Arc::clone).ok_or_else(|| {
                 AgentError::Mcp(format!("unknown tool: '{tool_name}'"))
-            })?;
-            (entry.call_fn)(params)
+            })?
         };
+
+        // Direct async call — no spawn_blocking, no nested Runtime
+        let result = entry.execute(params).await;
 
         match result {
             Ok(value) => {
@@ -227,97 +205,45 @@ impl ToolExecutor for McpToolExecutor {
                     .get("error")
                     .and_then(|v| v.as_str())
                     .map(|s| s.to_string());
-                Ok(McpToolResult {
-                    success,
-                    content,
-                    error,
-                })
+                Ok(McpToolResult { success, content, error })
             }
             Err(e) => Ok(McpToolResult {
                 success: false,
                 content: String::new(),
-                error: Some(e.to_string()),
+                error: Some(e),
             }),
         }
     }
 }
 
-// ---------------------------------------------------------------------------
-// Minimal JSON-RPC client for connecting to external MCP server processes
-// (stdio transport)
-// ---------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
+// Path jail helper — extracts and validates file paths before tool dispatch
+// -----------------------------------------------------------------------------
 
-pub struct McpStdioClient {
-    child: tokio::process::Child,
-    stdin: tokio::io::BufWriter<tokio::process::ChildStdin>,
-    stdout: tokio::io::BufReader<tokio::process::ChildStdout>,
-}
-
-impl McpStdioClient {
-    /// Spawn an external MCP server process and connect via stdio.
-    pub async fn spawn(command: &str, args: &[&str]) -> AgentResult<Self> {
-        let mut child = tokio::process::Command::new(command)
-            .args(args)
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::inherit())
-            .spawn()?;
-
-        let stdin = child
-            .stdin
-            .take()
-            .ok_or_else(|| AgentError::Mcp("failed to capture stdin".into()))?;
-        let stdout = child
-            .stdout
-            .take()
-            .ok_or_else(|| AgentError::Mcp("failed to capture stdout".into()))?;
-
-        info!("MCP stdio client spawned: {command}");
-        Ok(Self {
-            child,
-            stdin: tokio::io::BufWriter::new(stdin),
-            stdout: tokio::io::BufReader::new(stdout),
-        })
-    }
-
-    #[allow(dead_code)]
-    pub async fn call(
-        &mut self,
-        method: &str,
-        params: serde_json::Value,
-    ) -> AgentResult<serde_json::Value> {
-        use tokio::io::AsyncWriteExt;
-
-        let request = serde_json::json!({
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": method,
-            "params": params,
-        });
-
-        let mut buf = serde_json::to_vec(&request)?;
-        buf.push(b'\n');
-        self.stdin.write_all(&buf).await?;
-        self.stdin.flush().await?;
-
-        let mut line = String::new();
-        use tokio::io::AsyncBufReadExt;
-        self.stdout.read_line(&mut line).await?;
-
-        if line.is_empty() {
-            return Err(AgentError::Mcp("MCP server closed connection".into()));
+fn apply_path_jail_to_params(
+    tool_name: &str,
+    mut params: serde_json::Value,
+    safety_ctx: &SafetyContext,
+) -> AgentResult<serde_json::Value> {
+    match tool_name {
+        "file_read" | "file_write" | "list_directory" => {
+            let path_owned = params
+                .get("path")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+            if let Some(ref path_str) = path_owned {
+                let safe_path = safety_ctx.apply_file_jail(std::path::Path::new(path_str))?;
+                if let Some(obj) = params.as_object_mut() {
+                    obj.insert(
+                        "path".into(),
+                        serde_json::Value::String(safe_path.to_string_lossy().to_string()),
+                    );
+                }
+            }
         }
-
-        let response: serde_json::Value = serde_json::from_str(&line)?;
-        Ok(response)
+        _ => {}
     }
-
-    #[allow(dead_code)]
-    pub async fn shutdown(&mut self) -> AgentResult<()> {
-        self.child.kill().await?;
-        self.child.wait().await?;
-        Ok(())
-    }
+    Ok(params)
 }
 
 #[cfg(test)]
@@ -336,11 +262,78 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_file_read_nonexistent() {
+        let executor = McpToolExecutor::new();
+        let result = executor
+            .execute_tool("file_read", serde_json::json!({"path": "target/_nonexistent_xyz_test_file"}))
+            .await
+            .unwrap();
+        assert!(!result.success);
+        assert!(result.error.is_some());
+    }
+
+    #[tokio::test]
     async fn test_unknown_tool() {
         let executor = McpToolExecutor::new();
         let result = executor
             .execute_tool("nonexistent", serde_json::json!({}))
             .await;
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_list_directory() {
+        let executor = McpToolExecutor::new();
+        let result = executor
+            .execute_tool("list_directory", serde_json::json!({"path": "."}))
+            .await
+            .unwrap();
+        assert!(result.success);
+        assert!(!result.content.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_file_write_and_read() {
+        use std::path::Path;
+        let test_dir = Path::new("target/_rupoo_mcp_test");
+        let _ = std::fs::create_dir_all(test_dir);
+        let test_path = test_dir.join("test_write.txt");
+        let test_path_str = test_path.to_string_lossy().to_string();
+
+        let executor = McpToolExecutor::new();
+        let write_result = executor
+            .execute_tool(
+                "file_write",
+                serde_json::json!({
+                    "path": test_path_str,
+                    "content": "hello from mcp test"
+                }),
+            )
+            .await
+            .unwrap();
+        assert!(write_result.success);
+
+        let read_result = executor
+            .execute_tool(
+                "file_read",
+                serde_json::json!({"path": test_path.to_string_lossy()}),
+            )
+            .await
+            .unwrap();
+        assert!(read_result.success);
+        assert!(read_result.content.contains("hello from mcp test"));
+
+        // cleanup
+        let _ = std::fs::remove_file(&test_path);
+        let _ = std::fs::remove_dir(test_dir);
+    }
+
+    #[tokio::test]
+    async fn test_list_tools() {
+        let executor = McpToolExecutor::new();
+        let tools = executor.list_tools().await;
+        assert_eq!(tools.len(), 4);
+        assert!(tools.contains(&"echo".into()));
+        assert!(tools.contains(&"file_read".into()));
     }
 }

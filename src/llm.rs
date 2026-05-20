@@ -1,6 +1,8 @@
 use serde::{Deserialize, Serialize};
 use tracing::info;
 
+use std::path::PathBuf;
+
 use crate::error::{AgentError, AgentResult};
 
 // ---------------------------------------------------------------------------
@@ -103,11 +105,16 @@ pub enum ChatRole {
 /// Unified gateway for multiple LLM providers.
 pub struct LlmGateway {
     config: LlmConfig,
+    jail_root: Option<PathBuf>,
 }
 
 impl LlmGateway {
     pub fn new(config: LlmConfig) -> Self {
-        Self { config }
+        Self { config, jail_root: None }
+    }
+
+    pub fn with_jail(config: LlmConfig, jail_root: PathBuf) -> Self {
+        Self { config, jail_root: Some(jail_root) }
     }
 
     pub fn config(&self) -> &LlmConfig {
@@ -139,26 +146,27 @@ impl LlmGateway {
 
         // Rebuild agent per request (lightweight). Each provider returns
         // a different concrete type, so we keep prompting inside the match.
+        let jail_root = self.jail_root.clone();
         let (text, prompt_tokens, completion_tokens): (String, u64, u64) = match &self.config.provider {
             LlmProvider::Anthropic => {
-                let agent = build_anthropic_agent(&self.config, preamble)?;
-                let response = agent.prompt(prompt)
+                let agent = build_anthropic_agent(&self.config, preamble, jail_root.as_deref())?;
+                let response = agent.prompt(&prompt)
                     .extended_details()
                     .await
                     .map_err(|e| AgentError::Other(format!("LLM request failed: {e}")))?;
                 (response.output, response.total_usage.input_tokens, response.total_usage.output_tokens)
             }
             LlmProvider::OpenAI => {
-                let agent = build_openai_agent(&self.config, preamble)?;
-                let response = agent.prompt(prompt)
+                let agent = build_openai_agent(&self.config, preamble, jail_root.as_deref())?;
+                let response = agent.prompt(&prompt)
                     .extended_details()
                     .await
                     .map_err(|e| AgentError::Other(format!("LLM request failed: {e}")))?;
                 (response.output, response.total_usage.input_tokens, response.total_usage.output_tokens)
             }
             LlmProvider::Ollama => {
-                let agent = build_ollama_agent(&self.config, preamble)?;
-                let response = agent.prompt(prompt)
+                let agent = build_ollama_agent(&self.config, preamble, jail_root.as_deref())?;
+                let response = agent.prompt(&prompt)
                     .extended_details()
                     .await
                     .map_err(|e| AgentError::Other(format!("LLM request failed: {e}")))?;
@@ -190,6 +198,7 @@ impl LlmGateway {
 fn build_anthropic_agent(
     config: &LlmConfig,
     preamble: &str,
+    jail_root: Option<&std::path::Path>,
 ) -> AgentResult<rig::agent::Agent<rig::providers::anthropic::completion::CompletionModel>> {
     use rig::agent::AgentBuilder;
 
@@ -205,21 +214,32 @@ fn build_anthropic_agent(
         &config.model,
     );
 
-    Ok(AgentBuilder::new(model)
+    let mut builder = AgentBuilder::new(model)
         .preamble(preamble)
         .temperature(config.temperature)
         .max_tokens(config.max_tokens as u64)
-        .tool(crate::rig_tools::EchoTool)
-        .tool(crate::rig_tools::FileReadTool)
-        .tool(crate::rig_tools::FileWriteTool)
-        .tool(crate::rig_tools::ListDirTool)
-        .default_max_turns(10)
-        .build())
+        .tool(crate::rig_tools::EchoTool::new())
+        .default_max_turns(10);
+
+    if let Some(root) = jail_root {
+        builder = builder
+            .tool(crate::rig_tools::FileReadTool::with_jail(root.to_path_buf()))
+            .tool(crate::rig_tools::FileWriteTool::with_jail(root.to_path_buf()))
+            .tool(crate::rig_tools::ListDirTool::with_jail(root.to_path_buf()));
+    } else {
+        builder = builder
+            .tool(crate::rig_tools::FileReadTool::new())
+            .tool(crate::rig_tools::FileWriteTool::new())
+            .tool(crate::rig_tools::ListDirTool::new());
+    }
+
+    Ok(builder.build())
 }
 
 fn build_openai_agent(
     config: &LlmConfig,
     preamble: &str,
+    jail_root: Option<&std::path::Path>,
 ) -> AgentResult<rig::agent::Agent<rig::providers::openai::completion::CompletionModel>> {
     use rig::agent::AgentBuilder;
 
@@ -229,7 +249,6 @@ fn build_openai_agent(
     let client: rig::providers::openai::client::Client =
         match &config.base_url {
             Some(custom_url) => {
-                // Use builder pattern for custom base URL (e.g. DeepSeek, MiniMax)
                 rig::providers::openai::client::Client::builder()
                     .api_key(api_key)
                     .base_url(custom_url)
@@ -251,15 +270,21 @@ fn build_openai_agent(
         .preamble(preamble)
         .temperature(config.temperature)
         .max_tokens(config.max_tokens as u64)
-        .tool(crate::rig_tools::EchoTool)
-        .tool(crate::rig_tools::FileReadTool)
-        .tool(crate::rig_tools::FileWriteTool)
-        .tool(crate::rig_tools::ListDirTool)
+        .tool(crate::rig_tools::EchoTool::new())
         .default_max_turns(10);
 
-    // When using a custom base URL (DeepSeek, MiniMax, etc.),
-    // disable thinking/reasoning mode to avoid 400 errors from
-    // unhandled reasoning_content fields.
+    if let Some(root) = jail_root {
+        builder = builder
+            .tool(crate::rig_tools::FileReadTool::with_jail(root.to_path_buf()))
+            .tool(crate::rig_tools::FileWriteTool::with_jail(root.to_path_buf()))
+            .tool(crate::rig_tools::ListDirTool::with_jail(root.to_path_buf()));
+    } else {
+        builder = builder
+            .tool(crate::rig_tools::FileReadTool::new())
+            .tool(crate::rig_tools::FileWriteTool::new())
+            .tool(crate::rig_tools::ListDirTool::new());
+    }
+
     if config.base_url.is_some() {
         builder = builder.additional_params(serde_json::json!({
             "thinking": {"type": "disabled"}
@@ -272,6 +297,7 @@ fn build_openai_agent(
 fn build_ollama_agent(
     config: &LlmConfig,
     preamble: &str,
+    jail_root: Option<&std::path::Path>,
 ) -> AgentResult<rig::agent::Agent<rig::providers::ollama::CompletionModel>> {
     use rig::agent::AgentBuilder;
 
@@ -286,16 +312,26 @@ fn build_ollama_agent(
 
     let model = rig::providers::ollama::CompletionModel::new(client, &config.model);
 
-    Ok(AgentBuilder::new(model)
+    let mut builder = AgentBuilder::new(model)
         .preamble(preamble)
         .temperature(config.temperature)
         .max_tokens(config.max_tokens as u64)
-        .tool(crate::rig_tools::EchoTool)
-        .tool(crate::rig_tools::FileReadTool)
-        .tool(crate::rig_tools::FileWriteTool)
-        .tool(crate::rig_tools::ListDirTool)
-        .default_max_turns(10)
-        .build())
+        .tool(crate::rig_tools::EchoTool::new())
+        .default_max_turns(10);
+
+    if let Some(root) = jail_root {
+        builder = builder
+            .tool(crate::rig_tools::FileReadTool::with_jail(root.to_path_buf()))
+            .tool(crate::rig_tools::FileWriteTool::with_jail(root.to_path_buf()))
+            .tool(crate::rig_tools::ListDirTool::with_jail(root.to_path_buf()));
+    } else {
+        builder = builder
+            .tool(crate::rig_tools::FileReadTool::new())
+            .tool(crate::rig_tools::FileWriteTool::new())
+            .tool(crate::rig_tools::ListDirTool::new());
+    }
+
+    Ok(builder.build())
 }
 
 fn role_label(role: &ChatRole) -> &'static str {

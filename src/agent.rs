@@ -26,6 +26,13 @@ pub enum StepOutcome {
     Finished,
     /// Agent is waiting for human input.
     WaitingForInput(String),
+    /// Tool call requires user approval before execution.
+    /// Bridge should call store_pending_plan then break the loop.
+    RequiresApproval {
+        tool_name: String,
+        params: serde_json::Value,
+        step_index: usize,
+    },
     /// Step failed (fatal for the plan).
     Failed(String),
 }
@@ -72,7 +79,7 @@ impl ToolExecutor for DummyToolExecutor {
 
 pub struct Agent {
     repo: Arc<TaskRepo>,
-    tool_executor: Box<dyn ToolExecutor>,
+    pub tool_executor: Box<dyn ToolExecutor>,
     llm_gateway: Option<LlmGateway>,
     pub safety_ctx: SafetyContext,
     /// Token usage from the most recent chat() call.
@@ -94,6 +101,12 @@ impl Agent {
     /// Return token usage from the most recent think step, if available.
     pub fn last_usage(&self) -> Option<TokenUsage> {
         self.last_usage.lock().ok().and_then(|g| *g)
+    }
+
+    /// Return a reference to the tool executor (used by AgentUiBridge for
+    /// direct approval-time tool execution, bypassing needs_approval checks).
+    pub fn get_tool_executor(&self) -> &Box<dyn ToolExecutor> {
+        &self.tool_executor
     }
 
     /// Attach an LLM gateway so Think steps produce real LLM responses.
@@ -395,6 +408,16 @@ impl Agent {
     ) -> AgentResult<StepOutcome> {
         let pid = plan.id.clone();
 
+        // High-risk tools require user approval before execution.
+        // Return RequiresApproval and let the bridge pause the run_plan loop.
+        if self.safety_ctx.needs_approval(tool_name) {
+            return Ok(StepOutcome::RequiresApproval {
+                tool_name: tool_name.to_string(),
+                params: params.clone(),
+                step_index,
+            });
+        }
+
         // Mark as running
         self.repo
             .update_step_progress(&pid, step_index, StepStatus::Running)
@@ -479,7 +502,10 @@ impl Agent {
         let result = self::tools::terminal::execute_command(command, args, timeout_secs, &self.safety_ctx).await;
         let (cmd_output, outcome) = match result {
             Ok(out) => (Some(out), StepOutcome::Advanced),
-            Err(e) => (Some(format!("error: {e}")), StepOutcome::Advanced),
+            Err(e) => {
+                warn!(%e, "exec_command failed");
+                (Some(format!("error: {e}")), StepOutcome::Failed(e.to_string()))
+            }
         };
 
         if let Some(step) = plan.steps.get_mut(step_index) {
@@ -513,7 +539,10 @@ impl Agent {
         let result = self::tools::network::execute_http_request(url, method, body, headers).await;
         let (http_output, outcome) = match result {
             Ok(out) => (Some(out), StepOutcome::Advanced),
-            Err(e) => (Some(format!("error: {e}")), StepOutcome::Advanced),
+            Err(e) => {
+                warn!(%e, url, "exec_http_req failed");
+                (Some(format!("error: {e}")), StepOutcome::Failed(e.to_string()))
+            }
         };
 
         if let Some(step) = plan.steps.get_mut(step_index) {
@@ -546,7 +575,10 @@ impl Agent {
         let result = self::tools::browser::execute_browser_action(action, url, timeout_secs, &self.safety_ctx).await;
         let (browser_output, outcome) = match result {
             Ok(out) => (Some(out), StepOutcome::Advanced),
-            Err(e) => (Some(format!("error: {e}")), StepOutcome::Advanced),
+            Err(e) => {
+                warn!(%e, "exec_browser failed");
+                (Some(format!("error: {e}")), StepOutcome::Failed(e.to_string()))
+            }
         };
 
         if let Some(step) = plan.steps.get_mut(step_index) {

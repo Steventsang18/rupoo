@@ -5,6 +5,8 @@
 //! Note: rig-core's Tool trait uses `impl Future` return types (not
 //! #[async_trait]), so all methods use `async move { }` blocks.
 
+use std::path::PathBuf;
+
 use serde::{Deserialize, Serialize};
 
 // ---------------------------------------------------------------------------
@@ -22,6 +24,9 @@ pub struct EchoOutput {
 }
 
 pub struct EchoTool;
+impl EchoTool {
+    pub fn new() -> Self { Self }
+}
 
 #[allow(clippy::manual_async_fn)]
 impl rig::tool::Tool for EchoTool {
@@ -87,7 +92,9 @@ pub struct FileReadOutput {
     pub error: Option<String>,
 }
 
-pub struct FileReadTool;
+pub struct FileReadTool {
+    jail_root: Option<PathBuf>,
+}
 
 #[allow(clippy::manual_async_fn)]
 impl rig::tool::Tool for FileReadTool {
@@ -130,7 +137,8 @@ impl rig::tool::Tool for FileReadTool {
     ) -> impl std::future::Future<Output = Result<FileReadOutput, Self::Error>>
            + rig::wasm_compat::WasmCompatSend {
         async move {
-            match tokio::fs::read_to_string(&args.path).await {
+            let safe_path = resolve_path(&self.jail_root, &args.path);
+            match tokio::fs::read_to_string(&safe_path).await {
                 Ok(content) => {
                     let truncated = if content.len() > 4096 {
                         // Use floor_char_boundary to avoid splitting a multi-byte UTF-8 char
@@ -172,7 +180,9 @@ pub struct FileWriteOutput {
     pub error: Option<String>,
 }
 
-pub struct FileWriteTool;
+pub struct FileWriteTool {
+    jail_root: Option<PathBuf>,
+}
 
 #[allow(clippy::manual_async_fn)]
 impl rig::tool::Tool for FileWriteTool {
@@ -219,7 +229,8 @@ impl rig::tool::Tool for FileWriteTool {
     ) -> impl std::future::Future<Output = Result<FileWriteOutput, Self::Error>>
            + rig::wasm_compat::WasmCompatSend {
         async move {
-            match tokio::fs::write(&args.path, &args.content).await {
+            let safe_path = resolve_path(&self.jail_root, &args.path);
+            match tokio::fs::write(&safe_path, &args.content).await {
                 Ok(()) => Ok(FileWriteOutput {
                     bytes_written: args.content.len(),
                     success: true,
@@ -257,7 +268,9 @@ pub struct DirEntry {
     pub kind: String,
 }
 
-pub struct ListDirTool;
+pub struct ListDirTool {
+    jail_root: Option<PathBuf>,
+}
 
 #[allow(clippy::manual_async_fn)]
 impl rig::tool::Tool for ListDirTool {
@@ -300,8 +313,9 @@ impl rig::tool::Tool for ListDirTool {
     ) -> impl std::future::Future<Output = Result<ListDirOutput, Self::Error>>
            + rig::wasm_compat::WasmCompatSend {
         async move {
+            let safe_path = resolve_path(&self.jail_root, &args.path);
             let mut entries = Vec::new();
-            match tokio::fs::read_dir(&args.path).await {
+            match tokio::fs::read_dir(&safe_path).await {
                 Ok(mut rd) => {
                     while let Ok(Some(entry)) = rd.next_entry().await {
                         let name = entry.file_name().to_string_lossy().to_string();
@@ -333,7 +347,7 @@ impl rig::tool::Tool for ListDirTool {
 // Shared error type for all tools
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, thiserror::Error, Serialize)]
 #[error("Tool call error: {0}")]
 pub struct ToolCallError(pub String);
 
@@ -344,20 +358,66 @@ impl From<std::io::Error> for ToolCallError {
 }
 
 // ---------------------------------------------------------------------------
+// Path jail resolution
+// ---------------------------------------------------------------------------
+
+/// Resolve a path through the jail root if configured.
+/// Returns the original path unchanged when no jail_root is set.
+fn resolve_path(jail_root: &Option<PathBuf>, path: &str) -> String {
+    match jail_root {
+        Some(ref root) => path_jail::join(root, path)
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_else(|_| path.to_string()),
+        None => path.to_string(),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tool constructors
+// ---------------------------------------------------------------------------
+
+impl FileReadTool {
+    pub fn new() -> Self { Self { jail_root: None } }
+    pub fn with_jail(root: PathBuf) -> Self { Self { jail_root: Some(root) } }
+}
+impl Default for FileReadTool { fn default() -> Self { Self::new() } }
+
+impl FileWriteTool {
+    pub fn new() -> Self { Self { jail_root: None } }
+    pub fn with_jail(root: PathBuf) -> Self { Self { jail_root: Some(root) } }
+}
+impl Default for FileWriteTool { fn default() -> Self { Self::new() } }
+
+impl ListDirTool {
+    pub fn new() -> Self { Self { jail_root: None } }
+    pub fn with_jail(root: PathBuf) -> Self { Self { jail_root: Some(root) } }
+}
+impl Default for ListDirTool { fn default() -> Self { Self::new() } }
+
+// ---------------------------------------------------------------------------
 // Helper: build a ToolSet with all available tools
 // ---------------------------------------------------------------------------
 
 /// Create a rig-compatible ToolSet with all our built-in tools.
 /// Pass this to `AgentBuilder::tools()`.
-pub fn default_tool_set() -> rig::tool::ToolSet {
+/// If `jail_root` is provided, file tools will reject path traversal.
+pub fn default_tool_set(jail_root: Option<PathBuf>) -> rig::tool::ToolSet {
     use rig::tool::ToolSetBuilder;
 
-    ToolSetBuilder::default()
-        .static_tool(EchoTool)
-        .static_tool(FileReadTool)
-        .static_tool(FileWriteTool)
-        .static_tool(ListDirTool)
-        .build()
+    let mut builder = ToolSetBuilder::default()
+        .static_tool(EchoTool);
+    if let Some(ref root) = jail_root {
+        builder = builder
+            .static_tool(FileReadTool::with_jail(root.clone()))
+            .static_tool(FileWriteTool::with_jail(root.clone()))
+            .static_tool(ListDirTool::with_jail(root.clone()));
+    } else {
+        builder = builder
+            .static_tool(FileReadTool::new())
+            .static_tool(FileWriteTool::new())
+            .static_tool(ListDirTool::new());
+    }
+    builder.build()
 }
 
 #[cfg(test)]
@@ -367,14 +427,14 @@ mod tests {
 
     #[tokio::test]
     async fn test_echo_tool() {
-        let tool = EchoTool;
+        let tool = EchoTool::new();
         let output = tool.call(EchoArgs { message: "hello".into() }).await.unwrap();
         assert_eq!(output.result, "echo: hello");
     }
 
     #[tokio::test]
     async fn test_file_read_nonexistent() {
-        let tool = FileReadTool;
+        let tool = FileReadTool::new();
         let output = tool
             .call(FileReadArgs {
                 path: "/tmp/nonexistent_test_file_xyz".into(),
@@ -387,12 +447,12 @@ mod tests {
 
     #[tokio::test]
     async fn test_tool_set_builds() {
-        let _set = default_tool_set();
+        let _set = default_tool_set(None);
     }
 
     #[tokio::test]
     async fn test_list_dir() {
-        let tool = ListDirTool;
+        let tool = ListDirTool::new();
         let output = tool.call(ListDirArgs { path: ".".into() }).await.unwrap();
         assert!(output.success);
         assert!(!output.entries.is_empty());

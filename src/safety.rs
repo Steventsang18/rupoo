@@ -117,7 +117,10 @@ impl SafetyContext {
         // Use the first allowed path as the jail root
         let root = &self.allowed_paths[0];
         let root_canonical = std::fs::canonicalize(root)
-            .unwrap_or_else(|_| root.to_path_buf());
+            .unwrap_or_else(|e| {
+                warn!(error = %e, path = %root.display(), "failed to canonicalize jail root");
+                root.to_path_buf()
+            });
 
         // path_jail::join validates the path against traversal attacks
         path_jail::join(&root_canonical, path).map_err(|e| {
@@ -131,12 +134,59 @@ impl SafetyContext {
     /// Check if a URL points to localhost (SSRF protection).
     pub fn is_localhost_url(url: &str) -> bool {
         let lower = url.to_lowercase();
-        lower.starts_with("http://localhost")
+        // Direct localhost addresses
+        if lower.starts_with("http://localhost")
             || lower.starts_with("https://localhost")
             || lower.starts_with("http://127.0.0.1")
             || lower.starts_with("https://127.0.0.1")
             || lower.starts_with("http://[::1]")
             || lower.starts_with("https://[::1]")
+            || lower.starts_with("http://0.0.0.0")
+            || lower.starts_with("https://0.0.0.0")
+            || lower.starts_with("http://[0:0:0:0:0:0:0:1]")
+            || lower.starts_with("https://[0:0:0:0:0:0:0:1]")
+        {
+            return true;
+        }
+        // Cloud metadata IP (169.254.x.x range)
+        if lower.starts_with("http://169.254.") || lower.starts_with("https://169.254.") {
+            return true;
+        }
+        // DNS rebinding domains that resolve arbitrary IPs
+        if lower.contains("nip.io") || lower.contains("xip.io") || lower.contains("sslip.io") {
+            return true;
+        }
+        false
+    }
+
+    /// Return the primary jail root path, if configured.
+    pub fn jail_root(&self) -> Option<&std::path::Path> {
+        self.allowed_paths.first().map(|p| p.as_path())
+    }
+
+    /// Check if a tool call requires user approval before execution.
+    ///
+    /// Returns `true` for high-risk operations (file deletion, network calls
+    /// to sensitive targets, system configuration changes).
+    pub fn needs_approval(&self, tool_name: &str) -> bool {
+        // High-risk tool names that require explicit user approval.
+        // Extend this list as needed — the list is intentionally small to
+        // avoid alert fatigue; most tools are auto-approved by default.
+        matches!(
+            tool_name.to_lowercase().as_str(),
+            "delete_file"
+                | "rm"
+                | "remove"
+                | "exec"
+                | "run_command"
+                | "bash"
+                | "shell"
+                | "sudo"
+                | "reboot"
+                | "shutdown"
+                | "http_delete"
+                | "http_post"
+        )
     }
 }
 

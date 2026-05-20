@@ -1,0 +1,25 @@
+# Rupoo Security Configuration
+# Copy this file to rupoo-config.toml and customize.
+
+# Directories the agent is allowed to read/write (file jail).
+# Paths not in this list will be denied. Default: current directory.
+allowed_paths = [
+    ".",
+]
+
+# Commands that are permanently forbidden to execute.
+forbidden_commands = [
+    "sudo", "su", "passwd", "chown", "chmod", "chattr",
+    "rm", "mkfs", "fdisk", "dd", "format",
+    "shutdown", "reboot", "halt", "poweroff",
+    "kill", "killall", "pkill",
+    "iptables", "ufw",
+    "mount", "umount",
+]
+
+# Default timeout for external command execution (seconds).
+default_timeout_secs = 30
+
+# Optional explicit path to browser executable.
+# If not set, yupoo will search PATH for chrome/chromium.
+# browser_path = "/usr/bin/google-chrome"

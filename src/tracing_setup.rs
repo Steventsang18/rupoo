@@ -25,36 +25,55 @@ pub fn init_logging(verbose: bool) {
         let _ = std::fs::rename(&log_path, &rotated);
     }
 
-    let file = OpenOptions::new()
+    let log_to_stderr = |verbose: bool| {
+        let builder = tracing_subscriber::fmt()
+            .with_ansi(false)
+            .with_target(true)
+            .with_thread_ids(true);
+        if verbose {
+            builder
+                .with_env_filter(EnvFilter::from_default_env()
+                    .add_directive("debug".parse().unwrap()))
+                .init();
+        } else {
+            builder
+                .with_env_filter(EnvFilter::from_default_env()
+                    .add_directive("info".parse().unwrap()))
+                .init();
+        }
+    };
+
+    match OpenOptions::new()
         .create(true)
         .write(true)
         .truncate(true)
         .open(&log_path)
-        .expect("failed to create rupoo.log");
+    {
+        Ok(file) => {
+            let file_writer = Mutex::new(file);
+            let builder = tracing_subscriber::fmt()
+                .with_writer(file_writer)
+                .with_ansi(false)
+                .with_target(true)
+                .with_thread_ids(true);
 
-    // File writer: always active, captures INFO+
-    let file_writer = Mutex::new(file);
-
-    // Use `fmt()` builder which has stable support for writers and filters
-    // on this project's tracing-subscriber version.
-    let builder = tracing_subscriber::fmt()
-        .with_writer(file_writer)
-        .with_ansi(false)
-        .with_target(true)
-        .with_thread_ids(true);
-
-    if verbose {
-        builder
-            .with_env_filter(EnvFilter::from_default_env()
-                .add_directive("debug".parse().unwrap()))
-            .init();
-        // Also enable stderr by adding a second layer via reload
-        eprintln!("[rupoo] verbose logging enabled — see rupoo.log for full output");
-    } else {
-        builder
-            .with_env_filter(EnvFilter::from_default_env()
-                .add_directive("info".parse().unwrap()))
-            .init();
+            if verbose {
+                builder
+                    .with_env_filter(EnvFilter::from_default_env()
+                        .add_directive("debug".parse().unwrap()))
+                    .init();
+                eprintln!("[rupoo] verbose logging enabled");
+            } else {
+                builder
+                    .with_env_filter(EnvFilter::from_default_env()
+                        .add_directive("info".parse().unwrap()))
+                    .init();
+            }
+        }
+        Err(e) => {
+            eprintln!("[rupoo] warning: cannot create log file at {}: {e}, logging to stderr only", log_path.display());
+            log_to_stderr(verbose);
+        }
     }
 }
 

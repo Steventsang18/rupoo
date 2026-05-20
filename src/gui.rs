@@ -6,6 +6,7 @@ use egui::Context;
 use crate::db::TaskRepo;
 use crate::memory::MemoryStore;
 use crate::skill::SkillManager;
+use crate::task::MemoryEntry;
 
 /// Application state shared between the GUI and the backend.
 pub struct AppState {
@@ -30,6 +31,7 @@ impl AppState {
 /// Main GUI application window.
 pub struct GuiApp {
     state: AppState,
+    rt_handle: Option<tokio::runtime::Handle>,
     selected_tab: Tab,
     // Task panel state
     plan_list: Vec<String>,
@@ -52,9 +54,10 @@ enum Tab {
 }
 
 impl GuiApp {
-    pub fn new(state: AppState) -> Self {
+    pub fn new(state: AppState, rt_handle: Option<tokio::runtime::Handle>) -> Self {
         Self {
             state,
+            rt_handle,
             selected_tab: Tab::Tasks,
             plan_list: Vec::new(),
             selected_plan: None,
@@ -152,22 +155,19 @@ impl GuiApp {
             ui.text_edit_singleline(&mut self.memory_query);
             if ui.button("🔍 Search").clicked() {
                 let query = self.memory_query.clone();
-                let store = &self.state.memory;
-                let rt = tokio::runtime::Runtime::new();
-                match rt {
-                    Ok(runtime) => {
-                        let results = runtime.block_on(async {
-                            store.recall(&query, 20).await.unwrap_or_default()
-                        });
-                        self.memory_results = MemoryStore::format_context(&results);
-                        if self.memory_results.is_empty() {
-                            self.memory_results = "No memories found.".to_string();
-                        }
-                    }
-                    Err(_) => {
-                        self.memory_results = "Failed to create runtime.".to_string();
-                    }
-                }
+                let results = if let Some(ref handle) = self.rt_handle {
+                    let repo = Arc::clone(&self.state.repo);
+                    handle.block_on(async {
+                        repo.search_memories(&query, 20).await.unwrap_or_default()
+                    })
+                } else {
+                    Vec::new()
+                };
+                self.memory_results = if results.is_empty() {
+                    "No memories found.".to_string()
+                } else {
+                    MemoryStore::format_context(&results)
+                };
             }
         });
         ui.separator();
@@ -235,7 +235,15 @@ impl GuiApp {
     }
 
     fn refresh_plans(&mut self) {
-        // Placeholder — in a full implementation, this would query the TaskRepo
-        self.plan_list = vec!["(connect to database to see plans)".to_string()];
+        if let Some(ref handle) = self.rt_handle {
+            let repo = Arc::clone(&self.state.repo);
+            let plans = handle.block_on(async {
+                repo.list_plans(100, 0).await.unwrap_or_default()
+            });
+            self.plan_list = plans.into_iter().map(|p| format!("{} ({})", p.name, p.status)).collect();
+        } else {
+            self.plan_list = vec!["(no runtime)".to_string()];
+        }
     }
 }
+

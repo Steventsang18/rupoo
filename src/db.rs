@@ -64,6 +64,16 @@ impl TaskRepo {
                 value TEXT NOT NULL
             );
 
+            -- UI session history for chat UI
+            CREATE TABLE IF NOT EXISTS ui_sessions (
+                id            TEXT PRIMARY KEY,
+                label         TEXT NOT NULL,
+                messages_json TEXT NOT NULL,
+                is_active     INTEGER NOT NULL DEFAULT 0,
+                created_at    TEXT NOT NULL,
+                updated_at    TEXT NOT NULL
+            );
+
             -- FTS5-based memory store for long-term memory
             -- content_id stores the UUID (rowid is auto-increment integer)
             CREATE VIRTUAL TABLE IF NOT EXISTS memories USING fts5(
@@ -219,17 +229,14 @@ impl TaskRepo {
 
             // 2. Update the step's status inside the JSON
             let mut steps: Vec<Step> = serde_json::from_str(&steps_json)?;
-            if let Some(step) = steps.get_mut(step_index) {
-                step.set_status(step_status);
-            }
-
-            let new_steps_json = serde_json::to_string(&steps)?;
-
             // 3. Determine new plan-level status and next step index
+            // (must happen before we move step_status into set_status)
             let new_index = step_index + 1;
             let next_step = steps.get(new_index);
-            let plan_status = if next_step.is_none() || step_index >= steps.len() - 1 {
-                // Last step completed → plan is done or failed
+            let step_is_waiting = matches!(step_status, StepStatus::WaitingForInput);
+            let plan_status: &str = if step_is_waiting {
+                "WaitingForInput"
+            } else if next_step.is_none() || step_index >= steps.len() - 1 {
                 if output_json.as_deref() == Some("__FAILED__") {
                     "Failed"
                 } else {
@@ -240,7 +247,10 @@ impl TaskRepo {
             } else {
                 "Running"
             };
-
+            if let Some(step) = steps.get_mut(step_index) {
+                step.set_status(step_status);
+            }
+            let new_steps_json = serde_json::to_string(&steps)?;
             let now = chrono::Utc::now().to_rfc3339();
 
             // 4. Update plan row
@@ -450,6 +460,70 @@ impl TaskRepo {
     }
 
     /// Get a configuration value by key.
+    // ── UI Session persistence ───────────────────────────────────────────────
+
+    // ── UI Session persistence ───────────────────────────────────────────────
+
+    pub async fn save_ui_session(
+        &self,
+        id: &str,
+        label: &str,
+        messages_json: &str,
+        is_active: bool,
+    ) -> AgentResult<()> {
+        let id = id.to_string();
+        let label = label.to_string();
+        let messages_json = messages_json.to_string();
+        let now = chrono::Utc::now().to_rfc3339();
+        let active: i32 = if is_active { 1 } else { 0 };
+        self.with_conn(move |conn| {
+            conn.execute(
+                "INSERT INTO ui_sessions (id, label, messages_json, is_active, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                 ON CONFLICT(id) DO UPDATE SET
+                   label = excluded.label,
+                   messages_json = excluded.messages_json,
+                   is_active = excluded.is_active,
+                   updated_at = excluded.updated_at",
+                rusqlite::params![id, label, messages_json, active, now, now],
+            )?;
+            Ok(())
+        })
+        .await
+    }
+
+    pub async fn load_ui_sessions(
+        &self,
+    ) -> AgentResult<Vec<(String, String, String, bool)>> {
+        self.with_conn(move |conn| {
+            let mut stmt = conn.prepare(
+                "SELECT id, label, messages_json, is_active FROM ui_sessions ORDER BY updated_at DESC",
+            )?;
+            let rows = stmt.query_map([], |row| {
+                let id: String = row.get(0)?;
+                let label: String = row.get(1)?;
+                let messages_json: String = row.get(2)?;
+                let active: i32 = row.get(3)?;
+                Ok((id, label, messages_json, active != 0))
+            })?;
+            let mut result = Vec::new();
+            for row in rows {
+                result.push(row?);
+            }
+            Ok(result)
+        })
+        .await
+    }
+
+    pub async fn delete_ui_session(&self, id: &str) -> AgentResult<()> {
+        let id = id.to_string();
+        self.with_conn(move |conn| {
+            conn.execute("DELETE FROM ui_sessions WHERE id = ?", rusqlite::params![id])?;
+            Ok(())
+        })
+        .await
+    }
+
     pub async fn get_setting(&self, key: &str) -> AgentResult<Option<String>> {
         let key = key.to_string();
         self.with_conn(move |conn| {

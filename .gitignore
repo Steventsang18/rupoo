@@ -1,0 +1,29 @@
+# Rust build artifacts
+/target/
+**/*.rs.bk
+Cargo.lock
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# DB files (local data)
+*.db
+*.db-wal
+*.db-shm
+
+# Local config (contains API keys)
+rupoo-config.toml
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Optional: ignore docs-generated HTML (keep src/ docs)
+# docs/*.html
