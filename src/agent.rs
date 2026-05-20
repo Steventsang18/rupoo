@@ -1,4 +1,6 @@
 use std::sync::Arc;
+use std::path::PathBuf;
+use std::fs;
 
 use tracing::{error, info, warn};
 
@@ -290,6 +292,83 @@ impl Agent {
     // Step executors
     // ------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// System prompt loading: file → fallback → hardcoded default
+// ---------------------------------------------------------------------------
+
+/// Build the system prompt for LLM reasoning.
+///
+/// Load order:
+/// 1. `~/.rupoo/prompt.toml` — per-user customization
+/// 2. `prompt.default.toml` — shipped with the project
+/// 3. Hardcoded default string — always works
+fn build_system_prompt() -> String {
+    let paths = [
+        // User config in home directory
+        std::env::var("HOME")
+            .ok()
+            .map(|h| PathBuf::from(h).join(".rupoo").join("prompt.toml")),
+        // Shipped default (project root / cwd)
+        Some(PathBuf::from("prompt.default.toml")),
+    ];
+
+    for path in paths.into_iter().flatten() {
+        if path.exists() {
+            if let Ok(content) = fs::read_to_string(&path) {
+                if let Ok(config) = content.parse::<toml::Value>() {
+                    if let Some(template) = config
+                        .get("system_prompt")
+                        .and_then(|v| v.get("template"))
+                        .and_then(|v| v.as_str())
+                    {
+                        return template.to_string();
+                    }
+                }
+            }
+        }
+    }
+
+    // Fallback: hardcoded default (identical to prompt.default.toml)
+    "\
+You are Rupoo, an AI-powered terminal assistant running inside the user's terminal.
+You help with software development, file operations, and system tasks.
+
+## Your Capabilities
+- File Operations: file_read, file_write, list_directory
+- Terminal Commands: execute shell commands (dangerous commands blocked)
+- HTTP Requests: GET/POST to public URLs (localhost blocked for security)
+- Browser Automation: headless navigation and screenshots
+- Memory: stores and retrieves context across sessions (FTS5 search)
+- Skills: reusable workflows as JSON files
+- Git: status, commit, create PR
+- MCP Server: exposes tools via JSON-RPC over stdio
+
+## Output Format
+Be concise and structured.
+
+### Reading files:
+Show the file path, then the relevant content or summary.
+
+### Listing directories:
+Show the structure clearly.
+
+### Running commands:
+Show the command, then the output.
+
+### Analyzing code:
+Be specific about what you find. Show relevant snippets.
+
+### Errors:
+Be specific about the problem and the fix.
+
+Keep responses tight. Use Markdown naturally for structure.
+".to_string()
+}
+
+// ---------------------------------------------------------------------------
+// Think step
+// ---------------------------------------------------------------------------
+
     async fn exec_think(
         &self,
         plan: &mut Plan,
@@ -315,40 +394,7 @@ impl Agent {
 
         // Call LLM if configured, otherwise fall back to dummy output
         let think_result = if let Some(gateway) = &self.llm_gateway {
-            let mut system = "\
-	You are Rupoo, an AI-powered terminal assistant running inside the user's terminal.
-	You help with software development, file operations, and system tasks.
-	
-	## Your Capabilities
-	- File Operations: file_read, file_write, list_directory
-	- Terminal Commands: execute shell commands (dangerous commands blocked)
-	- HTTP Requests: GET/POST to public URLs (localhost blocked for security)
-	- Browser Automation: headless navigation and screenshots
-	- Memory: stores and retrieves context across sessions (FTS5 search)
-	- Skills: reusable workflows as JSON files
-	- Git: status, commit, create PR
-	- MCP Server: exposes tools via JSON-RPC over stdio
-	
-	## Output Format
-	Be concise and structured.
-	
-	### Reading files:
-	Show the file path, then the relevant content or summary.
-	
-	### Listing directories:
-	Show the structure clearly.
-	
-	### Running commands:
-	Show the command, then the output.
-	
-	### Analyzing code:
-	Be specific about what you find. Show relevant snippets.
-	
-	### Errors:
-	Be specific about the problem and the fix.
-	
-	Keep responses tight. Use Markdown naturally for structure.
-".to_string();
+            let mut system = Self::build_system_prompt();
 
             if !memory_context.is_empty() {
                 system.push_str("\n\nRelevant context from memory:");
