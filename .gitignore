@@ -35,6 +35,12 @@ rupoo-config.toml
 # Prototype / spike experiments
 spike/
 target/
+
+# Old dev scripts (moved to cargo install)
+scripts/
+
+# Config example (configuration via rupoo config set)
+rupoo-config.example.toml
 Thumbs.db
 
 # Logs
