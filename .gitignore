@@ -28,8 +28,12 @@ rupoo-config.toml
 !CONTRIBUTING.md
 !docs/**/*.md
 
-# OS
+# macOS metadata
 .DS_Store
+
+# Prototype / spike experiments
+spike/
+target/
 Thumbs.db
 
 # Logs
