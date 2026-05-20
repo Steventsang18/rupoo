@@ -105,6 +105,7 @@ impl Agent {
 
     /// Return a reference to the tool executor (used by AgentUiBridge for
     /// direct approval-time tool execution, bypassing needs_approval checks).
+    #[allow(clippy::borrowed_box)]
     pub fn get_tool_executor(&self) -> &Box<dyn ToolExecutor> {
         &self.tool_executor
     }

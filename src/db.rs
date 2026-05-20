@@ -463,7 +463,8 @@ impl TaskRepo {
     // ── UI Session persistence ───────────────────────────────────────────────
 
     // ── UI Session persistence ───────────────────────────────────────────────
-
+    /// Get a configuration value by key.
+    #[allow(clippy::empty_line_after_doc_comments)]
     pub async fn save_ui_session(
         &self,
         id: &str,

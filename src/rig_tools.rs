@@ -24,6 +24,12 @@ pub struct EchoOutput {
 }
 
 pub struct EchoTool;
+impl Default for EchoTool {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl EchoTool {
     pub fn new() -> Self { Self }
 }

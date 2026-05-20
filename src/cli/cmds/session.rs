@@ -5,21 +5,21 @@ use rupoo::task::{PlanStatus, Step, StepStatus};
 use chrono::Utc;
 use std::sync::Arc;
 
-pub async fn run(db_path: &str, action: crate::SessionAction) -> Result<()> {
+pub async fn run(db_path: &str, action: crate::main_cli::SessionAction) -> Result<()> {
     let out = output(db_path, action).await?;
     print!("{out}");
     Ok(())
 }
 
-pub async fn output(db_path: &str, action: crate::SessionAction) -> Result<String> {
+pub async fn output(db_path: &str, action: crate::main_cli::SessionAction) -> Result<String> {
     let repo = Arc::new(TaskRepo::new(db_path)?);
 
     match action {
-        crate::SessionAction::List { limit } => cmd_list_string(&repo, limit).await,
-        crate::SessionAction::Show { id } => cmd_show_string(&repo, &id).await,
-        crate::SessionAction::Resume { id, .. } => cmd_resume_string(&id).await,
-        crate::SessionAction::Delete { id } => cmd_delete_string(&repo, &id).await,
-        crate::SessionAction::Prune { days } => cmd_prune_string(&repo, days).await,
+        crate::main_cli::SessionAction::List { limit } => cmd_list_string(&repo, limit).await,
+        crate::main_cli::SessionAction::Show { id } => cmd_show_string(&repo, &id).await,
+        crate::main_cli::SessionAction::Resume { id, .. } => cmd_resume_string(&id).await,
+        crate::main_cli::SessionAction::Delete { id } => cmd_delete_string(&repo, &id).await,
+        crate::main_cli::SessionAction::Prune { days } => cmd_prune_string(&repo, days).await,
     }
 }
 

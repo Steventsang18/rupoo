@@ -9,20 +9,20 @@ const PROVIDER_KEYS: &[(&str, &str, &str, &str)] = &[
     ("ollama", "llama3.2", "", ""),
 ];
 
-pub async fn run(db_path: &str, action: Option<crate::ModelAction>) -> Result<()> {
+pub async fn run(db_path: &str, action: Option<crate::main_cli::ModelAction>) -> Result<()> {
     let out = output(db_path, action).await?;
     print!("{out}");
     Ok(())
 }
 
-pub async fn output(db_path: &str, action: Option<crate::ModelAction>) -> Result<String> {
+pub async fn output(db_path: &str, action: Option<crate::main_cli::ModelAction>) -> Result<String> {
     let repo = Arc::new(TaskRepo::new(db_path)?);
-    let action = action.unwrap_or(crate::ModelAction::Show);
+    let action = action.unwrap_or(crate::main_cli::ModelAction::Show);
 
     match action {
-        crate::ModelAction::Show => cmd_show_string(&repo).await,
-        crate::ModelAction::List => cmd_list_string(&repo).await,
-        crate::ModelAction::Set { target } => cmd_set_string(&repo, target.as_deref()).await,
+        crate::main_cli::ModelAction::Show => cmd_show_string(&repo).await,
+        crate::main_cli::ModelAction::List => cmd_list_string(&repo).await,
+        crate::main_cli::ModelAction::Set { target } => cmd_set_string(&repo, target.as_deref()).await,
     }
 }
 
