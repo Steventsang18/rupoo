@@ -556,14 +556,22 @@ Keep responses tight. Use Markdown naturally for structure.
         };
 
         if let Some(step) = plan.steps.get_mut(step_index) {
-            step.set_status(StepStatus::Completed);
+            let step_status = match outcome {
+                StepOutcome::Advanced => StepStatus::Completed,
+                _ => StepStatus::Failed,
+            };
+            step.set_status(step_status);
             if let Step::Exec { ref mut output, .. } = step {
                 *output = cmd_output.clone();
             }
         }
 
+        let step_status = match outcome {
+            StepOutcome::Advanced => StepStatus::Completed,
+            _ => StepStatus::Failed,
+        };
         self.repo
-            .record_step_completion(&pid, step_index, StepStatus::Completed, cmd_output)
+            .record_step_completion(&pid, step_index, step_status, cmd_output)
             .await?;
         plan.current_step_index = step_index + 1;
         plan.updated_at = chrono::Utc::now();
@@ -593,14 +601,22 @@ Keep responses tight. Use Markdown naturally for structure.
         };
 
         if let Some(step) = plan.steps.get_mut(step_index) {
-            step.set_status(StepStatus::Completed);
+            let step_status = match outcome {
+                StepOutcome::Advanced => StepStatus::Completed,
+                _ => StepStatus::Failed,
+            };
+            step.set_status(step_status);
             if let Step::HttpRequest { ref mut response, .. } = step {
                 *response = http_output.clone();
             }
         }
 
+        let step_status = match outcome {
+            StepOutcome::Advanced => StepStatus::Completed,
+            _ => StepStatus::Failed,
+        };
         self.repo
-            .record_step_completion(&pid, step_index, StepStatus::Completed, http_output)
+            .record_step_completion(&pid, step_index, step_status, http_output)
             .await?;
         plan.current_step_index = step_index + 1;
         plan.updated_at = chrono::Utc::now();
@@ -629,14 +645,22 @@ Keep responses tight. Use Markdown naturally for structure.
         };
 
         if let Some(step) = plan.steps.get_mut(step_index) {
-            step.set_status(StepStatus::Completed);
+            let step_status = match outcome {
+                StepOutcome::Advanced => StepStatus::Completed,
+                _ => StepStatus::Failed,
+            };
+            step.set_status(step_status);
             if let Step::BrowserAction { ref mut output, .. } = step {
                 *output = browser_output.clone();
             }
         }
 
+        let step_status = match outcome {
+            StepOutcome::Advanced => StepStatus::Completed,
+            _ => StepStatus::Failed,
+        };
         self.repo
-            .record_step_completion(&pid, step_index, StepStatus::Completed, browser_output)
+            .record_step_completion(&pid, step_index, step_status, browser_output)
             .await?;
         plan.current_step_index = step_index + 1;
         plan.updated_at = chrono::Utc::now();

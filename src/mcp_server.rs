@@ -1,8 +1,8 @@
-//! MCP (Model Context Protocol) server for Yupoo.
+//! MCP (Model Context Protocol) server for Rupoo.
 //!
-//! Exposes Yupoo's built-in tools via the standard MCP protocol over stdio,
+//! Exposes Rupoo's built-in tools via the standard MCP protocol over stdio,
 //! allowing any MCP client (Claude Desktop, Cursor, etc.) to discover and
-//! call Yupoo tools.
+//! call Rupoo tools.
 //!
 //! # Protocol
 //! - Transport: stdio (JSON-RPC 2.0, one object per line)

@@ -1,4 +1,4 @@
-//! Security sandbox for Yupoo system operations.
+//! Security sandbox for Rupoo system operations.
 //!
 //! Provides command validation, path restrictions, and timeout configuration
 //! to prevent dangerous operations (e.g., `sudo rm -rf /`, SSRF attacks).

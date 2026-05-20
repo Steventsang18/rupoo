@@ -1,4 +1,4 @@
-//! Yupoo system tool modules.
+//! Rupoo system tool modules.
 //!
 //! Each tool provides a single `async fn execute_*` entry point that
 //! returns `AgentResult<String>`. All tools integrate with SafetyContext

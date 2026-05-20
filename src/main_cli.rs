@@ -420,7 +420,7 @@ fn launch_gui(db_path: &str) -> anyhow::Result<()> {
     let app = rupoo::gui::GuiApp::new(state, Some(handle));
     let native_options = eframe::NativeOptions::default();
     eframe::run_native(
-        "Yupoo",
+        "Rupoo",
         native_options,
         Box::new(move |_cc| Box::new(app)),
     )
