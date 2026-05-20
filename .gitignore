@@ -25,6 +25,7 @@ rupoo-config.toml
 # Internal dev notes
 *.md
 !README.md
+!readme-*.md
 !CONTRIBUTING.md
 !docs/**/*.md
 
