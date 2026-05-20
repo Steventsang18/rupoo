@@ -95,6 +95,62 @@ Please include:
 - Steps to reproduce
 - Expected vs actual behavior
 
+## Making a Release
+
+Releases are managed via GitHub Releases with Git tags and a pre-built binary.
+
+### Step-by-step
+
+```bash
+# 1. Ensure the version is up to date in Cargo.toml
+#    (update version field, sync bundle metadata version)
+
+# 2. Run final checks
+cargo test --lib && cargo test
+cargo clippy -- -D warnings
+cargo fmt --check
+
+# 3. Build the release binary
+cargo build --release
+
+# 4. Tag the release
+git tag -a v0.2.0 -m "v0.2.0 — AI-powered Terminal Assistant"
+
+# 5. Push the tag
+git push origin v0.2.0
+
+# 6. Create the GitHub Release with binary attachment
+gh release create v0.2.0 \
+  --title "v0.2.0 — AI-powered Terminal Assistant" \
+  --notes "## Release Notes
+
+### ✨ Features
+- ... (list key changes since last release)
+
+### 📦 Binary
+- ARM64 macOS binary attached (~14 MB)
+- Other platforms: build from source with \`cargo build --release\`
+" \
+  target/release/rupoo
+```
+
+### Versioning
+
+This project follows **Semantic Versioning** (SemVer):
+
+- **Patch** (0.2.x): Bug fixes, minor improvements — backward compatible
+- **Minor** (0.x.0): New features, non-breaking API changes
+- **Major** (x.0.0): Breaking changes, significant architectural shifts
+
+### Pre-release Builds
+
+For testing before a full release:
+
+```bash
+cargo build --release
+./target/release/rupoo --version
+```
+
 ## Code Style
 
 - 4-space indentation, no tabs
