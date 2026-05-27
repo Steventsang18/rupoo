@@ -359,6 +359,92 @@ impl rig::tool::Tool for ListDirTool {
 }
 
 // ---------------------------------------------------------------------------
+// Web search tool
+// ---------------------------------------------------------------------------
+
+#[derive(Deserialize)]
+pub struct WebSearchArgs {
+    pub query: String,
+}
+
+#[derive(Serialize)]
+pub struct WebSearchOutput {
+    pub results: String,
+    pub success: bool,
+    pub error: Option<String>,
+}
+
+pub struct WebSearchTool;
+
+impl Default for WebSearchTool {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl WebSearchTool {
+    pub fn new() -> Self { Self }
+}
+
+#[allow(clippy::manual_async_fn)]
+impl rig::tool::Tool for WebSearchTool {
+    const NAME: &'static str = "web_search";
+    type Error = ToolCallError;
+    type Args = WebSearchArgs;
+    type Output = WebSearchOutput;
+
+    fn name(&self) -> String {
+        "web_search".into()
+    }
+
+    fn definition(
+        &self,
+        _prompt: String,
+    ) -> impl std::future::Future<Output = rig::completion::ToolDefinition>
+           + rig::wasm_compat::WasmCompatSend
+           + rig::wasm_compat::WasmCompatSync {
+        async move {
+            rig::completion::ToolDefinition {
+                name: "web_search".into(),
+                description: "Search the web using DuckDuckGo. Returns up to 10 search results with titles, snippets, and URLs.".into(),
+                parameters: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "query": {
+                            "type": "string",
+                            "description": "The search query string"
+                        }
+                    },
+                    "required": ["query"]
+                }),
+            }
+        }
+    }
+
+    fn call(
+        &self,
+        args: WebSearchArgs,
+    ) -> impl std::future::Future<Output = Result<WebSearchOutput, Self::Error>>
+           + rig::wasm_compat::WasmCompatSend {
+        async move {
+            let safety = crate::safety::SafetyContext::default();
+            match crate::tools::search::web_search(&args.query, &safety).await {
+                Ok(results) => Ok(WebSearchOutput {
+                    results,
+                    success: true,
+                    error: None,
+                }),
+                Err(e) => Ok(WebSearchOutput {
+                    results: String::new(),
+                    success: false,
+                    error: Some(e.to_string()),
+                }),
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Shared error type for all tools
 // ---------------------------------------------------------------------------
 
@@ -423,7 +509,8 @@ pub fn default_tool_set(jail_root: Option<PathBuf>) -> rig::tool::ToolSet {
     use rig::tool::ToolSetBuilder;
 
     let mut builder = ToolSetBuilder::default()
-        .static_tool(EchoTool);
+        .static_tool(EchoTool)
+        .static_tool(WebSearchTool::new());
     if let Some(ref root) = jail_root {
         builder = builder
             .static_tool(FileReadTool::with_jail(root.clone()))

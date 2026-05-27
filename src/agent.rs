@@ -180,9 +180,14 @@ impl Agent {
 
         let context_ref = memory_context.as_deref();
 
+        // Check for DB-stored system prompt override
+        let custom_preamble = self.repo.get_setting("system_prompt").await
+            .ok()
+            .flatten();
+
         // Run the agent loop
         gateway
-            .chat_agent_loop(user_message, history, max_turns, safe_mode, context_ref, on_event)
+            .chat_agent_loop(user_message, history, max_turns, safe_mode, context_ref, on_event, custom_preamble.as_deref())
             .await
     }
 
@@ -385,8 +390,10 @@ fn build_system_prompt() -> String {
         std::env::var("HOME")
             .ok()
             .map(|h| PathBuf::from(h).join(".rupoo").join("prompt.toml")),
-        // Shipped default (project root / cwd)
-        Some(PathBuf::from("prompt.default.toml")),
+        // Shipped default (~/.rupoo/prompt.default.toml)
+        std::env::var("HOME")
+            .ok()
+            .map(|h| PathBuf::from(h).join(".rupoo").join("prompt.default.toml")),
     ];
 
     for path in paths.into_iter().flatten() {
@@ -494,14 +501,14 @@ Keep responses tight. Use Markdown naturally for structure.
                     response
                 }
                 Err(e) => {
-                    error!(error = %e, "LLM call failed, falling back to dummy");
-                    format!("[think] processed: {instruction}")
+                    error!(error = %e, "LLM call failed — returning placeholder");
+                    format!("[⚠️ LLM unavailable — placeholder response for: {instruction}]")
                 }
             }
         } else {
-            // No LLM configured — use dummy output
-            info!("no LLM configured, using dummy think output");
-            format!("[think] processed: {instruction}")
+            // No LLM configured — use warning placeholder
+            warn!("LLM not configured for think step — returning placeholder");
+            format!("[⚠️ LLM unavailable — placeholder response for: {instruction}]")
         };
 
         // Record the output in the step

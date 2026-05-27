@@ -22,6 +22,7 @@ use crate::rig_tools::{
     FileReadArgs,
     FileWriteArgs,
     ListDirArgs,
+    WebSearchArgs,
 };
 
 use rig::tool::Tool;
@@ -35,6 +36,7 @@ enum ToolKind {
     FileRead { jail_root: Option<std::path::PathBuf> },
     FileWrite { jail_root: Option<std::path::PathBuf> },
     ListDir { jail_root: Option<std::path::PathBuf> },
+    WebSearch,
 }
 
 impl ToolKind {
@@ -44,6 +46,7 @@ impl ToolKind {
             ToolKind::FileRead { .. } => "file_read",
             ToolKind::FileWrite { .. } => "file_write",
             ToolKind::ListDir { .. } => "list_directory",
+            ToolKind::WebSearch => "web_search",
         }
     }
 
@@ -53,6 +56,7 @@ impl ToolKind {
             ToolKind::FileRead { .. } => "Read the contents of a file at the given path",
             ToolKind::FileWrite { .. } => "Write content to a file. Overwrites existing content.",
             ToolKind::ListDir { .. } => "List entries in a directory",
+            ToolKind::WebSearch => "Search the web using DuckDuckGo",
         }
     }
 
@@ -118,6 +122,23 @@ impl ToolKind {
                     error: output.error,
                 }).map_err(|e| e.to_string())
             }
+            ToolKind::WebSearch => {
+                let args: WebSearchArgs = serde_json::from_value(params)
+                    .map_err(|e| format!("bad args: {e}"))?;
+                let safety = crate::safety::SafetyContext::default();
+                match crate::tools::search::web_search(&args.query, &safety).await {
+                    Ok(results) => serde_json::to_value(McpToolResult {
+                        success: true,
+                        content: results,
+                        error: None,
+                    }).map_err(|e| e.to_string()),
+                    Err(e) => serde_json::to_value(McpToolResult {
+                        success: false,
+                        content: String::new(),
+                        error: Some(e.to_string()),
+                    }).map_err(|e| e.to_string()),
+                }
+            }
         }
     }
 }
@@ -166,7 +187,8 @@ impl McpToolExecutor {
         tools.insert("echo".into(), Arc::new(ToolKind::Echo));
         tools.insert("file_read".into(), Arc::new(ToolKind::FileRead { jail_root: jail_root.clone() }));
         tools.insert("file_write".into(), Arc::new(ToolKind::FileWrite { jail_root: jail_root.clone() }));
-        tools.insert("list_directory".into(), Arc::new(ToolKind::ListDir { jail_root }));
+        tools.insert("list_directory".into(), Arc::new(ToolKind::ListDir { jail_root: jail_root.clone() }));
+        tools.insert("web_search".into(), Arc::new(ToolKind::WebSearch));
         tools
     }
 
@@ -315,8 +337,9 @@ mod tests {
     async fn test_list_tools() {
         let executor = McpToolExecutor::new();
         let tools = executor.list_tools().await;
-        assert_eq!(tools.len(), 4);
+        assert_eq!(tools.len(), 5);
         assert!(tools.contains(&"echo".into()));
         assert!(tools.contains(&"file_read".into()));
+        assert!(tools.contains(&"web_search".into()));
     }
 }

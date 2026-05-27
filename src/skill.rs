@@ -261,6 +261,24 @@ impl SkillManager {
         info!("built-in skills installed");
         Ok(())
     }
+
+    /// Match a user message against skill triggers.
+    ///
+    /// Scans all loaded skills for any trigger keyword present in the message.
+    /// Returns the first matching skill, or `None` if no trigger matches.
+    pub fn match_trigger(&self, message: &str) -> AgentResult<Option<SkillDef>> {
+        let msg_lower = message.to_lowercase();
+        let skills = self.list_skills()?;
+        for name in &skills {
+            let skill = self.load_skill(name)?;
+            for trigger in &skill.trigger {
+                if msg_lower.contains(&trigger.to_lowercase()) {
+                    return Ok(Some(skill));
+                }
+            }
+        }
+        Ok(None)
+    }
 }
 
 #[cfg(test)]

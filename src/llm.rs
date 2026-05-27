@@ -317,12 +317,21 @@ impl LlmGateway {
         safe_mode: bool,
         memory_context: Option<&str>,
         mut on_event: F,
+        custom_preamble: Option<&str>,
     ) -> AgentResult<(String, TokenUsage)>
     where
         F: FnMut(AgentEvent) + Send,
     {
-        // Build preamble with optional memory context
-        let mut preamble = self.build_preamble();
+        // Build preamble — use custom override if provided, otherwise default
+        let mut preamble = if let Some(custom) = custom_preamble {
+            if !custom.is_empty() {
+                custom.to_string()
+            } else {
+                self.build_preamble()
+            }
+        } else {
+            self.build_preamble()
+        };
 
         if let Some(context) = memory_context {
             if !context.is_empty() {
@@ -730,6 +739,9 @@ fn register_tools<M: rig::completion::CompletionModel>(
     // Already have EchoTool from the initial builder
     let mut builder = builder;
 
+    // Web search is read-only and safe — always register
+    builder = builder.tool(crate::rig_tools::WebSearchTool::new());
+
     // FileReadTool is safe
     if let Some(root) = jail_root {
         builder = builder.tool(crate::rig_tools::FileReadTool::with_jail(root.to_path_buf()));
@@ -761,6 +773,7 @@ fn register_tools_legacy<M: rig::completion::CompletionModel>(
     builder: rig::agent::AgentBuilderSimple<M>,
     jail_root: Option<&std::path::Path>,
 ) -> rig::agent::AgentBuilderSimple<M> {
+    let builder = builder.tool(crate::rig_tools::WebSearchTool::new());
     if let Some(root) = jail_root {
         builder
             .tool(crate::rig_tools::FileReadTool::with_jail(root.to_path_buf()))

@@ -6,6 +6,7 @@ use crossbeam_channel::{Receiver, Sender};
 
 use super::{AgentToTui, TuiToAgent};
 use super::approval::ApprovalExt;
+use super::ChatMessage;
 use rupoo::agent::ToolExecutor;
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -37,8 +38,39 @@ impl AgentUiBridge {
             // Wait for a message from TUI or check for agent output
             match self.rx.recv_timeout(std::time::Duration::from_millis(100)) {
                 Ok(TuiToAgent::SubmitMessage(text)) => {
-                    // Route to Chat Mode or Plan Mode based on prefix
-                    if text.starts_with("/plan ") {
+                    // Check skill triggers first — before Chat/Plan mode routing
+                    let skill_manager = rupoo::skill::SkillManager::new(
+                        rupoo::skill::SkillManager::default_dir(),
+                    );
+                    if let Ok(Some(skill)) = skill_manager.match_trigger(&text) {
+                        let _ = self.ui_tx.send(AgentToTui::Message(
+                            ChatMessage::system(format!("Triggered skill: {}", skill.name)),
+                        ));
+                        let plan = skill_manager.skill_to_plan(&skill);
+                        if let Err(e) = self.repo.save_plan(&plan).await {
+                            let _ = self.ui_tx.send(AgentToTui::Message(
+                                ChatMessage::error(format!("Failed to save skill plan: {}", e)),
+                            ));
+                        } else {
+                            match self.agent.resume(&plan.id).await {
+                                Ok(Some(mut plan)) => {
+                                    self.run_plan(&mut plan).await;
+                                }
+                                Ok(None) => {
+                                    let _ = self.ui_tx.send(AgentToTui::Message(
+                                        ChatMessage::assistant("Skill plan already completed".to_string()),
+                                    ));
+                                    let _ = self.ui_tx.send(AgentToTui::Idle);
+                                }
+                                Err(e) => {
+                                    let _ = self.ui_tx.send(AgentToTui::Message(
+                                        ChatMessage::error(format!("Skill execution error: {}", e)),
+                                    ));
+                                    let _ = self.ui_tx.send(AgentToTui::Idle);
+                                }
+                            }
+                        }
+                    } else if text.starts_with("/plan ") {
                         // Plan Mode: generate plan and execute
                         let task = text.trim_start_matches("/plan ").trim();
                         self.handle_plan_mode(task).await;
