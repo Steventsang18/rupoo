@@ -451,7 +451,65 @@ fn render_input_area(frame: &mut Frame, area: Rect, app: &RupooApp) {
                 inner,
             );
         } else {
-            frame.render_widget(&app.input, inner);
+            // Custom rendering: wrap input text to fit the inner width
+            let max_w = inner.width as usize;
+            let mut display_lines: Vec<Line> = Vec::new();
+            let raw_lines = app.input.lines();
+            for line in raw_lines.iter() {
+                if max_w > 0 && line.len() > max_w {
+                    for wrapped in wrap_to(line, max_w) {
+                        display_lines.push(Line::from(Span::styled(
+                            wrapped.to_string(),
+                            Style::default().fg(Color::White),
+                        )));
+                    }
+                } else {
+                    display_lines.push(Line::from(Span::styled(
+                        line.clone(),
+                        Style::default().fg(Color::White),
+                    )));
+                }
+            }
+
+            // Calculate scroll to keep cursor visible
+            // TextArea cursor position: (row, col)
+            let cursor_row = app.input.cursor().0;
+            // Count display rows up to cursor (accounting for wrapping)
+            let mut display_row = 0;
+            for (i, line) in raw_lines.iter().enumerate() {
+                if i == cursor_row {
+                    break;
+                }
+                if max_w > 0 && line.len() > max_w {
+                    display_row += (line.len() + max_w - 1) / max_w;
+                } else {
+                    display_row += 1;
+                }
+            }
+            // Add wrapped rows for the cursor line up to the cursor column
+            let cursor_col = app.input.cursor().1;
+            if max_w > 0 {
+                display_row += cursor_col / max_w.max(1);
+            }
+
+            let view_h = inner.height as usize;
+            let max_scroll = display_lines.len().saturating_sub(view_h);
+            let scroll = if display_row >= view_h {
+                (display_row - view_h + 1).min(max_scroll)
+            } else {
+                0
+            };
+
+            let para = Paragraph::new(Text::from(display_lines))
+                .scroll((scroll as u16, 0));
+            frame.render_widget(para, inner);
+
+            // Position cursor within the inner area
+            let cursor_display_row = display_row.saturating_sub(scroll);
+            frame.set_cursor_position(ratatui::layout::Position {
+                x: inner.x + (cursor_col % max_w.max(1)) as u16,
+                y: inner.y + cursor_display_row.min(view_h - 1) as u16,
+            });
         }
     }
 }
