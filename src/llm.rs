@@ -756,6 +756,24 @@ fn register_tools<M: rig::completion::CompletionModel>(
     builder
 }
 
+/// Register tools (all tools, no safe_mode filtering) for legacy non-streaming agents.
+fn register_tools_legacy<M: rig::completion::CompletionModel>(
+    builder: rig::agent::AgentBuilderSimple<M>,
+    jail_root: Option<&std::path::Path>,
+) -> rig::agent::AgentBuilderSimple<M> {
+    if let Some(root) = jail_root {
+        builder
+            .tool(crate::rig_tools::FileReadTool::with_jail(root.to_path_buf()))
+            .tool(crate::rig_tools::FileWriteTool::with_jail(root.to_path_buf()))
+            .tool(crate::rig_tools::ListDirTool::with_jail(root.to_path_buf()))
+    } else {
+        builder
+            .tool(crate::rig_tools::FileReadTool::new())
+            .tool(crate::rig_tools::FileWriteTool::new())
+            .tool(crate::rig_tools::ListDirTool::new())
+    }
+}
+
 fn build_anthropic_agent(
     config: &LlmConfig,
     preamble: &str,
@@ -764,32 +782,19 @@ fn build_anthropic_agent(
     use rig::agent::AgentBuilder;
 
     let api_key = config.api_key.as_deref()
-        .ok_or_else(|| AgentError::Other("Anthropic requires an API key. Set it via: agent config set api_key.anthropic <key>".into()))?;
-
-    let client: rig::providers::anthropic::client::Client =
-        rig::providers::anthropic::client::Client::new(api_key)
-            .map_err(|e| AgentError::Other(format!("Anthropic client init failed: {e}")))?;
-
+        .ok_or_else(|| AgentError::Other("Anthropic requires an API key. Set it via: rupoo config set api_key.anthropic <key>".into()))?;
+    let client = rig::providers::anthropic::client::Client::new(api_key)
+        .map_err(|e| AgentError::Other(format!("Anthropic client init failed: {e}")))?;
     let model = rig::providers::anthropic::completion::CompletionModel::new(client, &config.model);
 
-    let mut builder = AgentBuilder::new(model)
+    let builder = AgentBuilder::new(model)
         .preamble(preamble)
         .temperature(config.temperature)
         .max_tokens(config.max_tokens as u64)
         .default_max_turns(10)
         .tool(crate::rig_tools::EchoTool::new());
 
-    if let Some(root) = jail_root {
-        builder = builder
-            .tool(crate::rig_tools::FileReadTool::with_jail(root.to_path_buf()))
-            .tool(crate::rig_tools::FileWriteTool::with_jail(root.to_path_buf()))
-            .tool(crate::rig_tools::ListDirTool::with_jail(root.to_path_buf()));
-    } else {
-        builder = builder
-            .tool(crate::rig_tools::FileReadTool::new())
-            .tool(crate::rig_tools::FileWriteTool::new())
-            .tool(crate::rig_tools::ListDirTool::new());
-    }
+    let builder = register_tools_legacy(builder, jail_root);
 
     Ok(builder.build())
 }
@@ -802,46 +807,33 @@ fn build_openai_agent(
     use rig::agent::AgentBuilder;
 
     let api_key = config.api_key.as_deref()
-        .ok_or_else(|| AgentError::Other("OpenAI requires an API key. Set it via: agent config set api_key.openai <key>".into()))?;
-
-    let client: rig::providers::openai::client::Client =
-        match &config.base_url {
-            Some(custom_url) => {
-                rig::providers::openai::client::Client::builder()
-                    .api_key(api_key)
-                    .base_url(custom_url)
-                    .build()
-                    .map_err(|e| AgentError::Other(format!("OpenAI client init failed: {e}")))?
-            }
-            None => {
-                rig::providers::openai::client::Client::new(api_key)
-                    .map_err(|e| AgentError::Other(format!("OpenAI client init failed: {e}")))?
-            }
-        };
-
+        .ok_or_else(|| AgentError::Other("OpenAI requires an API key. Set it via: rupoo config set api_key.openai <key>".into()))?;
+    let client = match &config.base_url {
+        Some(custom_url) => {
+            rig::providers::openai::client::Client::builder()
+                .api_key(api_key)
+                .base_url(custom_url)
+                .build()
+                .map_err(|e| AgentError::Other(format!("OpenAI client init failed: {e}")))?
+        }
+        None => {
+            rig::providers::openai::client::Client::new(api_key)
+                .map_err(|e| AgentError::Other(format!("OpenAI client init failed: {e}")))?
+        }
+    };
     let model = rig::providers::openai::completion::CompletionModel::new(
         client.completions_api(),
         &config.model,
     );
 
-    let mut builder = AgentBuilder::new(model)
+    let builder = AgentBuilder::new(model)
         .preamble(preamble)
         .temperature(config.temperature)
         .max_tokens(config.max_tokens as u64)
         .default_max_turns(10)
         .tool(crate::rig_tools::EchoTool::new());
 
-    if let Some(root) = jail_root {
-        builder = builder
-            .tool(crate::rig_tools::FileReadTool::with_jail(root.to_path_buf()))
-            .tool(crate::rig_tools::FileWriteTool::with_jail(root.to_path_buf()))
-            .tool(crate::rig_tools::ListDirTool::with_jail(root.to_path_buf()));
-    } else {
-        builder = builder
-            .tool(crate::rig_tools::FileReadTool::new())
-            .tool(crate::rig_tools::FileWriteTool::new())
-            .tool(crate::rig_tools::ListDirTool::new());
-    }
+    let mut builder = register_tools_legacy(builder, jail_root);
 
     if config.base_url.is_some() {
         builder = builder.additional_params(serde_json::json!({
@@ -860,40 +852,46 @@ fn build_ollama_agent(
     use rig::agent::AgentBuilder;
 
     let base_url = config.base_url.as_deref().unwrap_or("http://localhost:11434");
-
-    let client: rig::providers::ollama::Client =
-        rig::providers::ollama::Client::builder()
-            .api_key(rig::client::Nothing)
-            .base_url(base_url)
-            .build()
-            .map_err(|e| AgentError::Other(format!("Ollama client init failed: {e}")))?;
-
+    let client = rig::providers::ollama::Client::builder()
+        .api_key(rig::client::Nothing)
+        .base_url(base_url)
+        .build()
+        .map_err(|e| AgentError::Other(format!("Ollama client init failed: {e}")))?;
     let model = rig::providers::ollama::CompletionModel::new(client, &config.model);
 
-    let mut builder = AgentBuilder::new(model)
+    let builder = AgentBuilder::new(model)
         .preamble(preamble)
         .temperature(config.temperature)
         .max_tokens(config.max_tokens as u64)
         .default_max_turns(10)
         .tool(crate::rig_tools::EchoTool::new());
 
-    if let Some(root) = jail_root {
-        builder = builder
-            .tool(crate::rig_tools::FileReadTool::with_jail(root.to_path_buf()))
-            .tool(crate::rig_tools::FileWriteTool::with_jail(root.to_path_buf()))
-            .tool(crate::rig_tools::ListDirTool::with_jail(root.to_path_buf()));
-    } else {
-        builder = builder
-            .tool(crate::rig_tools::FileReadTool::new())
-            .tool(crate::rig_tools::FileWriteTool::new())
-            .tool(crate::rig_tools::ListDirTool::new());
-    }
+    let builder = register_tools_legacy(builder, jail_root);
+
+    Ok(builder.build())
+}
+
+/// Helper to finish building a streaming agent: apply common settings, register tools, build.
+fn finish_streaming_agent<M: rig::completion::CompletionModel>(
+    builder: rig::agent::AgentBuilder<M>,
+    preamble: &str,
+    config: &LlmConfig,
+    jail_root: Option<&std::path::Path>,
+    safe_mode: bool,
+) -> AgentResult<rig::agent::Agent<M>> {
+    let builder = builder
+        .preamble(preamble)
+        .temperature(config.temperature)
+        .max_tokens(config.max_tokens as u64)
+        .default_max_turns(10)
+        .tool(crate::rig_tools::EchoTool::new());
+
+    let builder = register_tools(builder, jail_root, safe_mode);
 
     Ok(builder.build())
 }
 
 /// Streaming agent for Anthropic with safe_mode.
-/// Uses a concrete type to avoid generic complications.
 fn build_anthropic_agent_streaming(
     config: &LlmConfig,
     preamble: &str,
@@ -903,29 +901,15 @@ fn build_anthropic_agent_streaming(
     use rig::agent::AgentBuilder;
 
     let api_key = config.api_key.as_deref()
-        .ok_or_else(|| AgentError::Other("Anthropic requires an API key. Set it via: agent config set api_key.anthropic <key>".into()))?;
-
-    let client: rig::providers::anthropic::client::Client =
-        rig::providers::anthropic::client::Client::new(api_key)
-            .map_err(|e| AgentError::Other(format!("Anthropic client init failed: {e}")))?;
-
+        .ok_or_else(|| AgentError::Other("Anthropic requires an API key. Set it via: rupoo config set api_key.anthropic <key>".into()))?;
+    let client = rig::providers::anthropic::client::Client::new(api_key)
+        .map_err(|e| AgentError::Other(format!("Anthropic client init failed: {e}")))?;
     let model = rig::providers::anthropic::completion::CompletionModel::new(client, &config.model);
 
-    // Add EchoTool first to transition to AgentBuilderSimple
-    let builder = AgentBuilder::new(model)
-        .preamble(preamble)
-        .temperature(config.temperature)
-        .max_tokens(config.max_tokens as u64)
-        .default_max_turns(10)
-        .tool(crate::rig_tools::EchoTool::new());
-
-    let builder = register_tools(builder, jail_root, safe_mode);
-
-    Ok(builder.build())
+    finish_streaming_agent(AgentBuilder::new(model), preamble, config, jail_root, safe_mode)
 }
 
 /// Streaming agent for OpenAI with safe_mode.
-/// Uses a concrete type to avoid generic complications.
 fn build_openai_agent_streaming(
     config: &LlmConfig,
     preamble: &str,
@@ -935,43 +919,29 @@ fn build_openai_agent_streaming(
     use rig::agent::AgentBuilder;
 
     let api_key = config.api_key.as_deref()
-        .ok_or_else(|| AgentError::Other("OpenAI requires an API key. Set it via: agent config set api_key.openai <key>".into()))?;
-
-    let client: rig::providers::openai::client::Client =
-        match &config.base_url {
-            Some(custom_url) => {
-                rig::providers::openai::client::Client::builder()
-                    .api_key(api_key)
-                    .base_url(custom_url)
-                    .build()
-                    .map_err(|e| AgentError::Other(format!("OpenAI client init failed: {e}")))?
-            }
-            None => {
-                rig::providers::openai::client::Client::new(api_key)
-                    .map_err(|e| AgentError::Other(format!("OpenAI client init failed: {e}")))?
-            }
-        };
-
+        .ok_or_else(|| AgentError::Other("OpenAI requires an API key. Set it via: rupoo config set api_key.openai <key>".into()))?;
+    let client = match &config.base_url {
+        Some(custom_url) => {
+            rig::providers::openai::client::Client::builder()
+                .api_key(api_key)
+                .base_url(custom_url)
+                .build()
+                .map_err(|e| AgentError::Other(format!("OpenAI client init failed: {e}")))?
+        }
+        None => {
+            rig::providers::openai::client::Client::new(api_key)
+                .map_err(|e| AgentError::Other(format!("OpenAI client init failed: {e}")))?
+        }
+    };
     let model = rig::providers::openai::completion::CompletionModel::new(
         client.completions_api(),
         &config.model,
     );
 
-    // Add EchoTool first to transition to AgentBuilderSimple
-    let builder = AgentBuilder::new(model)
-        .preamble(preamble)
-        .temperature(config.temperature)
-        .max_tokens(config.max_tokens as u64)
-        .default_max_turns(10)
-        .tool(crate::rig_tools::EchoTool::new());
-
-    let builder = register_tools(builder, jail_root, safe_mode);
-
-    Ok(builder.build())
+    finish_streaming_agent(AgentBuilder::new(model), preamble, config, jail_root, safe_mode)
 }
 
 /// Streaming agent for Ollama with safe_mode.
-/// Uses a concrete type to avoid generic complications.
 fn build_ollama_agent_streaming(
     config: &LlmConfig,
     preamble: &str,
@@ -981,27 +951,14 @@ fn build_ollama_agent_streaming(
     use rig::agent::AgentBuilder;
 
     let base_url = config.base_url.as_deref().unwrap_or("http://localhost:11434");
-
-    let client: rig::providers::ollama::Client =
-        rig::providers::ollama::Client::builder()
-            .api_key(rig::client::Nothing)
-            .base_url(base_url)
-            .build()
-            .map_err(|e| AgentError::Other(format!("Ollama client init failed: {e}")))?;
-
+    let client = rig::providers::ollama::Client::builder()
+        .api_key(rig::client::Nothing)
+        .base_url(base_url)
+        .build()
+        .map_err(|e| AgentError::Other(format!("Ollama client init failed: {e}")))?;
     let model = rig::providers::ollama::CompletionModel::new(client, &config.model);
 
-    // Add EchoTool first to transition to AgentBuilderSimple
-    let builder = AgentBuilder::new(model)
-        .preamble(preamble)
-        .temperature(config.temperature)
-        .max_tokens(config.max_tokens as u64)
-        .default_max_turns(10)
-        .tool(crate::rig_tools::EchoTool::new());
-
-    let builder = register_tools(builder, jail_root, safe_mode);
-
-    Ok(builder.build())
+    finish_streaming_agent(AgentBuilder::new(model), preamble, config, jail_root, safe_mode)
 }
 
 fn role_label(role: &LlmChatRole) -> &'static str {
