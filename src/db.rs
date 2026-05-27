@@ -525,13 +525,23 @@ impl TaskRepo {
     // ------------------------------------------------------------------
 
     /// Save conversation history for a session.
+    ///
+    /// Serialized with a schema version wrapper: `{"v":1,"data":{...}}`
+    /// so that future schema changes can be migrated gracefully.
     pub async fn save_conversation_history(
         &self,
         session_id: &str,
         history: &ConversationHistory,
     ) -> AgentResult<()> {
+        const HISTORY_SCHEMA_VERSION: u32 = 1;
+
         let sid = session_id.to_string();
-        let history_json = serde_json::to_string(history)?;
+        let data = serde_json::to_string(history)?;
+        let wrapper = serde_json::json!({
+            "v": HISTORY_SCHEMA_VERSION,
+            "data": serde_json::from_str::<serde_json::Value>(&data)?,
+        });
+        let history_json = serde_json::to_string(&wrapper)?;
         let now = chrono::Utc::now().to_rfc3339();
 
         self.with_conn(move |conn| {
@@ -549,6 +559,9 @@ impl TaskRepo {
     }
 
     /// Load conversation history for a session.
+    ///
+    /// Supports versioned format `{"v":N,"data":{...}}` and falls back to
+    /// raw deserialization for legacy (unversioned) records.
     pub async fn load_conversation_history(
         &self,
         session_id: &str,
@@ -567,14 +580,38 @@ impl TaskRepo {
 
             match result {
                 Some(json) => {
-                    let history: ConversationHistory = serde_json::from_str(&json)
-                        .map_err(|e| AgentError::Other(format!("parse history: {e}")))?;
+                    let history = Self::deserialize_history(&json)?;
                     Ok(Some(history))
                 }
                 None => Ok(None),
             }
         })
         .await
+    }
+
+    /// Deserialize conversation history with schema version support.
+    ///
+    /// - Versioned format: `{"v":1,"data":{...}}` → parse by version
+    /// - Legacy format: raw ConversationHistory JSON → treat as v1
+    fn deserialize_history(json: &str) -> AgentResult<ConversationHistory> {
+        // Try versioned format first
+        if let Ok(wrapper) = serde_json::from_str::<serde_json::Value>(json) {
+            if let Some(version) = wrapper.get("v").and_then(|v| v.as_u64()) {
+                let data = wrapper.get("data")
+                    .ok_or_else(|| AgentError::Other("history_json: missing 'data' field".into()))?;
+                match version {
+                    1 => return serde_json::from_value(data.clone())
+                        .map_err(|e| AgentError::Other(format!("parse history v1: {e}"))),
+                    v => return Err(AgentError::Other(
+                        format!("history_json: unsupported schema version {v}")
+                    )),
+                }
+            }
+            // No "v" field → legacy format, fall through to direct deserialization
+        }
+        // Legacy: raw ConversationHistory JSON (no wrapper)
+        serde_json::from_str(json)
+            .map_err(|e| AgentError::Other(format!("parse history (legacy): {e}")))
     }
 
     // ------------------------------------------------------------------
@@ -1035,5 +1072,50 @@ mod tests {
         // Non-existent session returns None
         let none = repo.load_conversation_history("nonexistent").await.unwrap();
         assert!(none.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_conversation_history_schema_version() {
+        let repo = repo();
+
+        // Save — should produce versioned JSON {"v":1,"data":{...}}
+        let mut history = ConversationHistory::new(5);
+        history.push_user("test");
+        repo.save_conversation_history("vtest", &history).await.unwrap();
+
+        // Verify the stored JSON has the wrapper
+        let json: String = repo.with_read_conn(move |conn| {
+            conn.query_row(
+                "SELECT history_json FROM conversation_histories WHERE session_id = ?1",
+                rusqlite::params!["vtest"],
+                |row| row.get(0),
+            ).map_err(|e| AgentError::Other(e.to_string()))
+        }).await.unwrap();
+        let val: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(val["v"], 1);
+        assert!(val.get("data").is_some());
+
+        // Load — should parse versioned format correctly
+        let loaded = repo.load_conversation_history("vtest").await.unwrap().unwrap();
+        assert_eq!(loaded.message_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_conversation_history_legacy_fallback() {
+        let repo = repo();
+
+        // Insert a raw (legacy) history JSON without schema wrapper
+        let raw_json = serde_json::to_string(&ConversationHistory::new(10)).unwrap();
+        repo.with_conn(move |conn| {
+            conn.execute(
+                "INSERT INTO conversation_histories (session_id, history_json, updated_at)
+                 VALUES (?1, ?2, '2026-01-01T00:00:00Z')",
+                rusqlite::params!["legacy-session", raw_json],
+            ).map_err(|e| AgentError::Other(e.to_string()))
+        }).await.unwrap();
+
+        // Load — should fall back to direct deserialization
+        let loaded = repo.load_conversation_history("legacy-session").await.unwrap().unwrap();
+        assert_eq!(loaded.message_count(), 0);
     }
 }

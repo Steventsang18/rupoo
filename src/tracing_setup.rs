@@ -22,6 +22,14 @@ pub fn init_logging(verbose: bool) {
     // Rotate the log file each session.
     if log_path.exists() {
         let rotated = log_dir.join("rupoo.prev.log");
+        // Clean up oversized prev.log (>10MB) before rotating to avoid disk bloat.
+        if rotated.exists() {
+            if let Ok(meta) = rotated.metadata() {
+                if meta.len() > 10 * 1024 * 1024 {
+                    let _ = std::fs::remove_file(&rotated);
+                }
+            }
+        }
         let _ = std::fs::rename(&log_path, &rotated);
     }
 
