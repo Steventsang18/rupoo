@@ -19,7 +19,7 @@ use std::time::Duration;
 use tracing::warn;
 
 use crate::error::{AgentError, AgentResult};
-use super::super::safety::SafetyContext;
+use crate::safety::SafetyContext;
 use crate::task::BrowserActionType;
 
 /// Locate Chrome/Chromium in system PATH.
@@ -123,7 +123,7 @@ pub async fn execute_browser_action(
             // The temp dir is a safe sandbox boundary.
             let tmp_dir = std::env::temp_dir();
             let screenshot_path = tmp_dir.join(format!(
-                "yupoo_screenshot_{}.png",
+                "rupoo_screenshot_{}.png",
                 chrono::Utc::now().format("%Y%m%d%H%M%S")
             ));
 

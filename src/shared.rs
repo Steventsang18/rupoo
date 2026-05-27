@@ -22,6 +22,7 @@ pub enum MessageRole {
     User,
     Assistant,
     System,
+    Error,
 }
 
 impl ChatMessage {
@@ -36,6 +37,9 @@ impl ChatMessage {
     }
     pub fn command_output(text: String) -> Self {
         Self { role: MessageRole::System, content: text, is_command_output: true }
+    }
+    pub fn error(text: String) -> Self {
+        Self { role: MessageRole::Error, content: text, is_command_output: false }
     }
 }
 
@@ -89,4 +93,10 @@ pub enum AgentToTui {
     TokenUpdate { in_count: u64, out_count: u64 },
     /// The agent requires approval before executing a tool.
     RequestApproval(PendingTool),
+    /// Streaming text chunk for incremental display.
+    StreamChunk { text: String },
+    /// LLM configuration status update.
+    LlmStatus { configured: bool, provider: String },
+    /// Step progress update for Plan Mode.
+    StepProgress { step_index: usize, total: usize, step_name: String },
 }

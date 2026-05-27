@@ -12,7 +12,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use tokio::sync::RwLock;
 
-use crate::agent::safety::SafetyContext;
+use crate::safety::SafetyContext;
 use crate::agent::ToolExecutor;
 use crate::error::{AgentError, AgentResult};
 use crate::task::McpToolResult;
@@ -32,27 +32,27 @@ use rig::tool::Tool;
 
 enum ToolKind {
     Echo,
-    FileRead,
-    FileWrite,
-    ListDir,
+    FileRead { jail_root: Option<std::path::PathBuf> },
+    FileWrite { jail_root: Option<std::path::PathBuf> },
+    ListDir { jail_root: Option<std::path::PathBuf> },
 }
 
 impl ToolKind {
     fn name(&self) -> &'static str {
         match self {
             ToolKind::Echo => "echo",
-            ToolKind::FileRead => "file_read",
-            ToolKind::FileWrite => "file_write",
-            ToolKind::ListDir => "list_directory",
+            ToolKind::FileRead { .. } => "file_read",
+            ToolKind::FileWrite { .. } => "file_write",
+            ToolKind::ListDir { .. } => "list_directory",
         }
     }
 
     fn description(&self) -> &'static str {
         match self {
             ToolKind::Echo => "Echo back a message",
-            ToolKind::FileRead => "Read the contents of a file at the given path",
-            ToolKind::FileWrite => "Write content to a file. Overwrites existing content.",
-            ToolKind::ListDir => "List entries in a directory",
+            ToolKind::FileRead { .. } => "Read the contents of a file at the given path",
+            ToolKind::FileWrite { .. } => "Write content to a file. Overwrites existing content.",
+            ToolKind::ListDir { .. } => "List entries in a directory",
         }
     }
 
@@ -69,10 +69,14 @@ impl ToolKind {
                     error: None,
                 }).map_err(|e| e.to_string())
             }
-            ToolKind::FileRead => {
+            ToolKind::FileRead { jail_root } => {
                 let args: FileReadArgs = serde_json::from_value(params)
                     .map_err(|e| format!("bad args: {e}"))?;
-                let output = crate::rig_tools::FileReadTool::new().call(args).await
+                let tool = match jail_root {
+                    Some(ref root) => crate::rig_tools::FileReadTool::with_jail(root.clone()),
+                    None => crate::rig_tools::FileReadTool::new(),
+                };
+                let output = tool.call(args).await
                     .map_err(|e| e.to_string())?;
                 serde_json::to_value(McpToolResult {
                     success: output.success,
@@ -80,10 +84,14 @@ impl ToolKind {
                     error: output.error,
                 }).map_err(|e| e.to_string())
             }
-            ToolKind::FileWrite => {
+            ToolKind::FileWrite { jail_root } => {
                 let args: FileWriteArgs = serde_json::from_value(params)
                     .map_err(|e| format!("bad args: {e}"))?;
-                let output = crate::rig_tools::FileWriteTool::new().call(args).await
+                let tool = match jail_root {
+                    Some(ref root) => crate::rig_tools::FileWriteTool::with_jail(root.clone()),
+                    None => crate::rig_tools::FileWriteTool::new(),
+                };
+                let output = tool.call(args).await
                     .map_err(|e| e.to_string())?;
                 serde_json::to_value(McpToolResult {
                     success: output.success,
@@ -91,10 +99,14 @@ impl ToolKind {
                     error: output.error,
                 }).map_err(|e| e.to_string())
             }
-            ToolKind::ListDir => {
+            ToolKind::ListDir { jail_root } => {
                 let args: ListDirArgs = serde_json::from_value(params)
                     .map_err(|e| format!("bad args: {e}"))?;
-                let output = crate::rig_tools::ListDirTool::new().call(args).await
+                let tool = match jail_root {
+                    Some(ref root) => crate::rig_tools::ListDirTool::with_jail(root.clone()),
+                    None => crate::rig_tools::ListDirTool::new(),
+                };
+                let output = tool.call(args).await
                     .map_err(|e| e.to_string())?;
                 let content = output.entries.iter()
                     .map(|e| format!("{} ({})", e.name, e.kind))
@@ -116,9 +128,12 @@ impl ToolKind {
 
 /// A dispatcher that maps tool names to typed ToolKind variants.
 /// Used by the Agent for explicit ToolCall steps and by the MCP server.
+///
+/// Cloning shares the same registry (Arc<RwLock<...>>), so both copies
+/// always see the same registered tools.
+#[derive(Clone)]
 pub struct McpToolExecutor {
     registry: Arc<RwLock<HashMap<String, Arc<ToolKind>>>>,
-    safety_ctx: SafetyContext,
 }
 
 impl Default for McpToolExecutor {
@@ -129,15 +144,7 @@ impl Default for McpToolExecutor {
 
 impl McpToolExecutor {
     pub fn new() -> Self {
-        let mut tools = HashMap::new();
-        tools.insert("echo".into(), Arc::new(ToolKind::Echo));
-        tools.insert("file_read".into(), Arc::new(ToolKind::FileRead));
-        tools.insert("file_write".into(), Arc::new(ToolKind::FileWrite));
-        tools.insert("list_directory".into(), Arc::new(ToolKind::ListDir));
-        Self {
-            registry: Arc::new(RwLock::new(tools)),
-            safety_ctx: SafetyContext::default(),
-        }
+        Self::with_safety(SafetyContext::default())
     }
 
     pub fn with_defaults() -> Self {
@@ -145,16 +152,22 @@ impl McpToolExecutor {
     }
 
     /// Create with a pre-configured SafetyContext for file jail enforcement.
+    /// File tools will use the SafetyContext's jail_root for path validation.
     pub fn with_safety(safety_ctx: SafetyContext) -> Self {
-        let mut tools = HashMap::new();
-        tools.insert("echo".into(), Arc::new(ToolKind::Echo));
-        tools.insert("file_read".into(), Arc::new(ToolKind::FileRead));
-        tools.insert("file_write".into(), Arc::new(ToolKind::FileWrite));
-        tools.insert("list_directory".into(), Arc::new(ToolKind::ListDir));
+        let jail_root = safety_ctx.jail_root().map(|p| p.to_path_buf());
+        let tools = Self::build_tools(jail_root);
         Self {
             registry: Arc::new(RwLock::new(tools)),
-            safety_ctx,
         }
+    }
+
+    fn build_tools(jail_root: Option<std::path::PathBuf>) -> HashMap<String, Arc<ToolKind>> {
+        let mut tools = HashMap::new();
+        tools.insert("echo".into(), Arc::new(ToolKind::Echo));
+        tools.insert("file_read".into(), Arc::new(ToolKind::FileRead { jail_root: jail_root.clone() }));
+        tools.insert("file_write".into(), Arc::new(ToolKind::FileWrite { jail_root: jail_root.clone() }));
+        tools.insert("list_directory".into(), Arc::new(ToolKind::ListDir { jail_root }));
+        tools
     }
 
     /// Return all registered tool names.
@@ -177,8 +190,8 @@ impl ToolExecutor for McpToolExecutor {
         tool_name: &str,
         params: serde_json::Value,
     ) -> AgentResult<McpToolResult> {
-        // Apply file jail for file operations before dispatching
-        let params = apply_path_jail_to_params(tool_name, params, &self.safety_ctx)?;
+        // Path validation is handled inside ToolKind via resolve_path (jail_root).
+        // No separate path_jail step needed — avoids double-validation conflicts.
 
         let entry = {
             let reg = self.registry.read().await;
@@ -214,36 +227,6 @@ impl ToolExecutor for McpToolExecutor {
             }),
         }
     }
-}
-
-// -----------------------------------------------------------------------------
-// Path jail helper — extracts and validates file paths before tool dispatch
-// -----------------------------------------------------------------------------
-
-fn apply_path_jail_to_params(
-    tool_name: &str,
-    mut params: serde_json::Value,
-    safety_ctx: &SafetyContext,
-) -> AgentResult<serde_json::Value> {
-    match tool_name {
-        "file_read" | "file_write" | "list_directory" => {
-            let path_owned = params
-                .get("path")
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_string());
-            if let Some(ref path_str) = path_owned {
-                let safe_path = safety_ctx.apply_file_jail(std::path::Path::new(path_str))?;
-                if let Some(obj) = params.as_object_mut() {
-                    obj.insert(
-                        "path".into(),
-                        serde_json::Value::String(safe_path.to_string_lossy().to_string()),
-                    );
-                }
-            }
-        }
-        _ => {}
-    }
-    Ok(params)
 }
 
 #[cfg(test)]
@@ -288,7 +271,7 @@ mod tests {
             .execute_tool("list_directory", serde_json::json!({"path": "."}))
             .await
             .unwrap();
-        assert!(result.success);
+        assert!(result.success, "list_directory failed: {:?}", result.error);
         assert!(!result.content.is_empty());
     }
 

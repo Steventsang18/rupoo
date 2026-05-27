@@ -11,7 +11,7 @@
 //!
 //! # Usage
 //! ```bash
-//! yupoo mcp-server
+//! rupoo mcp-server
 //! ```
 //! Then configure your MCP client to spawn this as a subprocess.
 
@@ -19,7 +19,7 @@ use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, BufWriter};
 use tracing::{error, info};
 
-use crate::agent::safety::SafetyContext;
+use crate::safety::SafetyContext;
 use crate::agent::ToolExecutor;
 use crate::error::{AgentError, AgentResult};
 use crate::mcp::McpToolExecutor;
@@ -175,7 +175,7 @@ impl McpServer {
                         },
                         "serverInfo": {
                             "name": "rupoo",
-                            "version": "0.1.0"
+                            "version": env!("CARGO_PKG_VERSION")
                         }
                     })),
                     error: None,

@@ -6,6 +6,7 @@ use std::sync::Arc;
 use crossbeam_channel::Sender;
 use rupoo::{AgentToTui, ApprovalChoice, ChatMessage, PendingTool, TuiToAgent};
 use rupoo::db::TaskRepo;
+use rupoo::llm::ConversationHistory;
 use rupoo::task::Plan;
 
 // ---------------------------------------------------------------------------
@@ -150,6 +151,20 @@ pub struct RupooApp {
     pub scroll_offset: usize,
     /// Last max_scroll value computed during render, used by scroll handlers.
     pub max_scroll_cache: std::cell::Cell<usize>,
+    /// Conversation history for Chat Mode (multi-turn)
+    pub conversation_history: ConversationHistory,
+    /// Whether LLM is configured
+    pub llm_configured: bool,
+    /// Current LLM provider name
+    pub llm_provider: String,
+    /// First run flag (for onboarding hints)
+    pub is_first_run: bool,
+    /// Current step info for Plan Mode progress display
+    pub current_step_info: Option<(usize, usize, String)>,
+    /// Safe mode for Chat Mode (true = only safe tools)
+    pub chat_safe_mode: bool,
+    /// Streaming text buffer for incremental display
+    pub stream_buffer: String,
 }
 
 impl RupooApp {
@@ -201,6 +216,17 @@ impl RupooApp {
                 app.messages.push(ChatMessage::assistant("Goodbye!".to_string()));
                 app.set_quit();
             }),
+            CommandDef::with_handler("plan", "Switch to Plan Mode (auto-generate plan from task)", "Mode", |app| {
+                app.messages.push(ChatMessage::system("Plan Mode: Type your task and it will be automatically broken into steps.".to_string()));
+            }),
+            CommandDef::with_handler("trust", "Enable trust mode (allows file writes in Chat Mode)", "Config", |app| {
+                app.chat_safe_mode = false;
+                app.messages.push(ChatMessage::assistant("Trust mode enabled: file writes are now allowed in Chat Mode.".to_string()));
+            }),
+            CommandDef::with_handler("clear-history", "Clear conversation history for current session", "Chat", |app| {
+                app.conversation_history.clear();
+                app.messages.push(ChatMessage::system("Conversation history cleared.".to_string()));
+            }),
         ];
 
         let input = TextArea::default();
@@ -238,6 +264,13 @@ impl RupooApp {
             scroll_bottom: true,
             scroll_offset: 0,
             max_scroll_cache: std::cell::Cell::new(0),
+            conversation_history: ConversationHistory::new(10),
+            llm_configured: false,
+            llm_provider: String::new(),
+            is_first_run: true,
+            current_step_info: None,
+            chat_safe_mode: true,
+            stream_buffer: String::new(),
         }
     }
 
@@ -297,6 +330,7 @@ impl RupooApp {
         self.quit = true;
     }
 
+    /// Submit a message, routing to Plan Mode or Chat Mode based on prefix.
     pub fn submit_message(&mut self) {
         let text = self.input.lines().join("\n");
         self.input = TextArea::default();
@@ -319,8 +353,15 @@ impl RupooApp {
         self.push_message(ChatMessage::user(text.clone()));
         self.persist_sessions();
 
+        // Route to Plan Mode or Chat Mode based on prefix
         if let Some(ref tx) = self.agent_tx {
-            let _ = tx.send(TuiToAgent::SubmitMessage(text));
+            if text.starts_with("/plan ") {
+                // Plan Mode: send as-is for plan generation
+                let _ = tx.send(TuiToAgent::SubmitMessage(text));
+            } else {
+                // Chat Mode: send as-is
+                let _ = tx.send(TuiToAgent::SubmitMessage(text));
+            }
         } else {
             self.push_message(ChatMessage::assistant(format!("[demo] You said: {}", text)));
             self.persist_sessions();
@@ -330,12 +371,19 @@ impl RupooApp {
     pub fn set_thinking(&mut self) {
         self.thinking = true;
         self.input_mode = InputMode::Thinking;
+        self.stream_buffer.clear();
     }
 
     pub fn set_idle(&mut self) {
         self.thinking = false;
         if self.input_mode == InputMode::Thinking {
             self.input_mode = InputMode::Chat;
+        }
+        // Flush any remaining stream buffer
+        if !self.stream_buffer.is_empty() {
+            self.push_message(ChatMessage::assistant(self.stream_buffer.clone()));
+            self.stream_buffer.clear();
+            self.persist_sessions();
         }
     }
 
@@ -371,6 +419,25 @@ impl RupooApp {
                 self.token_out = self.token_out.saturating_add(out_count);
             }
             AgentToTui::RequestApproval(t) => self.show_tool_approval(t),
+            AgentToTui::StreamChunk { text } => {
+                // Append to streaming buffer for incremental display
+                self.stream_buffer.push_str(&text);
+                self.scroll_bottom = true;
+                self.change_counter = self.change_counter.wrapping_add(1);
+            }
+            AgentToTui::LlmStatus { configured, provider } => {
+                self.llm_configured = configured;
+                self.llm_provider = provider.clone();
+                self.status = if configured {
+                    format!("Connected: {}", provider)
+                } else {
+                    "LLM not configured".to_string()
+                };
+            }
+            AgentToTui::StepProgress { step_index, total, step_name } => {
+                self.current_step_info = Some((step_index, total, step_name.clone()));
+                self.status = format!("Step {}/{}: {}", step_index + 1, total, step_name);
+            }
         }
     }
 
@@ -396,5 +463,10 @@ impl RupooApp {
                 c.name.to_lowercase().contains(&q) || c.description.to_lowercase().contains(&q)
             }).cloned().collect()
         }
+    }
+
+    /// Get the current stream buffer content for rendering.
+    pub fn get_stream_buffer(&self) -> &str {
+        &self.stream_buffer
     }
 }

@@ -6,18 +6,13 @@ use tracing::{error, info, warn};
 
 use crate::db::TaskRepo;
 use crate::error::{AgentError, AgentResult};
-use crate::llm::{ChatMessage, ChatRole, LlmGateway, TokenUsage};
+use crate::llm::{LlmGateway, TokenUsage, ConversationHistory, AgentEvent};
+
 use crate::task::{
     Checkpoint, CheckpointStatus, McpToolResult, Plan, PlanStatus, Step, StepStatus,
 };
 
-// Submodules declared here (cannot modify lib.rs per project constraints).
-#[path = "safety.rs"]
-pub mod safety;
-#[path = "tools/mod.rs"]
-pub mod tools;
-
-use self::safety::SafetyContext;
+use crate::safety::SafetyContext;
 
 /// Result of running a single step.
 #[derive(Debug)]
@@ -87,6 +82,8 @@ pub struct Agent {
     /// Token usage from the most recent chat() call.
     /// Uses Mutex for interior mutability (Cell is not Sync).
     last_usage: std::sync::Mutex<Option<TokenUsage>>,
+    /// Cancellation flag. Set to true to abort the running plan at the next step.
+    cancelled: std::sync::atomic::AtomicBool,
 }
 
 impl Agent {
@@ -97,12 +94,29 @@ impl Agent {
             llm_gateway: None,
             safety_ctx: SafetyContext::default(),
             last_usage: std::sync::Mutex::new(None),
+            cancelled: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
     /// Return token usage from the most recent think step, if available.
     pub fn last_usage(&self) -> Option<TokenUsage> {
         self.last_usage.lock().ok().and_then(|g| *g)
+    }
+
+    /// Request cancellation of the currently running plan.
+    /// The agent will abort at the next step boundary.
+    pub fn request_cancel(&self) {
+        self.cancelled.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Check whether cancellation has been requested.
+    pub fn is_cancelled(&self) -> bool {
+        self.cancelled.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Reset the cancellation flag (e.g., before starting a new plan).
+    pub fn reset_cancel(&self) {
+        self.cancelled.store(false, std::sync::atomic::Ordering::SeqCst);
     }
 
     /// Return a reference to the tool executor (used by AgentUiBridge for
@@ -116,6 +130,60 @@ impl Agent {
     pub fn with_llm(mut self, gateway: LlmGateway) -> Self {
         self.llm_gateway = Some(gateway);
         self
+    }
+
+    /// Get a reference to the LLM gateway if available.
+    pub fn llm_gateway_ref(&self) -> Option<&LlmGateway> {
+        self.llm_gateway.as_ref()
+    }
+
+    /// Check if LLM is configured.
+    pub fn has_llm(&self) -> bool {
+        self.llm_gateway.is_some()
+    }
+
+    // ------------------------------------------------------------------
+    // Agent Chat Mode — multi-turn conversation with memory
+    // ------------------------------------------------------------------
+
+    /// Run an agent chat with the given message, history, and callbacks.
+    /// Returns the final response and token usage.
+    pub async fn agent_chat<F>(
+        &self,
+        user_message: &str,
+        history: &ConversationHistory,
+        max_turns: usize,
+        safe_mode: bool,
+        on_event: F,
+    ) -> AgentResult<(String, TokenUsage)>
+    where
+        F: FnMut(AgentEvent) + Send,
+    {
+        // Check if LLM is configured
+        let gateway = self.llm_gateway.as_ref()
+            .ok_or_else(|| AgentError::Other("LLM not configured. Set api_key and provider first.".into()))?;
+
+        // Search memories for context
+        let memory_context = self
+            .repo
+            .search_memories(user_message, 5)
+            .await
+            .ok()
+            .filter(|memories| !memories.is_empty())
+            .map(|memories| {
+                memories
+                    .iter()
+                    .map(|m| format!("- [{}] {}", m.created_at, m.content))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            });
+
+        let context_ref = memory_context.as_deref();
+
+        // Run the agent loop
+        gateway
+            .chat_agent_loop(user_message, history, max_turns, safe_mode, context_ref, on_event)
+            .await
     }
 
     // ------------------------------------------------------------------
@@ -182,6 +250,9 @@ impl Agent {
     /// Load the plan, run crash recovery, and return a plan ready to execute.
     /// Returns `None` if the plan is already complete.
     pub async fn resume(&self, plan_id: &str) -> AgentResult<Option<Plan>> {
+        // Reset cancellation flag at the start of a new execution
+        self.reset_cancel();
+
         // 1. Clean up any plans left in Running state from a previous crash
         let recovered = self.repo.reset_running_plans_to_pending().await?;
         if !recovered.is_empty() {
@@ -249,6 +320,12 @@ impl Agent {
 
     /// Execute the current step of the plan and return the outcome.
     pub async fn run_next_step(&self, plan: &mut Plan) -> AgentResult<StepOutcome> {
+        // Check cancellation before executing any step
+        if self.is_cancelled() {
+            self.reset_cancel();
+            return Ok(StepOutcome::Failed("Cancelled by user".to_string()));
+        }
+
         let step_index = plan.current_step_index;
 
         // Clone the step to avoid borrow conflicts (we need &mut plan later)
@@ -366,7 +443,7 @@ Keep responses tight. Use Markdown naturally for structure.
 }
 
 // ---------------------------------------------------------------------------
-// Think step
+// Think step with streaming support for Plan Mode
 // ---------------------------------------------------------------------------
 
     async fn exec_think(
@@ -403,15 +480,11 @@ Keep responses tight. Use Markdown naturally for structure.
                 }
             }
 
+            use crate::llm::LlmChatMessage;
+
             let messages = vec![
-                ChatMessage {
-                    role: ChatRole::System,
-                    content: system,
-                },
-                ChatMessage {
-                    role: ChatRole::User,
-                    content: instruction.to_string(),
-                },
+                LlmChatMessage::system(&system),
+                LlmChatMessage::user(&instruction.to_string()),
             ];
             match gateway.chat(&messages).await {
                 Ok((response, usage)) => {
@@ -534,23 +607,29 @@ Keep responses tight. Use Markdown naturally for structure.
         }
     }
 
-    async fn exec_command(
+    /// Generic step execution skeleton for tool-like steps (Exec, HttpRequest, BrowserAction).
+    /// Handles the common pattern: mark running → heartbeat → execute → record result → advance.
+    async fn exec_tool_step<F, Fut>(
         &self,
         plan: &mut Plan,
         step_index: usize,
-        command: &str,
-        args: &[String],
-        timeout_secs: Option<u64>,
-    ) -> AgentResult<StepOutcome> {
+        step_label: &str,
+        execute: F,
+        set_output: impl FnOnce(&mut Step, Option<String>),
+    ) -> AgentResult<StepOutcome>
+    where
+        F: FnOnce() -> Fut,
+        Fut: std::future::Future<Output = AgentResult<String>>,
+    {
         let pid = plan.id.clone();
         self.repo.update_step_progress(&pid, step_index, StepStatus::Running).await?;
         self.heartbeat(&pid, step_index).await?;
 
-        let result = self::tools::terminal::execute_command(command, args, timeout_secs, &self.safety_ctx).await;
-        let (cmd_output, outcome) = match result {
+        let result = execute().await;
+        let (output, outcome) = match result {
             Ok(out) => (Some(out), StepOutcome::Advanced),
             Err(e) => {
-                warn!(%e, "exec_command failed");
+                warn!(%e, "{} failed", step_label);
                 (Some(format!("error: {e}")), StepOutcome::Failed(e.to_string()))
             }
         };
@@ -561,9 +640,7 @@ Keep responses tight. Use Markdown naturally for structure.
                 _ => StepStatus::Failed,
             };
             step.set_status(step_status);
-            if let Step::Exec { ref mut output, .. } = step {
-                *output = cmd_output.clone();
-            }
+            set_output(step, output.clone());
         }
 
         let step_status = match outcome {
@@ -571,11 +648,39 @@ Keep responses tight. Use Markdown naturally for structure.
             _ => StepStatus::Failed,
         };
         self.repo
-            .record_step_completion(&pid, step_index, step_status, cmd_output)
+            .record_step_completion(&pid, step_index, step_status, output)
             .await?;
         plan.current_step_index = step_index + 1;
         plan.updated_at = chrono::Utc::now();
         Ok(outcome)
+    }
+
+    async fn exec_command(
+        &self,
+        plan: &mut Plan,
+        step_index: usize,
+        command: &str,
+        args: &[String],
+        timeout_secs: Option<u64>,
+    ) -> AgentResult<StepOutcome> {
+        let command_owned = command.to_string();
+        let args_owned = args.to_vec();
+        let timeout = timeout_secs;
+        let safety = self.safety_ctx.clone();
+
+        self.exec_tool_step(
+            plan,
+            step_index,
+            "exec_command",
+            || async move {
+                crate::tools::terminal::execute_command(&command_owned, &args_owned, timeout, &safety).await
+            },
+            |step, result| {
+                if let Step::Exec { ref mut output, .. } = step {
+                    *output = result;
+                }
+            },
+        ).await
     }
 
     async fn exec_http_req(
@@ -587,40 +692,29 @@ Keep responses tight. Use Markdown naturally for structure.
         body: Option<&str>,
         headers: Option<&std::collections::HashMap<String, String>>,
     ) -> AgentResult<StepOutcome> {
-        let pid = plan.id.clone();
-        self.repo.update_step_progress(&pid, step_index, StepStatus::Running).await?;
-        self.heartbeat(&pid, step_index).await?;
+        let url_owned = url.to_string();
+        let method_owned = method.clone();
+        let body_owned = body.map(|s| s.to_string());
+        let headers_owned = headers.cloned();
 
-        let result = self::tools::network::execute_http_request(url, method, body, headers).await;
-        let (http_output, outcome) = match result {
-            Ok(out) => (Some(out), StepOutcome::Advanced),
-            Err(e) => {
-                warn!(%e, url, "exec_http_req failed");
-                (Some(format!("error: {e}")), StepOutcome::Failed(e.to_string()))
-            }
-        };
-
-        if let Some(step) = plan.steps.get_mut(step_index) {
-            let step_status = match outcome {
-                StepOutcome::Advanced => StepStatus::Completed,
-                _ => StepStatus::Failed,
-            };
-            step.set_status(step_status);
-            if let Step::HttpRequest { ref mut response, .. } = step {
-                *response = http_output.clone();
-            }
-        }
-
-        let step_status = match outcome {
-            StepOutcome::Advanced => StepStatus::Completed,
-            _ => StepStatus::Failed,
-        };
-        self.repo
-            .record_step_completion(&pid, step_index, step_status, http_output)
-            .await?;
-        plan.current_step_index = step_index + 1;
-        plan.updated_at = chrono::Utc::now();
-        Ok(outcome)
+        self.exec_tool_step(
+            plan,
+            step_index,
+            "exec_http_req",
+            || async move {
+                crate::tools::network::execute_http_request(
+                    &url_owned,
+                    &method_owned,
+                    body_owned.as_deref(),
+                    headers_owned.as_ref(),
+                ).await
+            },
+            |step, result| {
+                if let Step::HttpRequest { ref mut response, .. } = step {
+                    *response = result;
+                }
+            },
+        ).await
     }
 
     async fn exec_browser(
@@ -631,40 +725,29 @@ Keep responses tight. Use Markdown naturally for structure.
         url: Option<&str>,
         timeout_secs: Option<u64>,
     ) -> AgentResult<StepOutcome> {
-        let pid = plan.id.clone();
-        self.repo.update_step_progress(&pid, step_index, StepStatus::Running).await?;
-        self.heartbeat(&pid, step_index).await?;
+        let action_owned = action.clone();
+        let url_owned = url.map(|s| s.to_string());
+        let timeout = timeout_secs;
+        let safety = self.safety_ctx.clone();
 
-        let result = self::tools::browser::execute_browser_action(action, url, timeout_secs, &self.safety_ctx).await;
-        let (browser_output, outcome) = match result {
-            Ok(out) => (Some(out), StepOutcome::Advanced),
-            Err(e) => {
-                warn!(%e, "exec_browser failed");
-                (Some(format!("error: {e}")), StepOutcome::Failed(e.to_string()))
-            }
-        };
-
-        if let Some(step) = plan.steps.get_mut(step_index) {
-            let step_status = match outcome {
-                StepOutcome::Advanced => StepStatus::Completed,
-                _ => StepStatus::Failed,
-            };
-            step.set_status(step_status);
-            if let Step::BrowserAction { ref mut output, .. } = step {
-                *output = browser_output.clone();
-            }
-        }
-
-        let step_status = match outcome {
-            StepOutcome::Advanced => StepStatus::Completed,
-            _ => StepStatus::Failed,
-        };
-        self.repo
-            .record_step_completion(&pid, step_index, step_status, browser_output)
-            .await?;
-        plan.current_step_index = step_index + 1;
-        plan.updated_at = chrono::Utc::now();
-        Ok(outcome)
+        self.exec_tool_step(
+            plan,
+            step_index,
+            "exec_browser",
+            || async move {
+                crate::tools::browser::execute_browser_action(
+                    &action_owned,
+                    url_owned.as_deref(),
+                    timeout,
+                    &safety,
+                ).await
+            },
+            |step, result| {
+                if let Step::BrowserAction { ref mut output, .. } = step {
+                    *output = result;
+                }
+            },
+        ).await
     }
 
     async fn exec_wait_for_input(
@@ -907,5 +990,12 @@ mod tests {
         // Recovery should start from step 1
         let plan = agent.resume(&id).await.unwrap().unwrap();
         assert_eq!(plan.current_step_index, 1);
+    }
+
+    #[test]
+    fn test_has_llm_when_not_configured() {
+        let (_, agent) = setup();
+        assert!(!agent.has_llm());
+        assert!(agent.llm_gateway_ref().is_none());
     }
 }

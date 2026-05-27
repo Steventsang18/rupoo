@@ -14,7 +14,7 @@ use std::time::Duration;
 use tokio::process::Command;
 
 use crate::error::{AgentError, AgentResult};
-use super::super::safety::SafetyContext;
+use crate::safety::SafetyContext;
 
 /// Maximum command output length.
 const MAX_OUTPUT_CHARS: usize = 10_000;
@@ -101,9 +101,9 @@ mod tests {
     #[tokio::test]
     async fn test_echo_command() {
         let safety = SafetyContext::default();
-        let result = execute_command("echo", &["hello yupoo".into()], Some(5), &safety).await;
+        let result = execute_command("echo", &["hello rupoo".into()], Some(5), &safety).await;
         assert!(result.is_ok());
-        assert!(result.unwrap().contains("hello yupoo"));
+        assert!(result.unwrap().contains("hello rupoo"));
     }
 
     #[tokio::test]

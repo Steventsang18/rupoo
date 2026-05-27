@@ -3,7 +3,7 @@
 use std::sync::Arc;
 use tracing::info;
 
-use rupoo::agent::safety::SafetyContext;
+use rupoo::safety::SafetyContext;
 use rupoo::agent::Agent;
 use rupoo::db::TaskRepo;
 use rupoo::mcp::McpToolExecutor;
@@ -25,12 +25,14 @@ pub async fn build_engine(db_path: &str) -> anyhow::Result<(
         }
     };
 
-    // Both the Agent and the Arc-wrapped ToolExecutor share the same SafetyContext.
+    // Both the Agent and the Arc-wrapped ToolExecutor share the same underlying
+    // McpToolExecutor instance (Clone shares the Arc<RwLock<registry>>).
     // The Arc copy is used by AgentUiBridge for direct approval-time tool execution.
+    let mcp_executor = McpToolExecutor::with_safety(safety_ctx.clone());
     let tool_executor: Box<dyn rupoo::agent::ToolExecutor> =
-        Box::new(McpToolExecutor::with_safety(safety_ctx.clone()));
+        Box::new(mcp_executor.clone());
     let tool_executor_arc: std::sync::Arc<Box<dyn rupoo::agent::ToolExecutor>> =
-        std::sync::Arc::new(Box::new(McpToolExecutor::with_safety(safety_ctx.clone())));
+        std::sync::Arc::new(Box::new(mcp_executor));
 
     let jail_root = safety_ctx.jail_root().map(|p| p.to_path_buf());
     let mut agent = Agent::new(Arc::clone(&repo), tool_executor);

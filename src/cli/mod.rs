@@ -23,6 +23,7 @@ use crossbeam_channel::{Receiver, Sender};
 use tracing::warn;
 use rupoo::db::TaskRepo;
 use rupoo::agent::Agent;
+use rupoo::llm::{AgentEvent, ConversationHistory};
 
 // ═══════════════════════════════════════════════════════════════════════════
 // E1: TuiSession — explicit lifecycle (init → run → cleanup)
@@ -388,7 +389,7 @@ pub fn run_tui_with_agent(
 ) -> Result<(), &'static str> {
     // Pre-load UI data on the shared tokio runtime (no new thread, no new runtime).
     // Must happen before passing rt_handle into the TUI event loop.
-    let (sessions_data, model_label) = rt_handle.block_on(async {
+    let (sessions_data, model_label, llm_configured, llm_provider) = rt_handle.block_on(async {
         let sessions = repo.load_ui_sessions().await.unwrap_or_default();
         let provider = repo
             .get_setting("active_provider")
@@ -407,7 +408,15 @@ pub fn run_tui_with_agent(
         } else {
             "not configured".to_string()
         };
-        (sessions, label)
+
+        let llm_configured = !provider.is_empty() && repo
+            .get_setting(&format!("api_key.{}", provider))
+            .await
+            .ok()
+            .flatten()
+            .is_some();
+
+        (sessions, label, llm_configured, provider)
     });
 
     // Create channel pair
@@ -430,6 +439,7 @@ pub fn run_tui_with_agent(
                     pending_step_index: std::sync::Mutex::new(None),
                     tool_executor: std::sync::Arc::clone(&tool_executor),
                     approve_all: false,
+                    conversation_history: ConversationHistory::new(10),
                 };
                 agent_task.run().await;
             });
@@ -448,6 +458,11 @@ pub fn run_tui_with_agent(
         model_label,
         rt_handle,
     )?;
+
+    // Set LLM status on app
+    session.app.llm_configured = llm_configured;
+    session.app.llm_provider = llm_provider.clone();
+
     session.run()
 }
 
@@ -468,53 +483,24 @@ struct AgentUiBridge {
     tool_executor: std::sync::Arc<Box<dyn rupoo::agent::ToolExecutor>>,
     /// When true, automatically approve all future tool calls without user prompt.
     approve_all: bool,
+    /// Conversation history for multi-turn Chat Mode.
+    conversation_history: ConversationHistory,
 }
 
 impl AgentUiBridge {
     async fn run(mut self) {
         loop {
             // Wait for a message from TUI or check for agent output
-            // For now: receive from TUI, call agent, send back result
             match self.rx.recv_timeout(std::time::Duration::from_millis(100)) {
                 Ok(TuiToAgent::SubmitMessage(text)) => {
-                    // Send thinking state
-                    let _ = self.ui_tx.send(AgentToTui::Thinking);
-
-                    // Build a minimal plan and run it
-                    let plan = match self.build_plan(&text).await {
-                        Ok(p) => p,
-                        Err(e) => {
-                            let _ = self.ui_tx.send(AgentToTui::Message(
-                                ChatMessage::assistant(format!("Error: {}", e)),
-                            ));
-                            let _ = self.ui_tx.send(AgentToTui::Idle);
-                            continue;
-                        }
-                    };
-
-                    if let Err(e) = self.repo.save_plan(&plan).await {
-                        let _ = self.ui_tx.send(AgentToTui::Message(
-                            ChatMessage::assistant(format!("DB error: {}", e)),
-                        ));
-                        let _ = self.ui_tx.send(AgentToTui::Idle);
-                        continue;
-                    }
-
-                    // Run plan steps
-                    match self.agent.resume(&plan.id).await {
-                        Ok(Some(mut plan)) => {
-                            self.run_plan(&mut plan).await;
-                        }
-                        Ok(None) => {
-                            // Plan already complete
-                            let _ = self.ui_tx.send(AgentToTui::Idle);
-                        }
-                        Err(e) => {
-                            let _ = self.ui_tx.send(AgentToTui::Message(
-                                ChatMessage::assistant(format!("Agent error: {}", e)),
-                            ));
-                            let _ = self.ui_tx.send(AgentToTui::Idle);
-                        }
+                    // Route to Chat Mode or Plan Mode based on prefix
+                    if text.starts_with("/plan ") {
+                        // Plan Mode: generate plan and execute
+                        let task = text.trim_start_matches("/plan ").trim();
+                        self.handle_plan_mode(task).await;
+                    } else {
+                        // Chat Mode: multi-turn agent chat
+                        self.handle_chat_message(&text).await;
                     }
                 }
                 Ok(TuiToAgent::ApproveTool(_tool_name)) => {
@@ -585,6 +571,185 @@ impl AgentUiBridge {
                     // TUI closed — shutdown
                     break;
                 }
+            }
+        }
+    }
+
+    /// Handle Chat Mode: multi-turn agent conversation with streaming.
+    async fn handle_chat_message(&mut self, user_message: &str) {
+        // Check if LLM is configured
+        if !self.agent.has_llm() {
+            let _ = self.ui_tx.send(AgentToTui::Message(
+                ChatMessage::error("LLM not configured. Please set up your API key first.".to_string()),
+            ));
+            let _ = self.ui_tx.send(AgentToTui::Idle);
+            return;
+        }
+
+        // Send thinking state
+        let _ = self.ui_tx.send(AgentToTui::Thinking);
+
+        // Create a callback closure to send events to TUI
+        let ui_tx = self.ui_tx.clone();
+        let mut full_response = String::new();
+
+        let on_event = |event: AgentEvent| {
+            match event {
+                AgentEvent::TextDelta(text) => {
+                    full_response.push_str(&text);
+                    let _ = ui_tx.send(AgentToTui::StreamChunk { text });
+                }
+                AgentEvent::ToolCall { tool_name, args } => {
+                    let _ = ui_tx.send(AgentToTui::Message(
+                        ChatMessage::system(format!("Calling tool: {} with args: {}", tool_name, args)),
+                    ));
+                }
+                AgentEvent::ToolResult { tool_name, result } => {
+                    let _ = ui_tx.send(AgentToTui::Message(
+                        ChatMessage::system(format!("Tool {} returned: {}", tool_name, result)),
+                    ));
+                }
+            }
+        };
+
+        // Determine safe_mode based on user preferences
+        let safe_mode = true; // Default to safe mode in Chat Mode
+
+        // Run the agent chat
+        match self.agent.agent_chat(
+            user_message,
+            &self.conversation_history,
+            10, // max_turns
+            safe_mode,
+            on_event,
+        ).await {
+            Ok((response, usage)) => {
+                // Update conversation history
+                self.conversation_history.push_user(user_message);
+                self.conversation_history.push_assistant(&response);
+
+                // Persist history to DB
+                let session_id = "default".to_string();
+                if let Err(e) = self.repo.save_conversation_history(&session_id, &self.conversation_history).await {
+                    warn!(error = %e, "failed to persist conversation history");
+                }
+
+                // Send token update
+                let _ = self.ui_tx.send(AgentToTui::TokenUpdate {
+                    in_count: usage.prompt_tokens as u64,
+                    out_count: usage.completion_tokens as u64,
+                });
+
+                // Flush any remaining stream content as a final message
+                if !full_response.is_empty() {
+                    let _ = self.ui_tx.send(AgentToTui::Message(
+                        ChatMessage::assistant(full_response),
+                    ));
+                }
+
+                let _ = self.ui_tx.send(AgentToTui::Idle);
+            }
+            Err(e) => {
+                let err_msg = format!("Chat error: {}", e);
+                let _ = self.ui_tx.send(AgentToTui::Message(
+                    ChatMessage::error(err_msg.clone()),
+                ));
+
+                // Still add user message to history for context
+                self.conversation_history.push_user(user_message);
+                self.conversation_history.push_assistant(&format!("Error: {}", e));
+
+                let _ = self.ui_tx.send(AgentToTui::Idle);
+            }
+        }
+    }
+
+    /// Handle Plan Mode: generate plan from task and execute step by step.
+    async fn handle_plan_mode(&mut self, task: &str) {
+        // Check if LLM is configured
+        if !self.agent.has_llm() {
+            let _ = self.ui_tx.send(AgentToTui::Message(
+                ChatMessage::error("LLM not configured. Please set up your API key first.".to_string()),
+            ));
+            let _ = self.ui_tx.send(AgentToTui::Idle);
+            return;
+        }
+
+        let _ = self.ui_tx.send(AgentToTui::Thinking);
+        let _ = self.ui_tx.send(AgentToTui::Message(
+            ChatMessage::system(format!("Generating plan for: {}", task)),
+        ));
+
+        // Get the LLM gateway to generate plan
+        let gateway = match self.agent.llm_gateway_ref() {
+            Some(g) => g,
+            None => {
+                let _ = self.ui_tx.send(AgentToTui::Message(
+                    ChatMessage::error("LLM gateway not available".to_string()),
+                ));
+                let _ = self.ui_tx.send(AgentToTui::Idle);
+                return;
+            }
+        };
+
+        match gateway.generate_plan(task).await {
+            Ok(steps) => {
+                let total = steps.len();
+                let _ = self.ui_tx.send(AgentToTui::Message(
+                    ChatMessage::system(format!("Generated plan with {} steps", total)),
+                ));
+
+                // Convert StepSpec to Plan steps
+                let plan_steps: Vec<rupoo::task::Step> = steps.into_iter().map(|spec| {
+                    match spec.step_type.as_str() {
+                        "think" => rupoo::task::think_step(&spec.prompt),
+                        "exec" => rupoo::task::exec_step(
+                            if spec.tool_name.is_empty() { "bash" } else { &spec.tool_name },
+                            vec![],
+                            None,
+                        ),
+                        "finish" => rupoo::task::finish_step(&spec.summary),
+                        "wait_for_input" => rupoo::task::wait_for_input_step(&spec.prompt),
+                        _ => rupoo::task::think_step(&spec.instruction),
+                    }
+                }).collect();
+
+                // Create and save the plan
+                let label: String = task.chars().take(40).collect();
+                let plan = rupoo::task::Plan::new(&label, plan_steps);
+
+                if let Err(e) = self.repo.save_plan(&plan).await {
+                    let _ = self.ui_tx.send(AgentToTui::Message(
+                        ChatMessage::error(format!("Failed to save plan: {}", e)),
+                    ));
+                    let _ = self.ui_tx.send(AgentToTui::Idle);
+                    return;
+                }
+
+                // Run the plan
+                match self.agent.resume(&plan.id).await {
+                    Ok(Some(mut plan)) => {
+                        self.run_plan(&mut plan).await;
+                    }
+                    Ok(None) => {
+                        let _ = self.ui_tx.send(AgentToTui::Message(
+                            ChatMessage::assistant("Plan already completed".to_string()),
+                        ));
+                        let _ = self.ui_tx.send(AgentToTui::Idle);
+                    }
+                    Err(e) => {
+                        let _ = self.ui_tx.send(AgentToTui::Message(
+                            ChatMessage::error(format!("Plan error: {}", e)),
+                        ));
+                        let _ = self.ui_tx.send(AgentToTui::Idle);
+                    }
+                }
+            }
+            Err(e) => {
+                let _ = self.ui_tx.send(AgentToTui::Message(
+                    ChatMessage::error(format!("Failed to generate plan: {}", e)),
+                ));
+                let _ = self.ui_tx.send(AgentToTui::Idle);
             }
         }
     }
@@ -697,6 +862,16 @@ impl AgentUiBridge {
     async fn run_plan(&self, plan: &mut rupoo::task::Plan) {
         *self.pending_plan.lock().unwrap() = Some(plan.clone());
         loop {
+            // Send step progress update
+            let step_name = plan.steps.get(plan.current_step_index)
+                .map(|s| format!("{:?}", s))
+                .unwrap_or_else(|| "unknown".to_string());
+            let _ = self.ui_tx.send(AgentToTui::StepProgress {
+                step_index: plan.current_step_index,
+                total: plan.steps.len(),
+                step_name,
+            });
+
             match self.agent.run_next_step(plan).await {
                 Ok(rupoo::agent::StepOutcome::Advanced) => {
                     // Send token update BEFORE last-step check so it's always emitted
@@ -813,19 +988,31 @@ impl AgentUiBridge {
         }
     }
 
-    fn extract_output(
-        &self,
-        plan: &rupoo::task::Plan,
-    ) -> String {
-        plan.steps
-            .first()
-            .and_then(|s| {
-                if let rupoo::task::Step::Think { output, .. } = s {
-                    output.clone()
-                } else {
-                    None
+    /// Extract output from all completed steps, not just the first Think.
+    fn extract_output(&self, plan: &rupoo::task::Plan) -> String {
+        let mut outputs = Vec::new();
+
+        for step in &plan.steps {
+            let output = match step {
+                rupoo::task::Step::Think { output, .. } => output.clone(),
+                rupoo::task::Step::Exec { output, .. } => output.clone(),
+                rupoo::task::Step::ToolCall { result, .. } => {
+                    result.as_ref().map(|r| {
+                        serde_json::to_string_pretty(r).unwrap_or_else(|_| r.to_string())
+                    })
                 }
-            })
-            .unwrap_or_else(|| "(no output)".into())
+                _ => None,
+            };
+
+            if let Some(o) = output {
+                outputs.push(o);
+            }
+        }
+
+        if outputs.is_empty() {
+            return "(no output)".to_string();
+        }
+
+        outputs.join("\n\n")
     }
 }

@@ -143,7 +143,10 @@ impl rig::tool::Tool for FileReadTool {
     ) -> impl std::future::Future<Output = Result<FileReadOutput, Self::Error>>
            + rig::wasm_compat::WasmCompatSend {
         async move {
-            let safe_path = resolve_path(&self.jail_root, &args.path);
+            let safe_path = match resolve_path(&self.jail_root, &args.path) {
+                Ok(p) => p,
+                Err(e) => return async move { Ok(FileReadOutput { content: String::new(), success: false, error: Some(e) }) }.await,
+            };
             match tokio::fs::read_to_string(&safe_path).await {
                 Ok(content) => {
                     let truncated = if content.len() > 4096 {
@@ -235,7 +238,10 @@ impl rig::tool::Tool for FileWriteTool {
     ) -> impl std::future::Future<Output = Result<FileWriteOutput, Self::Error>>
            + rig::wasm_compat::WasmCompatSend {
         async move {
-            let safe_path = resolve_path(&self.jail_root, &args.path);
+            let safe_path = match resolve_path(&self.jail_root, &args.path) {
+                Ok(p) => p,
+                Err(e) => return async move { Ok(FileWriteOutput { bytes_written: 0, success: false, error: Some(e) }) }.await,
+            };
             match tokio::fs::write(&safe_path, &args.content).await {
                 Ok(()) => Ok(FileWriteOutput {
                     bytes_written: args.content.len(),
@@ -319,7 +325,10 @@ impl rig::tool::Tool for ListDirTool {
     ) -> impl std::future::Future<Output = Result<ListDirOutput, Self::Error>>
            + rig::wasm_compat::WasmCompatSend {
         async move {
-            let safe_path = resolve_path(&self.jail_root, &args.path);
+            let safe_path = match resolve_path(&self.jail_root, &args.path) {
+                Ok(p) => p,
+                Err(e) => return async move { Ok(ListDirOutput { entries: vec![], success: false, error: Some(e) }) }.await,
+            };
             let mut entries = Vec::new();
             match tokio::fs::read_dir(&safe_path).await {
                 Ok(mut rd) => {
@@ -368,14 +377,17 @@ impl From<std::io::Error> for ToolCallError {
 // ---------------------------------------------------------------------------
 
 /// Resolve a path through the jail root if configured.
-/// Returns the original path unchanged when no jail_root is set.
-fn resolve_path(jail_root: &Option<PathBuf>, path: &str) -> String {
-    match jail_root {
-        Some(ref root) => path_jail::join(root, path)
-            .map(|p| p.to_string_lossy().to_string())
-            .unwrap_or_else(|_| path.to_string()),
-        None => path.to_string(),
-    }
+/// Returns `Err` if path_jail rejects the path (traversal attack detected).
+/// When no jail_root is set, defaults to CWD as the sandbox root
+/// (never allow unrestricted file access from LLM tool calls).
+fn resolve_path(jail_root: &Option<PathBuf>, path: &str) -> Result<String, String> {
+    let root = match jail_root {
+        Some(ref root) => root.clone(),
+        None => std::env::current_dir().map_err(|e| format!("Cannot determine CWD for sandbox: {e}"))?,
+    };
+    path_jail::join(&root, path)
+        .map(|p| p.to_string_lossy().to_string())
+        .map_err(|e| format!("Access denied to '{}': {e}", path))
 }
 
 // ---------------------------------------------------------------------------
@@ -443,12 +455,13 @@ mod tests {
         let tool = FileReadTool::new();
         let output = tool
             .call(FileReadArgs {
-                path: "/tmp/nonexistent_test_file_xyz".into(),
+                path: "nonexistent_test_file_xyz".into(),
             })
             .await
             .unwrap();
         assert!(!output.success);
-        assert!(output.error.as_deref().unwrap().contains("cannot read"));
+        // Error could be "cannot read" (file not found) or "Access denied" (path_jail)
+        assert!(output.error.is_some());
     }
 
     #[tokio::test]

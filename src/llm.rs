@@ -4,6 +4,8 @@ use tracing::info;
 use std::path::PathBuf;
 
 use crate::error::{AgentError, AgentResult};
+use rig::completion::Prompt;
+use rig::streaming::StreamingPrompt;
 
 // ---------------------------------------------------------------------------
 // Token usage
@@ -19,6 +21,152 @@ impl TokenUsage {
     pub fn total(&self) -> u32 {
         self.prompt_tokens + self.completion_tokens
     }
+}
+
+// ---------------------------------------------------------------------------
+// LLM-internal ChatMessage types (separate from shared::ChatMessage)
+// ---------------------------------------------------------------------------
+
+/// Chat message for LLM communication.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LlmChatMessage {
+    pub role: LlmChatRole,
+    pub content: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub enum LlmChatRole {
+    System,
+    User,
+    Assistant,
+}
+
+impl LlmChatMessage {
+    pub fn system(content: &str) -> Self {
+        Self { role: LlmChatRole::System, content: content.to_string() }
+    }
+    pub fn user(content: &str) -> Self {
+        Self { role: LlmChatRole::User, content: content.to_string() }
+    }
+    pub fn assistant(content: &str) -> Self {
+        Self { role: LlmChatRole::Assistant, content: content.to_string() }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// AgentEvent for streaming callbacks
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone)]
+pub enum AgentEvent {
+    TextDelta(String),
+    ToolCall { tool_name: String, args: String },
+    ToolResult { tool_name: String, result: String },
+}
+
+// ---------------------------------------------------------------------------
+// ConversationHistory for multi-turn chat
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ConversationHistory {
+    messages: Vec<LlmChatMessage>,
+    max_turns: usize,
+}
+
+impl ConversationHistory {
+    pub fn new(max_turns: usize) -> Self {
+        Self { messages: Vec::new(), max_turns }
+    }
+
+    pub fn push_user(&mut self, content: &str) {
+        self.messages.push(LlmChatMessage::user(content));
+        self.trim_to_max_turns();
+    }
+
+    pub fn push_assistant(&mut self, content: &str) {
+        self.messages.push(LlmChatMessage::assistant(content));
+        self.trim_to_max_turns();
+    }
+
+    pub fn clear(&mut self) {
+        self.messages.clear();
+    }
+
+    /// Convert to rig-core Message format for LLM consumption.
+    pub fn to_rig_messages(&self) -> Vec<rig::message::Message> {
+        self.messages
+            .iter()
+            .map(|m| {
+                use rig::message::{Message, UserContent, AssistantContent, Text};
+                use rig::OneOrMany;
+                match m.role {
+                    LlmChatRole::System | LlmChatRole::User => {
+                        Message::User {
+                            content: OneOrMany::one(UserContent::Text(Text { text: m.content.clone() }))
+                        }
+                    }
+                    LlmChatRole::Assistant => {
+                        Message::Assistant {
+                            id: None,
+                            content: OneOrMany::one(AssistantContent::Text(Text { text: m.content.clone() }))
+                        }
+                    }
+                }
+            })
+            .collect()
+    }
+
+    fn trim_to_max_turns(&mut self) {
+        // Keep system messages, trim user/assistant pairs from the front
+        let systems: Vec<_> = self
+            .messages
+            .iter()
+            .filter(|m| m.role == LlmChatRole::System)
+            .cloned()
+            .collect();
+
+        let non_system: Vec<_> = self
+            .messages
+            .iter()
+            .filter(|m| m.role != LlmChatRole::System)
+            .cloned()
+            .collect();
+
+        let to_remove = non_system.len().saturating_sub(self.max_turns * 2);
+        let trimmed: Vec<_> = non_system.into_iter().skip(to_remove).collect();
+
+        self.messages.clear();
+        self.messages.extend(systems);
+        self.messages.extend(trimmed);
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.messages.is_empty()
+    }
+
+    pub fn message_count(&self) -> usize {
+        self.messages.len()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// StepSpec for plan generation
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StepSpec {
+    #[serde(rename = "type")]
+    pub step_type: String,
+    pub instruction: String,
+    #[serde(default)]
+    pub tool_name: String,
+    #[serde(default)]
+    pub params: serde_json::Value,
+    #[serde(default)]
+    pub prompt: String,
+    #[serde(default)]
+    pub summary: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -75,31 +223,7 @@ impl LlmConfig {
 }
 
 // ---------------------------------------------------------------------------
-// Chat message types (our public API, provider-agnostic)
-// ---------------------------------------------------------------------------
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ChatMessage {
-    pub role: ChatRole,
-    pub content: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "lowercase")]
-pub enum ChatRole {
-    System,
-    User,
-    Assistant,
-}
-
-// ---------------------------------------------------------------------------
 // Gateway — wraps rig-core providers behind a unified interface
-//
-// Design: AgentBuilder in rig-core is generic over a concrete CompletionModel,
-//         and the Prompt trait is not object-safe. Instead of dynamic dispatch,
-//         we rebuild the agent per-chat() call. AgentBuilder construction is
-//         O(1) — the HTTP client (reqwest) connection pool lives in rig-core
-//         internals and is reused across calls.
 // ---------------------------------------------------------------------------
 
 /// Unified gateway for multiple LLM providers.
@@ -122,13 +246,9 @@ impl LlmGateway {
     }
 
     /// Send messages to the LLM and return the response text and token usage.
-    /// The first System message is used as the agent's preamble.
-    /// Subsequent messages are joined into a single prompt.
-    pub async fn chat(&self, messages: &[ChatMessage]) -> AgentResult<(String, TokenUsage)> {
-        use rig::completion::request::Prompt;
-
+    pub async fn chat(&self, messages: &[LlmChatMessage]) -> AgentResult<(String, TokenUsage)> {
         let (system, rest): (Vec<_>, Vec<_>) =
-            messages.iter().partition(|m| m.role == ChatRole::System);
+            messages.iter().partition(|m| m.role == LlmChatRole::System);
 
         let preamble = system
             .first()
@@ -144,8 +264,6 @@ impl LlmGateway {
                 .join("\n")
         };
 
-        // Rebuild agent per request (lightweight). Each provider returns
-        // a different concrete type, so we keep prompting inside the match.
         let jail_root = self.jail_root.clone();
         let (text, prompt_tokens, completion_tokens): (String, u64, u64) = match &self.config.provider {
             LlmProvider::Anthropic => {
@@ -189,11 +307,454 @@ impl LlmGateway {
 
         Ok((text, usage))
     }
+
+    /// Multi-turn agent chat loop with memory context and streaming.
+    pub async fn chat_agent_loop<F>(
+        &self,
+        user_message: &str,
+        history: &ConversationHistory,
+        max_turns: usize,
+        safe_mode: bool,
+        memory_context: Option<&str>,
+        mut on_event: F,
+    ) -> AgentResult<(String, TokenUsage)>
+    where
+        F: FnMut(AgentEvent) + Send,
+    {
+        // Build preamble with optional memory context
+        let mut preamble = self.build_preamble();
+
+        if let Some(context) = memory_context {
+            if !context.is_empty() {
+                preamble.push_str("\n\nRelevant context from memory:\n");
+                preamble.push_str(context);
+            }
+        }
+
+        // Build message history for rig-core
+        let mut messages = history.to_rig_messages();
+        use rig::message::{Message, UserContent, Text};
+        use rig::OneOrMany;
+        messages.push(Message::User {
+            content: OneOrMany::one(UserContent::Text(Text { text: user_message.to_string() }))
+        });
+
+        match &self.config.provider {
+            LlmProvider::Anthropic => {
+                let agent = build_anthropic_agent_streaming(&self.config, &preamble, self.jail_root.as_deref(), safe_mode)?;
+                self.chat_stream_anthropic(agent, messages, max_turns, &mut on_event).await
+            }
+            LlmProvider::OpenAI => {
+                let agent = build_openai_agent_streaming(&self.config, &preamble, self.jail_root.as_deref(), safe_mode)?;
+                self.chat_stream_openai(agent, messages, max_turns, &mut on_event).await
+            }
+            LlmProvider::Ollama => {
+                let agent = build_ollama_agent_streaming(&self.config, &preamble, self.jail_root.as_deref(), safe_mode)?;
+                self.chat_stream_ollama(agent, messages, max_turns, &mut on_event).await
+            }
+        }
+    }
+
+    /// Extract text from ToolResultContent.
+    fn extract_tool_result_text(content: &rig::OneOrMany<rig::message::ToolResultContent>) -> String {
+        content.iter().map(|item| {
+            match item {
+                rig::message::ToolResultContent::Text(text) => text.text.clone(),
+                rig::message::ToolResultContent::Image(_) => "[Image]".to_string(),
+            }
+        }).collect::<Vec<_>>().join("\n")
+    }
+
+    /// Extract tool name and args from StreamedAssistantContent.
+    /// Only emits from complete ToolCall; ToolCallDelta is partial (Name or Delta only).
+    fn extract_tool_info<R>(content: &rig::streaming::StreamedAssistantContent<R>) -> Option<(String, String)> {
+        use rig::streaming::StreamedAssistantContent;
+        match content {
+            StreamedAssistantContent::ToolCall { tool_call, .. } => {
+                let args_str = match &tool_call.function.arguments {
+                    serde_json::Value::String(s) => s.clone(),
+                    other => other.to_string(),
+                };
+                Some((tool_call.function.name.clone(), args_str))
+            }
+            StreamedAssistantContent::ToolCallDelta { content: delta, .. } => {
+                // ToolCallDeltaContent is partial: Name(String) or Delta(String)
+                match delta {
+                    rig::streaming::ToolCallDeltaContent::Name(name) => {
+                        Some((name.clone(), String::new()))
+                    }
+                    rig::streaming::ToolCallDeltaContent::Delta(delta_text) => {
+                        Some((String::new(), delta_text.clone()))
+                    }
+                }
+            }
+            _ => None,
+        }
+    }
+
+    /// Generic streaming chat handler for Anthropic.
+    async fn chat_stream_anthropic<F>(
+        &self,
+        agent: rig::agent::Agent<rig::providers::anthropic::completion::CompletionModel>,
+        messages: Vec<rig::message::Message>,
+        max_turns: usize,
+        on_event: &mut F,
+    ) -> AgentResult<(String, TokenUsage)>
+    where
+        F: FnMut(AgentEvent) + Send,
+    {
+        use futures::StreamExt;
+
+        let mut stream = agent.stream_prompt("")
+            .with_history(messages)
+            .multi_turn(max_turns)
+            .await;
+
+        let mut full_text = String::new();
+        let mut token_usage = TokenUsage::default();
+
+        while let Some(result) = stream.next().await {
+            let chunk = match result {
+                Ok(c) => c,
+                Err(e) => return Err(AgentError::Other(format!("Anthropic stream error: {e}"))),
+            };
+            match chunk {
+                rig::agent::MultiTurnStreamItem::StreamAssistantItem(content) => {
+                    match content {
+                        rig::streaming::StreamedAssistantContent::Text(text) => {
+                            let t = text.text.clone();
+                            full_text.push_str(&t);
+                            on_event(AgentEvent::TextDelta(t));
+                        }
+                        _ => {
+                            if let Some((tool_name, args)) = Self::extract_tool_info(&content) {
+                                on_event(AgentEvent::ToolCall {
+                                    tool_name,
+                                    args,
+                                });
+                            }
+                        }
+                    }
+                }
+                rig::agent::MultiTurnStreamItem::StreamUserItem(user_item) => {
+                    let rig::streaming::StreamedUserContent::ToolResult { tool_result, .. } = user_item;
+                    let tool_name = tool_result.call_id.clone()
+                        .unwrap_or_else(|| tool_result.id.clone());
+                    let result_text = Self::extract_tool_result_text(&tool_result.content);
+                    on_event(AgentEvent::ToolResult {
+                        tool_name,
+                        result: result_text,
+                    });
+                }
+                rig::agent::MultiTurnStreamItem::FinalResponse(response) => {
+                    let usage = response.usage();
+                    token_usage.prompt_tokens = usage.input_tokens as u32;
+                    token_usage.completion_tokens = usage.output_tokens as u32;
+                }
+                _ => {}
+            }
+        }
+
+        Ok((full_text, token_usage))
+    }
+
+    /// Generic streaming chat handler for OpenAI.
+    async fn chat_stream_openai<F>(
+        &self,
+        agent: rig::agent::Agent<rig::providers::openai::completion::CompletionModel>,
+        messages: Vec<rig::message::Message>,
+        max_turns: usize,
+        on_event: &mut F,
+    ) -> AgentResult<(String, TokenUsage)>
+    where
+        F: FnMut(AgentEvent) + Send,
+    {
+        use futures::StreamExt;
+
+        let mut stream = agent.stream_prompt("")
+            .with_history(messages)
+            .multi_turn(max_turns)
+            .await;
+
+        let mut full_text = String::new();
+        let mut token_usage = TokenUsage::default();
+
+        while let Some(result) = stream.next().await {
+            let chunk = match result {
+                Ok(c) => c,
+                Err(e) => return Err(AgentError::Other(format!("OpenAI stream error: {e}"))),
+            };
+            match chunk {
+                rig::agent::MultiTurnStreamItem::StreamAssistantItem(content) => {
+                    match content {
+                        rig::streaming::StreamedAssistantContent::Text(text) => {
+                            let t = text.text.clone();
+                            full_text.push_str(&t);
+                            on_event(AgentEvent::TextDelta(t));
+                        }
+                        _ => {
+                            if let Some((tool_name, args)) = Self::extract_tool_info(&content) {
+                                on_event(AgentEvent::ToolCall {
+                                    tool_name,
+                                    args,
+                                });
+                            }
+                        }
+                    }
+                }
+                rig::agent::MultiTurnStreamItem::StreamUserItem(user_item) => {
+                    let rig::streaming::StreamedUserContent::ToolResult { tool_result, .. } = user_item;
+                    let tool_name = tool_result.call_id.clone()
+                        .unwrap_or_else(|| tool_result.id.clone());
+                    let result_text = Self::extract_tool_result_text(&tool_result.content);
+                    on_event(AgentEvent::ToolResult {
+                        tool_name,
+                        result: result_text,
+                    });
+                }
+                rig::agent::MultiTurnStreamItem::FinalResponse(response) => {
+                    let usage = response.usage();
+                    token_usage.prompt_tokens = usage.input_tokens as u32;
+                    token_usage.completion_tokens = usage.output_tokens as u32;
+                }
+                _ => {}
+            }
+        }
+
+        Ok((full_text, token_usage))
+    }
+
+    /// Generic streaming chat handler for Ollama.
+    async fn chat_stream_ollama<F>(
+        &self,
+        agent: rig::agent::Agent<rig::providers::ollama::CompletionModel>,
+        messages: Vec<rig::message::Message>,
+        max_turns: usize,
+        on_event: &mut F,
+    ) -> AgentResult<(String, TokenUsage)>
+    where
+        F: FnMut(AgentEvent) + Send,
+    {
+        use futures::StreamExt;
+
+        let mut stream = agent.stream_prompt("")
+            .with_history(messages)
+            .multi_turn(max_turns)
+            .await;
+
+        let mut full_text = String::new();
+        let mut token_usage = TokenUsage::default();
+
+        while let Some(result) = stream.next().await {
+            let chunk = match result {
+                Ok(c) => c,
+                Err(e) => return Err(AgentError::Other(format!("Ollama stream error: {e}"))),
+            };
+            match chunk {
+                rig::agent::MultiTurnStreamItem::StreamAssistantItem(content) => {
+                    match content {
+                        rig::streaming::StreamedAssistantContent::Text(text) => {
+                            let t = text.text.clone();
+                            full_text.push_str(&t);
+                            on_event(AgentEvent::TextDelta(t));
+                        }
+                        _ => {
+                            if let Some((tool_name, args)) = Self::extract_tool_info(&content) {
+                                on_event(AgentEvent::ToolCall {
+                                    tool_name,
+                                    args,
+                                });
+                            }
+                        }
+                    }
+                }
+                rig::agent::MultiTurnStreamItem::StreamUserItem(user_item) => {
+                    let rig::streaming::StreamedUserContent::ToolResult { tool_result, .. } = user_item;
+                    let tool_name = tool_result.call_id.clone()
+                        .unwrap_or_else(|| tool_result.id.clone());
+                    let result_text = Self::extract_tool_result_text(&tool_result.content);
+                    on_event(AgentEvent::ToolResult {
+                        tool_name,
+                        result: result_text,
+                    });
+                }
+                rig::agent::MultiTurnStreamItem::FinalResponse(response) => {
+                    let usage = response.usage();
+                    token_usage.prompt_tokens = usage.input_tokens as u32;
+                    token_usage.completion_tokens = usage.output_tokens as u32;
+                }
+                _ => {}
+            }
+        }
+
+        Ok((full_text, token_usage))
+    }
+
+    /// Generate a plan from a user task description using the LLM.
+    pub async fn generate_plan(&self, task: &str) -> AgentResult<Vec<StepSpec>> {
+        let preamble = r#"You are a task planning assistant. Given a user task, break it down into a sequence of steps.
+
+For each step, specify:
+- type: "think", "exec", "file_read", "file_write", "list_dir", "http_request", "wait_for_input", "finish"
+- instruction: What to do in this step
+- tool_name: The tool to use (if applicable)
+- params: Tool parameters as JSON (if applicable)
+- prompt: For think steps, the actual prompt to send to the LLM
+- summary: Brief description of what this step accomplishes
+
+Respond with a JSON array of steps."#;
+
+        use rig::message::{Message, UserContent, Text};
+        use rig::OneOrMany;
+
+        let messages = vec![
+            Message::User {
+                content: OneOrMany::one(UserContent::Text(Text { text: preamble.to_string() }))
+            },
+            Message::User {
+                content: OneOrMany::one(UserContent::Text(Text { text: format!("Task: {}", task) }))
+            },
+        ];
+
+        let (response, _usage) = self.chat_with_messages(&messages).await?;
+
+        // Parse JSON response
+        let steps: Vec<StepSpec> = serde_json::from_str(&response)
+            .map_err(|e| AgentError::Other(format!("Failed to parse plan: {e}. Response: {}", response)))?;
+
+        Ok(steps)
+    }
+
+    /// Internal helper: chat with pre-built message list.
+    async fn chat_with_messages(
+        &self,
+        messages: &[rig::message::Message],
+    ) -> AgentResult<(String, TokenUsage)> {
+        let jail_root = self.jail_root.clone();
+        let prompt_text = messages.iter().map(|m| {
+            match m {
+                rig::message::Message::User { content } => {
+                    let text = extract_text_from_user_content(content);
+                    format!("User: {}", text)
+                }
+                rig::message::Message::Assistant { content, .. } => {
+                    let text = extract_text_from_assistant_content(content);
+                    format!("Assistant: {}", text)
+                }
+            }
+        }).collect::<Vec<_>>().join("\n\n");
+
+        let (text, prompt_tokens, completion_tokens): (String, u64, u64) = match &self.config.provider {
+            LlmProvider::Anthropic => {
+                let agent = build_anthropic_agent(&self.config, "", jail_root.as_deref())?;
+                let response = agent.prompt(&prompt_text)
+                    .extended_details()
+                    .await
+                    .map_err(|e| AgentError::Other(format!("LLM request failed: {e}")))?;
+                (response.output, response.total_usage.input_tokens, response.total_usage.output_tokens)
+            }
+            LlmProvider::OpenAI => {
+                let agent = build_openai_agent(&self.config, "", jail_root.as_deref())?;
+                let response = agent.prompt(&prompt_text)
+                    .extended_details()
+                    .await
+                    .map_err(|e| AgentError::Other(format!("LLM request failed: {e}")))?;
+                (response.output, response.total_usage.input_tokens, response.total_usage.output_tokens)
+            }
+            LlmProvider::Ollama => {
+                let agent = build_ollama_agent(&self.config, "", jail_root.as_deref())?;
+                let response = agent.prompt(&prompt_text)
+                    .extended_details()
+                    .await
+                    .map_err(|e| AgentError::Other(format!("LLM request failed: {e}")))?;
+                (response.output, response.total_usage.input_tokens, response.total_usage.output_tokens)
+            }
+        };
+
+        let usage = TokenUsage {
+            prompt_tokens: prompt_tokens as u32,
+            completion_tokens: completion_tokens as u32,
+        };
+
+        Ok((text, usage))
+    }
+
+    fn build_preamble(&self) -> String {
+        r#"You are Rupoo, an AI-powered terminal assistant running inside the user's terminal.
+You help with software development, file operations, and system tasks.
+
+## Your Capabilities
+- File Operations: file_read, file_write, list_directory
+- Terminal Commands: execute shell commands (dangerous commands blocked)
+- HTTP Requests: GET/POST to public URLs (localhost blocked for security)
+- Browser Automation: headless navigation and screenshots
+- Memory: stores and retrieves context across sessions (FTS5 search)
+- Skills: reusable workflows as JSON files
+- Git: status, commit, create PR
+- MCP Server: exposes tools via JSON-RPC over stdio
+
+## Output Format
+Be concise and structured.
+
+### Reading files:
+Show the file path, then the relevant content or summary.
+
+### Listing directories:
+Show the structure clearly.
+
+### Running commands:
+Show the command, then the output.
+
+### Analyzing code:
+Be specific about what you find. Show relevant snippets.
+
+### Errors:
+Be specific about the problem and the fix.
+
+Keep responses tight. Use Markdown naturally for structure.
+"#.to_string()
+    }
 }
 
 // ---------------------------------------------------------------------------
 // Per-provider agent builders
 // ---------------------------------------------------------------------------
+
+/// Register tools on the builder based on safe_mode setting.
+/// Returns AgentBuilderSimple because .tool() transitions from AgentBuilder to AgentBuilderSimple.
+fn register_tools<M: rig::completion::CompletionModel>(
+    builder: rig::agent::AgentBuilderSimple<M>,
+    jail_root: Option<&std::path::Path>,
+    safe_mode: bool,
+) -> rig::agent::AgentBuilderSimple<M> {
+    // Already have EchoTool from the initial builder
+    let mut builder = builder;
+
+    // FileReadTool is safe
+    if let Some(root) = jail_root {
+        builder = builder.tool(crate::rig_tools::FileReadTool::with_jail(root.to_path_buf()));
+    } else {
+        builder = builder.tool(crate::rig_tools::FileReadTool::new());
+    }
+
+    // ListDirTool is safe
+    if let Some(root) = jail_root {
+        builder = builder.tool(crate::rig_tools::ListDirTool::with_jail(root.to_path_buf()));
+    } else {
+        builder = builder.tool(crate::rig_tools::ListDirTool::new());
+    }
+
+    // FileWriteTool is write operations - only register in unsafe mode
+    if !safe_mode {
+        if let Some(root) = jail_root {
+            builder = builder.tool(crate::rig_tools::FileWriteTool::with_jail(root.to_path_buf()));
+        } else {
+            builder = builder.tool(crate::rig_tools::FileWriteTool::new());
+        }
+    }
+
+    builder
+}
 
 fn build_anthropic_agent(
     config: &LlmConfig,
@@ -209,17 +770,14 @@ fn build_anthropic_agent(
         rig::providers::anthropic::client::Client::new(api_key)
             .map_err(|e| AgentError::Other(format!("Anthropic client init failed: {e}")))?;
 
-    let model = rig::providers::anthropic::completion::CompletionModel::new(
-        client,
-        &config.model,
-    );
+    let model = rig::providers::anthropic::completion::CompletionModel::new(client, &config.model);
 
     let mut builder = AgentBuilder::new(model)
         .preamble(preamble)
         .temperature(config.temperature)
         .max_tokens(config.max_tokens as u64)
-        .tool(crate::rig_tools::EchoTool::new())
-        .default_max_turns(10);
+        .default_max_turns(10)
+        .tool(crate::rig_tools::EchoTool::new());
 
     if let Some(root) = jail_root {
         builder = builder
@@ -270,8 +828,8 @@ fn build_openai_agent(
         .preamble(preamble)
         .temperature(config.temperature)
         .max_tokens(config.max_tokens as u64)
-        .tool(crate::rig_tools::EchoTool::new())
-        .default_max_turns(10);
+        .default_max_turns(10)
+        .tool(crate::rig_tools::EchoTool::new());
 
     if let Some(root) = jail_root {
         builder = builder
@@ -316,8 +874,8 @@ fn build_ollama_agent(
         .preamble(preamble)
         .temperature(config.temperature)
         .max_tokens(config.max_tokens as u64)
-        .tool(crate::rig_tools::EchoTool::new())
-        .default_max_turns(10);
+        .default_max_turns(10)
+        .tool(crate::rig_tools::EchoTool::new());
 
     if let Some(root) = jail_root {
         builder = builder
@@ -334,12 +892,146 @@ fn build_ollama_agent(
     Ok(builder.build())
 }
 
-fn role_label(role: &ChatRole) -> &'static str {
+/// Streaming agent for Anthropic with safe_mode.
+/// Uses a concrete type to avoid generic complications.
+fn build_anthropic_agent_streaming(
+    config: &LlmConfig,
+    preamble: &str,
+    jail_root: Option<&std::path::Path>,
+    safe_mode: bool,
+) -> AgentResult<rig::agent::Agent<rig::providers::anthropic::completion::CompletionModel>> {
+    use rig::agent::AgentBuilder;
+
+    let api_key = config.api_key.as_deref()
+        .ok_or_else(|| AgentError::Other("Anthropic requires an API key. Set it via: agent config set api_key.anthropic <key>".into()))?;
+
+    let client: rig::providers::anthropic::client::Client =
+        rig::providers::anthropic::client::Client::new(api_key)
+            .map_err(|e| AgentError::Other(format!("Anthropic client init failed: {e}")))?;
+
+    let model = rig::providers::anthropic::completion::CompletionModel::new(client, &config.model);
+
+    // Add EchoTool first to transition to AgentBuilderSimple
+    let builder = AgentBuilder::new(model)
+        .preamble(preamble)
+        .temperature(config.temperature)
+        .max_tokens(config.max_tokens as u64)
+        .default_max_turns(10)
+        .tool(crate::rig_tools::EchoTool::new());
+
+    let builder = register_tools(builder, jail_root, safe_mode);
+
+    Ok(builder.build())
+}
+
+/// Streaming agent for OpenAI with safe_mode.
+/// Uses a concrete type to avoid generic complications.
+fn build_openai_agent_streaming(
+    config: &LlmConfig,
+    preamble: &str,
+    jail_root: Option<&std::path::Path>,
+    safe_mode: bool,
+) -> AgentResult<rig::agent::Agent<rig::providers::openai::completion::CompletionModel>> {
+    use rig::agent::AgentBuilder;
+
+    let api_key = config.api_key.as_deref()
+        .ok_or_else(|| AgentError::Other("OpenAI requires an API key. Set it via: agent config set api_key.openai <key>".into()))?;
+
+    let client: rig::providers::openai::client::Client =
+        match &config.base_url {
+            Some(custom_url) => {
+                rig::providers::openai::client::Client::builder()
+                    .api_key(api_key)
+                    .base_url(custom_url)
+                    .build()
+                    .map_err(|e| AgentError::Other(format!("OpenAI client init failed: {e}")))?
+            }
+            None => {
+                rig::providers::openai::client::Client::new(api_key)
+                    .map_err(|e| AgentError::Other(format!("OpenAI client init failed: {e}")))?
+            }
+        };
+
+    let model = rig::providers::openai::completion::CompletionModel::new(
+        client.completions_api(),
+        &config.model,
+    );
+
+    // Add EchoTool first to transition to AgentBuilderSimple
+    let builder = AgentBuilder::new(model)
+        .preamble(preamble)
+        .temperature(config.temperature)
+        .max_tokens(config.max_tokens as u64)
+        .default_max_turns(10)
+        .tool(crate::rig_tools::EchoTool::new());
+
+    let builder = register_tools(builder, jail_root, safe_mode);
+
+    Ok(builder.build())
+}
+
+/// Streaming agent for Ollama with safe_mode.
+/// Uses a concrete type to avoid generic complications.
+fn build_ollama_agent_streaming(
+    config: &LlmConfig,
+    preamble: &str,
+    jail_root: Option<&std::path::Path>,
+    safe_mode: bool,
+) -> AgentResult<rig::agent::Agent<rig::providers::ollama::CompletionModel>> {
+    use rig::agent::AgentBuilder;
+
+    let base_url = config.base_url.as_deref().unwrap_or("http://localhost:11434");
+
+    let client: rig::providers::ollama::Client =
+        rig::providers::ollama::Client::builder()
+            .api_key(rig::client::Nothing)
+            .base_url(base_url)
+            .build()
+            .map_err(|e| AgentError::Other(format!("Ollama client init failed: {e}")))?;
+
+    let model = rig::providers::ollama::CompletionModel::new(client, &config.model);
+
+    // Add EchoTool first to transition to AgentBuilderSimple
+    let builder = AgentBuilder::new(model)
+        .preamble(preamble)
+        .temperature(config.temperature)
+        .max_tokens(config.max_tokens as u64)
+        .default_max_turns(10)
+        .tool(crate::rig_tools::EchoTool::new());
+
+    let builder = register_tools(builder, jail_root, safe_mode);
+
+    Ok(builder.build())
+}
+
+fn role_label(role: &LlmChatRole) -> &'static str {
     match role {
-        ChatRole::System => "System",
-        ChatRole::User => "User",
-        ChatRole::Assistant => "Assistant",
+        LlmChatRole::System => "System",
+        LlmChatRole::User => "User",
+        LlmChatRole::Assistant => "Assistant",
     }
+}
+
+/// Extract text content from UserContent.
+fn extract_text_from_user_content(content: &rig::OneOrMany<rig::message::UserContent>) -> String {
+    content.iter().filter_map(|item| {
+        if let rig::message::UserContent::Text(text) = item {
+            Some(text.text.clone())
+        } else {
+            None
+        }
+    }).collect::<Vec<_>>().join("\n")
+}
+
+/// Extract text content from AssistantContent.
+fn extract_text_from_assistant_content(content: &rig::OneOrMany<rig::message::AssistantContent>) -> String {
+    content.iter().filter_map(|item| {
+        if let rig::message::AssistantContent::Text(text) = item {
+            Some(text.text.clone())
+        } else {
+            None
+        }
+    }).collect::<Vec<_>>().join("\n")
 }
 
 // ---------------------------------------------------------------------------
@@ -365,24 +1057,66 @@ mod tests {
     }
 
     #[test]
-    fn test_chat_message_serde() {
-        let msg = ChatMessage {
-            role: ChatRole::User,
-            content: "Hello".into(),
-        };
+    fn test_llm_chat_message_serde() {
+        let msg = LlmChatMessage::user("Hello");
         let json = serde_json::to_string(&msg).unwrap();
-        assert!(json.contains("user"));
+        assert!(json.contains("User"));
         assert!(json.contains("Hello"));
 
-        let deserialized: ChatMessage = serde_json::from_str(&json).unwrap();
-        assert_eq!(deserialized.role, ChatRole::User);
+        let deserialized: LlmChatMessage = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.role, LlmChatRole::User);
         assert_eq!(deserialized.content, "Hello");
+    }
+
+    #[test]
+    fn test_conversation_history() {
+        let mut history = ConversationHistory::new(5);
+        history.push_user("Hello");
+        history.push_assistant("Hi there!");
+        history.push_user("How are you?");
+        history.push_assistant("I'm good!");
+
+        assert_eq!(history.message_count(), 4);
+        assert!(!history.is_empty());
+
+        let messages = history.to_rig_messages();
+        assert_eq!(messages.len(), 4);
+    }
+
+    #[test]
+    fn test_conversation_history_trim() {
+        let mut history = ConversationHistory::new(2);
+        history.push_user("Turn 1");
+        history.push_assistant("Response 1");
+        history.push_user("Turn 2");
+        history.push_assistant("Response 2");
+        history.push_user("Turn 3");
+        history.push_assistant("Response 3");
+
+        assert!(history.message_count() <= 4);
+    }
+
+    #[test]
+    fn test_step_spec_serde() {
+        let spec = StepSpec {
+            step_type: "think".to_string(),
+            instruction: "Analyze this".to_string(),
+            tool_name: "".to_string(),
+            params: serde_json::json!({}),
+            prompt: "What is 2+2?".to_string(),
+            summary: "Math analysis".to_string(),
+        };
+
+        let json = serde_json::to_string(&spec).unwrap();
+        assert!(json.contains("\"type\":\"think\""));
+
+        let back: StepSpec = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.step_type, "think");
     }
 
     #[test]
     fn test_llm_config_f64_types() {
         let cfg = LlmConfig::new(LlmProvider::Anthropic, None);
-        // Verify our config types match rig-core expectations
         let _: f64 = cfg.temperature;
     }
 }

@@ -11,14 +11,27 @@
 use crate::error::{AgentError, AgentResult};
 use crate::task::HttpMethod;
 
-// SafetyContext is at crate::agent::safety via agent.rs module declaration
-use super::super::safety::SafetyContext;
+// SafetyContext provides SSRF protection via localhost URL detection
+use crate::safety::SafetyContext;
 
 /// Maximum response body size (5 MB).
 const MAX_RESPONSE_BYTES: usize = 5 * 1024 * 1024;
 
 /// Maximum response text length in output (5000 chars).
 const MAX_OUTPUT_CHARS: usize = 5000;
+
+/// Extract hostname from a URL string.
+fn extract_host(url: &str) -> Option<String> {
+    url.strip_prefix("https://")
+        .or_else(|| url.strip_prefix("http://"))
+        .and_then(|rest| {
+            // Remove port and path
+            let host = rest.split('/').next().unwrap_or(rest);
+            let hostname = host.split(':').next().unwrap_or(host);
+            // Strip userinfo (e.g. user@host)
+            Some(hostname.rsplit('@').next().unwrap_or(hostname).to_string())
+        })
+}
 
 /// Execute an HTTP request and return the response.
 pub async fn execute_http_request(
@@ -27,11 +40,20 @@ pub async fn execute_http_request(
     body: Option<&str>,
     headers: Option<&std::collections::HashMap<String, String>>,
 ) -> AgentResult<String> {
-    // SSRF protection: block localhost
+    // SSRF protection: block localhost (string-based fast check)
     if SafetyContext::is_localhost_url(url) {
         return Err(AgentError::Other(
             "HTTP request to localhost is blocked for security".into(),
         ));
+    }
+
+    // SSRF protection: DNS resolution check (prevents DNS rebinding)
+    if let Some(host) = extract_host(url) {
+        if SafetyContext::is_private_host(&host).await {
+            return Err(AgentError::Other(format!(
+                "HTTP request to '{host}' is blocked: resolves to private/local IP (SSRF protection)"
+            )));
+        }
     }
 
     let client = reqwest::Client::builder()

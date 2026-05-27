@@ -53,13 +53,23 @@ pub enum ConfigAction {
         key: String,
         /// Value to set
         value: String,
+        /// Database path (default: ~/.rupoo/agent.db)
+        #[arg(long)]
+        db: Option<String>,
     },
     /// Get a configuration value
     Get {
         key: String,
+        /// Database path (default: ~/.rupoo/agent.db)
+        #[arg(long)]
+        db: Option<String>,
     },
     /// List all configuration values
-    List,
+    List {
+        /// Database path (default: ~/.rupoo/agent.db)
+        #[arg(long)]
+        db: Option<String>,
+    },
 }
 
 #[derive(clap::Subcommand)]
@@ -178,21 +188,24 @@ pub async fn run_cmd(cmd: super::Commands) -> anyhow::Result<()> {
             }
         },
         super::Commands::Config { action } => match action {
-            ConfigAction::Set { key, value } => {
-                let (repo, _agent, _tool_executor) = crate::build_engine::build_engine("agent.db").await?;
+            ConfigAction::Set { key, value, db } => {
+                let db = resolve_db(db);
+                let (repo, _agent, _tool_executor) = crate::build_engine::build_engine(&db).await?;
                 repo.set_setting(&key, &value).await?;
                 info!(key = %key, "configuration saved");
                 println!("Set {key} = {value}");
             }
-            ConfigAction::Get { key } => {
-                let (repo, _agent, _tool_executor) = crate::build_engine::build_engine("agent.db").await?;
+            ConfigAction::Get { key, db } => {
+                let db = resolve_db(db);
+                let (repo, _agent, _tool_executor) = crate::build_engine::build_engine(&db).await?;
                 match repo.get_setting(&key).await? {
                     Some(value) => println!("{key} = {value}"),
                     None => println!("{key} is not set"),
                 }
             }
-            ConfigAction::List => {
-                let (repo, _agent, _tool_executor) = crate::build_engine::build_engine("agent.db").await?;
+            ConfigAction::List { db } => {
+                let db = resolve_db(db);
+                let (repo, _agent, _tool_executor) = crate::build_engine::build_engine(&db).await?;
                 let settings = repo.list_settings().await?;
                 if settings.is_empty() {
                     println!("No configuration set.");
@@ -368,49 +381,6 @@ fn print_plan_summary(plan: &Plan) {
         println!("  [{i}] {label}");
     }
     println!("==========================\n");
-}
-
-fn print_plan_result(plan: &Plan) {
-    println!("\n=== PLAN RESULT ===");
-    println!("Name: {}", plan.name);
-    println!("Status: {:?}", plan.status);
-    for (i, step) in plan.steps.iter().enumerate() {
-        let status_mark = match step.status() {
-            rupoo::task::StepStatus::Completed => "✓",
-            rupoo::task::StepStatus::Failed => "✗",
-            rupoo::task::StepStatus::Running => "▶",
-            rupoo::task::StepStatus::Pending => "·",
-            rupoo::task::StepStatus::WaitingForInput => "⊘",
-        };
-
-        let label = match step {
-            rupoo::task::Step::Think { instruction, output, .. } => {
-                format!("THINK: {instruction} | out: {}", output.as_deref().unwrap_or("-"))
-            }
-            rupoo::task::Step::ToolCall { tool_name, result, .. } => {
-                let r = result
-                    .as_ref()
-                    .map(|v| v.to_string())
-                    .unwrap_or_else(|| "-".to_string());
-                format!("TOOL: {tool_name} | result: {r}")
-            }
-            rupoo::task::Step::WaitForInput { prompt, response, .. } => {
-                format!("WAIT: {prompt} | response: {}", response.as_deref().unwrap_or("(pending)"))
-            }
-            rupoo::task::Step::Finish { summary, .. } => format!("FINISH: {summary}"),
-            rupoo::task::Step::Exec { command, output, .. } => {
-                format!("EXEC: {command} | out: {}", output.as_deref().unwrap_or("-"))
-            }
-            rupoo::task::Step::HttpRequest { url, response, .. } => {
-                format!("HTTP: {url} | resp: {}", response.as_deref().unwrap_or("-"))
-            }
-            rupoo::task::Step::BrowserAction { action, output, .. } => {
-                format!("BROWSER: {action:?} | out: {}", output.as_deref().unwrap_or("-"))
-            }
-        };
-        println!("  {status_mark} [{i}] {label}");
-    }
-    println!("========================\n");
 }
 
 #[cfg(feature = "gui")]

@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 use tracing::{error, info};
 
 use crate::error::{AgentError, AgentResult};
+use crate::llm::ConversationHistory;
 use crate::task::{
     Checkpoint, CheckpointStatus, Plan, PlanStatus, Step, StepStatus,
 };
@@ -29,7 +30,23 @@ pub struct PlanSummary {
 
 impl TaskRepo {
     /// Open (or create) the database at `db_path` and ensure tables exist.
+    ///
+    /// For file-based databases (not `:memory:`), restricts file permissions
+    /// to owner-only (0o600 on Unix) to protect stored API keys and settings.
     pub fn new(db_path: &str) -> AgentResult<Self> {
+        // Restrict file permissions before opening — protects stored API keys
+        if db_path != ":memory:" {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let path = std::path::Path::new(db_path);
+                if path.exists() {
+                    let perms = std::fs::Permissions::from_mode(0o600);
+                    std::fs::set_permissions(path, perms)?;
+                }
+            }
+        }
+
         let conn = rusqlite::Connection::open(db_path)?;
         // Enable WAL mode for better concurrent read performance
         conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;")?;
@@ -74,6 +91,13 @@ impl TaskRepo {
                 updated_at    TEXT NOT NULL
             );
 
+            -- Conversation histories for multi-turn Chat Mode
+            CREATE TABLE IF NOT EXISTS conversation_histories (
+                session_id    TEXT PRIMARY KEY,
+                history_json  TEXT NOT NULL,
+                updated_at    TEXT NOT NULL
+            );
+
             -- FTS5-based memory store for long-term memory
             -- content_id stores the UUID (rowid is auto-increment integer)
             CREATE VIRTUAL TABLE IF NOT EXISTS memories USING fts5(
@@ -88,6 +112,18 @@ impl TaskRepo {
             ",
         )?;
         info!(db_path, "database initialized");
+
+        // Ensure restrictive permissions after creation (new files inherit umask)
+        if db_path != ":memory:" {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let path = std::path::Path::new(db_path);
+                let perms = std::fs::Permissions::from_mode(0o600);
+                let _ = std::fs::set_permissions(path, perms);
+            }
+        }
+
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
         })
@@ -441,6 +477,63 @@ impl TaskRepo {
     }
 
     // ------------------------------------------------------------------
+    // Conversation History persistence for Chat Mode
+    // ------------------------------------------------------------------
+
+    /// Save conversation history for a session.
+    pub async fn save_conversation_history(
+        &self,
+        session_id: &str,
+        history: &ConversationHistory,
+    ) -> AgentResult<()> {
+        let sid = session_id.to_string();
+        let history_json = serde_json::to_string(history)?;
+        let now = chrono::Utc::now().to_rfc3339();
+
+        self.with_conn(move |conn| {
+            conn.execute(
+                "INSERT INTO conversation_histories (session_id, history_json, updated_at)
+                 VALUES (?1, ?2, ?3)
+                 ON CONFLICT(session_id) DO UPDATE SET
+                   history_json = excluded.history_json,
+                   updated_at = excluded.updated_at",
+                rusqlite::params![sid, history_json, now],
+            )?;
+            Ok(())
+        })
+        .await
+    }
+
+    /// Load conversation history for a session.
+    pub async fn load_conversation_history(
+        &self,
+        session_id: &str,
+    ) -> AgentResult<Option<ConversationHistory>> {
+        let sid = session_id.to_string();
+        self.with_conn(move |conn| {
+            let mut stmt = conn.prepare(
+                "SELECT history_json FROM conversation_histories WHERE session_id = ?1",
+            )?;
+
+            let result = stmt
+                .query_row(rusqlite::params![sid], |row| {
+                    row.get::<_, String>(0)
+                })
+                .ok();
+
+            match result {
+                Some(json) => {
+                    let history: ConversationHistory = serde_json::from_str(&json)
+                        .map_err(|e| AgentError::Other(format!("parse history: {e}")))?;
+                    Ok(Some(history))
+                }
+                None => Ok(None),
+            }
+        })
+        .await
+    }
+
+    // ------------------------------------------------------------------
     // Settings (key-value store for API keys, preferences)
     // ------------------------------------------------------------------
 
@@ -459,10 +552,6 @@ impl TaskRepo {
         .await
     }
 
-    /// Get a configuration value by key.
-    // ── UI Session persistence ───────────────────────────────────────────────
-
-    // ── UI Session persistence ───────────────────────────────────────────────
     /// Get a configuration value by key.
     #[allow(clippy::empty_line_after_doc_comments)]
     pub async fn save_ui_session(
@@ -885,5 +974,22 @@ mod tests {
         assert!(json.contains("Running"));
         let back: PlanSummary = serde_json::from_str(&json).unwrap();
         assert_eq!(back.total_steps, 5);
+    }
+
+    #[tokio::test]
+    async fn test_conversation_history_persistence() {
+        let repo = repo();
+        let mut history = ConversationHistory::new(10);
+        history.push_user("Hello");
+        history.push_assistant("Hi there!");
+
+        repo.save_conversation_history("session-1", &history).await.unwrap();
+
+        let loaded = repo.load_conversation_history("session-1").await.unwrap().unwrap();
+        assert_eq!(loaded.message_count(), 2);
+
+        // Non-existent session returns None
+        let none = repo.load_conversation_history("nonexistent").await.unwrap();
+        assert!(none.is_none());
     }
 }
