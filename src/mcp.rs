@@ -203,6 +203,89 @@ impl McpToolExecutor {
         let reg = self.registry.read().await;
         reg.values().map(|t| (t.name(), t.description())).collect()
     }
+
+    /// Return tool schemas for MCP server. Returns (name, description, parameters_json) tuples.
+    pub async fn list_tools_with_schema(&self) -> Vec<(String, String, serde_json::Value)> {
+        let reg = self.registry.read().await;
+        reg.values()
+            .map(|t| {
+                let schema = match t.name() {
+                    "echo" => serde_json::json!({
+                        "type": "object",
+                        "properties": {
+                            "message": {
+                                "type": "string",
+                                "description": "The message to echo back"
+                            }
+                        },
+                        "required": ["message"]
+                    }),
+                    "file_read" => serde_json::json!({
+                        "type": "object",
+                        "properties": {
+                            "path": {
+                                "type": "string",
+                                "description": "Absolute or relative path to the file"
+                            }
+                        },
+                        "required": ["path"]
+                    }),
+                    "file_write" => serde_json::json!({
+                        "type": "object",
+                        "properties": {
+                            "path": {
+                                "type": "string",
+                                "description": "Path to the file to write"
+                            },
+                            "content": {
+                                "type": "string",
+                                "description": "Content to write to the file"
+                            }
+                        },
+                        "required": ["path", "content"]
+                    }),
+                    "list_directory" => serde_json::json!({
+                        "type": "object",
+                        "properties": {
+                            "path": {
+                                "type": "string",
+                                "description": "Path to the directory to list"
+                            }
+                        },
+                        "required": ["path"]
+                    }),
+                    "web_search" => serde_json::json!({
+                        "type": "object",
+                        "properties": {
+                            "query": {
+                                "type": "string",
+                                "description": "The search query"
+                            }
+                        },
+                        "required": ["query"]
+                    }),
+                    _ => serde_json::json!({
+                        "type": "object",
+                        "properties": {},
+                        "required": []
+                    }),
+                };
+                (t.name().to_string(), t.description().to_string(), schema)
+            })
+            .collect()
+    }
+
+    /// Register a new tool at runtime.
+    pub async fn register_tool(&self, name: String, tool: Arc<ToolKind>) {
+        let mut reg = self.registry.write().await;
+        reg.insert(name, tool);
+    }
+
+    /// Unregister a tool at runtime.
+    pub async fn unregister_tool(&self, name: &str) {
+        let mut reg = self.registry.write().await;
+        reg.remove(name);
+    }
 }
 
 #[async_trait]

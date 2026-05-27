@@ -3,10 +3,13 @@
 //! Controls a headless Chrome/Chromium via CLI for screenshot and navigation.
 //! Uses `which` to locate the browser binary in system PATH.
 //!
-//! # Limitations
-//! - Click and GetText are not yet implemented in headless CLI mode.
-//!   For full DOM interaction (click, fill forms, extract text), upgrade to
-//!   `chromiumoxide` (pure Rust CDP client) in future iterations.
+//! # Capabilities (Headless CLI Mode)
+//! - **Navigate**: Load a URL and dump the DOM
+//! - **Screenshot**: Capture a PNG screenshot
+//! - **GetText**: Extract plain text from the page (DOM dump with HTML stripped)
+//! - **Click**: Navigate to URL with virtual-time-budget for JS execution (limited)
+//! - **ExtractLinks**: Parse all `<a href>` links from the page DOM
+//! - **JavaScript**: Not available in CLI mode (returns clear message)
 //!
 //! # Safety
 //! - Browser process is killed on timeout.
@@ -16,7 +19,7 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use tracing::warn;
+use tracing::{warn, info};
 
 use crate::error::{AgentError, AgentResult};
 use crate::safety::SafetyContext;
@@ -47,7 +50,7 @@ fn find_browser() -> Option<PathBuf> {
     None
 }
 
-/// Execute a browser action (navigate, screenshot, click, get text).
+/// Execute a browser action (navigate, screenshot, click, get text, extract links, javascript).
 pub async fn execute_browser_action(
     action: &BrowserActionType,
     url: Option<&str>,
@@ -55,17 +58,6 @@ pub async fn execute_browser_action(
     safety: &SafetyContext,
 ) -> AgentResult<String> {
     let timeout = timeout_secs.unwrap_or(30);
-
-    // Check unsupported actions early (before browser lookup)
-    match action {
-        BrowserActionType::Click => {
-            return Ok("Click action is not yet supported in headless CLI mode. Use a full browser automation framework.".to_string());
-        }
-        BrowserActionType::GetText => {
-            return Ok("GetText action is not yet supported in headless CLI mode. Use a full browser automation framework.".to_string());
-        }
-        _ => {}
-    }
 
     // Find browser
     let browser = safety
@@ -110,7 +102,7 @@ pub async fn execute_browser_action(
             } else {
                 output
             };
-            Ok(format!("Page source ({}) chars:\n{}", output_len, truncated))
+            Ok(format!("Page source ({} chars):\n{}", output_len, truncated))
         }
 
         BrowserActionType::Screenshot => {
@@ -155,8 +147,224 @@ pub async fn execute_browser_action(
                 ))
             }
         }
-        _ => unreachable!("handled by early return above"),
+
+        BrowserActionType::GetText => {
+            // GetText: Load the page, dump DOM, then strip HTML tags for plain text
+            let url_str = url.ok_or_else(|| {
+                AgentError::Other("URL is required for GetText action".into())
+            })?;
+
+            let output = run_browser_with_timeout(
+                &browser_path,
+                &[
+                    "--headless",
+                    "--disable-gpu",
+                    "--no-sandbox",
+                    "--dump-dom",
+                    url_str,
+                ],
+                timeout,
+            )
+            .await?;
+
+            // Strip HTML tags to get plain text
+            let plain_text = strip_html_tags(&output);
+            
+            // Clean up extra whitespace and limit output
+            let cleaned: String = plain_text
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ");
+            
+            let output_len = cleaned.len();
+            let truncated = if output_len > 4000 {
+                format!("{}...\n[text truncated]", &cleaned[..4000])
+            } else {
+                cleaned
+            };
+            
+            Ok(format!("Page text ({} chars):\n{}", output_len, truncated))
+        }
+
+        BrowserActionType::Click => {
+            // Click in headless CLI mode: Use --virtual-time-budget to let JS execute
+            // after page load, then dump the resulting DOM.
+            // This is a best-effort approach for JS-heavy pages.
+            let url_str = url.ok_or_else(|| {
+                AgentError::Other("URL is required for Click action".into())
+            })?;
+
+            let output = run_browser_with_timeout(
+                &browser_path,
+                &[
+                    "--headless",
+                    "--disable-gpu",
+                    "--no-sandbox",
+                    "--virtual-time-budget=3000",
+                    "--dump-dom",
+                    url_str,
+                ],
+                timeout,
+            )
+            .await?;
+
+            let output_len = output.len();
+            let truncated = if output_len > 3000 {
+                format!("{}...\n[DOM after JS execution truncated]", &output[..3000])
+            } else {
+                output
+            };
+            
+            info!(
+                action = "Click (JS execution)",
+                url = url_str,
+                "Page DOM after virtual-time-budget (3s JS execution)"
+            );
+            
+            Ok(format!(
+                "Clicked/navigated to '{}' and executed JS for 3 seconds.\nPage state ({} chars):\n{}",
+                url_str,
+                output_len,
+                truncated
+            ))
+        }
+
+        BrowserActionType::ExtractLinks => {
+            // ExtractLinks: Load page, dump DOM, parse <a href="..."> tags
+            let url_str = url.ok_or_else(|| {
+                AgentError::Other("URL is required for ExtractLinks action".into())
+            })?;
+
+            let output = run_browser_with_timeout(
+                &browser_path,
+                &[
+                    "--headless",
+                    "--disable-gpu",
+                    "--no-sandbox",
+                    "--dump-dom",
+                    url_str,
+                ],
+                timeout,
+            )
+            .await?;
+
+            // Parse all href links from the DOM
+            let links = extract_links_from_html(&output);
+            
+            if links.is_empty() {
+                Ok(format!("No links found on page: {}", url_str))
+            } else {
+                let links_str = links
+                    .iter()
+                    .enumerate()
+                    .map(|(i, (text, href))| {
+                        if text.is_empty() {
+                            format!("{}. {}", i + 1, href)
+                        } else {
+                            format!("{}. {} - {}", i + 1, text, href)
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                
+                Ok(format!(
+                    "Found {} links on '{}':\n{}",
+                    links.len(),
+                    url_str,
+                    links_str
+                ))
+            }
+        }
+
+        BrowserActionType::JavaScript => {
+            // JavaScript execution is not available in Chrome headless CLI mode
+            // without a CDP connection (chromiumoxide). Return a clear message.
+            Ok(
+                "JavaScript execution is not available in headless CLI mode.\n\
+                 To execute custom JavaScript in the browser:\n\
+                 1. Use 'Navigate' or 'Click' action to load the page\n\
+                 2. Use 'GetText' or 'ExtractLinks' to extract data from the DOM\n\
+                 3. For full JS support, consider upgrading to a CDP-based solution (chromiumoxide)"
+                    .to_string(),
+            )
+        }
     }
+}
+
+/// Parse links from HTML content. Returns Vec<(link_text, href)>.
+fn extract_links_from_html(html: &str) -> Vec<(String, String)> {
+    let mut links = Vec::new();
+    let mut pos = 0;
+
+    while let Some(tag_start) = html[pos..].find("<a ") {
+        pos += tag_start;
+        
+        // Find the end of the opening tag
+        if let Some(tag_end) = html[pos..].find('>') {
+            let open_tag = &html[pos..pos + tag_end + 1];
+            let after_open_tag = pos + tag_end + 1;
+            
+            // Extract href attribute
+            if let Some(href_start) = open_tag.find("href=\"") {
+                let href_pos = open_tag.len() - open_tag.len() + href_start + 6;
+                let href_end = open_tag[href_pos..].find('"').unwrap_or(usize::MAX);
+                let href = open_tag[href_pos..href_pos + href_end].to_string();
+                
+                // Extract link text (between </a> and start of next tag)
+                if let Some(close_pos) = html[after_open_tag..].find("</a>") {
+                    let link_text = strip_html_tags(&html[after_open_tag..after_open_tag + close_pos])
+                        .trim()
+                        .to_string();
+                    
+                    if !href.is_empty() && !href.starts_with("javascript:") {
+                        links.push((link_text, href));
+                    }
+                }
+            }
+            
+            pos = after_open_tag;
+        } else {
+            pos += 1;
+        }
+        
+        // Safety limit
+        if links.len() >= 100 {
+            break;
+        }
+    }
+
+    links
+}
+
+/// Strip HTML tags from a string — handles nested and adjacent tags.
+/// Also decodes common HTML entities.
+pub fn strip_html_tags(s: &str) -> String {
+    let mut result = String::with_capacity(s.len());
+    let bytes = s.as_bytes();
+    let mut i = 0;
+
+    while i < bytes.len() {
+        if bytes[i] == b'<' {
+            // Skip to the next '>'
+            let mut j = i + 1;
+            while j < bytes.len() && bytes[j] != b'>' {
+                j += 1;
+            }
+            i = j.saturating_add(1);
+        } else {
+            result.push(bytes[i] as char);
+            i += 1;
+        }
+    }
+
+    // Decode common HTML entities
+    result
+        .replace("&amp;", "&")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&#39;", "'")
+        .replace("&nbsp;", " ")
 }
 
 /// Run a browser command with timeout protection.
@@ -216,17 +424,38 @@ mod tests {
         let _ = find_browser();
     }
 
-    #[tokio::test]
-    async fn test_unsupported_actions() {
-        let safety = SafetyContext::default();
-        let result = execute_browser_action(
-            &BrowserActionType::Click,
-            None,
-            Some(5),
-            &safety,
-        )
-        .await;
-        assert!(result.is_ok());
-        assert!(result.unwrap().contains("not yet supported"));
+    #[test]
+    fn test_strip_html_tags() {
+        assert_eq!(strip_html_tags("hello world"), "hello world");
+        assert_eq!(strip_html_tags("hello <b>world</b>"), "hello world");
+        assert_eq!(strip_html_tags("a &amp; b"), "a & b");
+        assert_eq!(strip_html_tags("<script>evil</script>hello"), "evilhello");
+    }
+
+    #[test]
+    fn test_extract_links_from_html() {
+        let html = r#"
+            <a href="https://example.com">Example</a>
+            <a href="/relative/path">Relative Link</a>
+            <a href="https://test.com">Test</a>
+        "#;
+        let links = extract_links_from_html(html);
+        // All 3 links should be extracted (relative paths are kept as-is)
+        assert_eq!(links.len(), 3);
+        assert_eq!(links[0].0, "Example");
+        assert_eq!(links[0].1, "https://example.com");
+        assert_eq!(links[1].1, "/relative/path"); // Relative paths are kept
+        assert_eq!(links[2].1, "https://test.com");
+    }
+
+    #[test]
+    fn test_extract_links_skips_javascript() {
+        let html = r#"
+            <a href="javascript:void(0)">JS Link</a>
+            <a href="https://valid.com">Valid</a>
+        "#;
+        let links = extract_links_from_html(html);
+        assert_eq!(links.len(), 1);
+        assert_eq!(links[0].1, "https://valid.com");
     }
 }

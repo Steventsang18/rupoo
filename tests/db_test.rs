@@ -3,7 +3,7 @@
 //! Run with: cargo test --test db_test
 
 use std::sync::Arc;
-use tempfile::NamedTempFile;
+use tempfile;
 use rupoo::db::TaskRepo;
 use rupoo::error::AgentError;
 use rupoo::task::{finish_step, think_step, tool_call_step, Checkpoint, CheckpointStatus, Plan, PlanStatus, Step, StepStatus};
@@ -24,8 +24,14 @@ fn in_memory_repo() -> Arc<TaskRepo> {
 }
 
 fn temp_file_repo() -> Arc<TaskRepo> {
-    let tmp = NamedTempFile::new().expect("tempfile failed");
-    Arc::new(TaskRepo::new(tmp.path().to_str().unwrap()).expect("failed to open db"))
+    // Use a persistent temp path (not NamedTempFile which auto-deletes on drop,
+    // breaking read-only connections that try to re-open the file).
+    let dir = tempfile::tempdir().expect("tempdir failed");
+    let db_path = dir.path().join("test.db");
+    let db_path_str = db_path.to_str().unwrap().to_string();
+    // Leak the TempDir so it stays alive for the test duration — acceptable in tests
+    std::mem::forget(dir);
+    Arc::new(TaskRepo::new(&db_path_str).expect("failed to open db"))
 }
 
 // ---------------------------------------------------------------------------

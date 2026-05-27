@@ -10,7 +10,10 @@ use crate::task::{
 };
 
 pub struct TaskRepo {
+    /// Write connection with mutex protection.
     conn: Arc<Mutex<rusqlite::Connection>>,
+    /// Database path for spawning read connections.
+    db_path: String,
 }
 
 // ------------------------------------------------------------------
@@ -33,6 +36,10 @@ impl TaskRepo {
     ///
     /// For file-based databases (not `:memory:`), restricts file permissions
     /// to owner-only (0o600 on Unix) to protect stored API keys and settings.
+    ///
+    /// Uses WAL mode for better concurrent read performance:
+    /// - Write operations use the main connection with mutex protection
+    /// - Read operations use a separate read-only connection for concurrent access
     pub fn new(db_path: &str) -> AgentResult<Self> {
         // Restrict file permissions before opening — protects stored API keys
         if db_path != ":memory:" {
@@ -113,6 +120,11 @@ impl TaskRepo {
         )?;
         info!(db_path, "database initialized");
 
+        // For in-memory DB, we just open a new connection (they share memory)
+        // For file-based DBs, we don't need to keep a persistent read connection
+        // since rusqlite Connection is not Send+Sync. Instead, we spawn new connections
+        // per read operation which is still efficient due to WAL mode.
+
         // Ensure restrictive permissions after creation (new files inherit umask)
         if db_path != ":memory:" {
             #[cfg(unix)]
@@ -126,11 +138,12 @@ impl TaskRepo {
 
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
+            db_path: db_path.to_string(),
         })
     }
 
     // ------------------------------------------------------------------
-    // Internal helper: run a closure on the connection via spawn_blocking
+    // Internal helper: run a closure on the write connection via spawn_blocking
     // ------------------------------------------------------------------
 
     async fn with_conn<F, T>(&self, f: F) -> AgentResult<T>
@@ -145,6 +158,36 @@ impl TaskRepo {
                 poisoned.into_inner()
             });
             f(&guard)
+        })
+        .await
+        .map_err(|e| AgentError::Join(e.to_string()))?
+    }
+
+    // ------------------------------------------------------------------
+    // Internal helper: run a closure on a read connection (concurrent reads)
+    // For file-based DBs, we spawn a new connection per read operation (WAL mode).
+    // For in-memory DBs, we fall back to the main connection.
+    // ------------------------------------------------------------------
+
+    async fn with_read_conn<F, T>(&self, f: F) -> AgentResult<T>
+    where
+        F: FnOnce(&rusqlite::Connection) -> AgentResult<T> + Send + 'static,
+        T: Send + 'static,
+    {
+        let db_path = self.db_path.clone();
+        
+        // For in-memory databases, use the main connection (fallback to with_conn)
+        if db_path == ":memory:" {
+            return self.with_conn(f).await;
+        }
+        
+        // For file-based DBs, open a new read-only connection
+        tokio::task::spawn_blocking(move || {
+            let read_conn = rusqlite::Connection::open_with_flags(
+                &db_path,
+                rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+            ).map_err(|e| AgentError::Other(format!("failed to open read connection: {e}")))?;
+            f(&read_conn)
         })
         .await
         .map_err(|e| AgentError::Join(e.to_string()))?
@@ -176,7 +219,7 @@ impl TaskRepo {
 
     pub async fn load_plan(&self, plan_id: &str) -> AgentResult<Plan> {
         let pid = plan_id.to_string();
-        self.with_conn(move |conn| {
+        self.with_read_conn(move |conn| {
             let mut stmt = conn.prepare(
                 "SELECT id, name, steps_json, current_step_index, status, created_at, updated_at
                  FROM plans WHERE id = ?1",
@@ -240,6 +283,7 @@ impl TaskRepo {
         let ckpt_status = match &step_status {
             StepStatus::Completed => "Completed",
             StepStatus::Failed => "Failed",
+            StepStatus::Running => "Running",
             StepStatus::WaitingForInput => "Pending", // waiter resumes later
             _ => "Completed",
         };
@@ -369,7 +413,7 @@ impl TaskRepo {
 
     pub async fn get_last_checkpoint(&self, plan_id: &str) -> AgentResult<Option<Checkpoint>> {
         let pid = plan_id.to_string();
-        self.with_conn(move |conn| {
+        self.with_read_conn(move |conn| {
             let mut stmt = conn.prepare(
                 "SELECT id, plan_id, step_index, status, output, created_at
                  FROM checkpoints
@@ -510,7 +554,7 @@ impl TaskRepo {
         session_id: &str,
     ) -> AgentResult<Option<ConversationHistory>> {
         let sid = session_id.to_string();
-        self.with_conn(move |conn| {
+        self.with_read_conn(move |conn| {
             let mut stmt = conn.prepare(
                 "SELECT history_json FROM conversation_histories WHERE session_id = ?1",
             )?;
@@ -585,7 +629,7 @@ impl TaskRepo {
     pub async fn load_ui_sessions(
         &self,
     ) -> AgentResult<Vec<(String, String, String, bool)>> {
-        self.with_conn(move |conn| {
+        self.with_read_conn(move |conn| {
             let mut stmt = conn.prepare(
                 "SELECT id, label, messages_json, is_active FROM ui_sessions ORDER BY updated_at DESC",
             )?;
@@ -616,7 +660,7 @@ impl TaskRepo {
 
     pub async fn get_setting(&self, key: &str) -> AgentResult<Option<String>> {
         let key = key.to_string();
-        self.with_conn(move |conn| {
+        self.with_read_conn(move |conn| {
             let mut stmt = conn.prepare("SELECT value FROM settings WHERE key = ?1")?;
             let result = stmt
                 .query_row(rusqlite::params![key], |row| row.get::<_, String>(0))
@@ -628,7 +672,7 @@ impl TaskRepo {
 
     /// List all settings keys.
     pub async fn list_settings(&self) -> AgentResult<Vec<(String, String)>> {
-        self.with_conn(move |conn| {
+        self.with_read_conn(move |conn| {
             let mut stmt = conn.prepare("SELECT key, value FROM settings ORDER BY key")?;
             let rows = stmt.query_map([], |row| {
                 Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
@@ -691,7 +735,7 @@ impl TaskRepo {
         limit: usize,
     ) -> AgentResult<Vec<super::task::MemoryEntry>> {
         let query = query.to_string();
-        self.with_conn(move |conn| {
+        self.with_read_conn(move |conn| {
             let mut stmt = conn.prepare(
                 "SELECT content_id, content, tags, source, created_at, updated_at
                  FROM memories
@@ -724,7 +768,7 @@ impl TaskRepo {
 
     /// Retrieve recent memories without a search query (e.g., for context injection).
     pub async fn recent_memories(&self, limit: usize) -> AgentResult<Vec<super::task::MemoryEntry>> {
-        self.with_conn(move |conn| {
+        self.with_read_conn(move |conn| {
             let mut stmt = conn.prepare(
                 "SELECT content_id, content, tags, source, created_at, updated_at
                  FROM memories
@@ -760,7 +804,7 @@ impl TaskRepo {
 
     /// List plans ordered by updated_at descending.
     pub async fn list_plans(&self, limit: usize, offset: usize) -> AgentResult<Vec<PlanSummary>> {
-        self.with_conn(move |conn| {
+        self.with_read_conn(move |conn| {
             let mut stmt = conn.prepare(
                 "SELECT id, name, steps_json, current_step_index, status, created_at, updated_at
                  FROM plans
@@ -803,7 +847,7 @@ impl TaskRepo {
 
     /// Count plans grouped by status.
     pub async fn count_plans_by_status(&self) -> AgentResult<Vec<(String, i64)>> {
-        self.with_conn(move |conn| {
+        self.with_read_conn(move |conn| {
             let mut stmt =
                 conn.prepare("SELECT status, COUNT(*) as cnt FROM plans GROUP BY status")?;
 
@@ -867,7 +911,7 @@ impl TaskRepo {
 
     /// Count total memory entries.
     pub async fn count_memories(&self) -> AgentResult<usize> {
-        self.with_conn(move |conn| {
+        self.with_read_conn(move |conn| {
             let count: i64 = conn.query_row(
                 "SELECT COUNT(*) FROM memories",
                 [],

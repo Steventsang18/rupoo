@@ -12,11 +12,19 @@ pub struct SkillDef {
     pub name: String,
     pub description: String,
     pub version: String,
+    /// Schema version for format compatibility (default "2.0").
+    /// Version "2.0" adds Exec, HttpRequest, BrowserAction step types.
+    #[serde(default = "default_schema_version")]
+    pub schema_version: String,
     /// Trigger keywords that suggest this skill (optional).
     #[serde(default)]
     pub trigger: Vec<String>,
     /// Ordered list of step definitions.
     pub steps: Vec<SkillStep>,
+}
+
+fn default_schema_version() -> String {
+    "2.0".to_string()
 }
 
 /// A step definition within a skill, convertible to a Plan Step.
@@ -29,6 +37,32 @@ pub enum SkillStep {
     ToolCall {
         tool_name: String,
         params: serde_json::Value,
+    },
+    /// Execute an external command with optional timeout.
+    Exec {
+        command: String,
+        #[serde(default)]
+        args: Vec<String>,
+        #[serde(default)]
+        timeout_secs: Option<u64>,
+    },
+    /// Perform an HTTP request.
+    HttpRequest {
+        url: String,
+        #[serde(default)]
+        method: String,
+        #[serde(default)]
+        body: Option<String>,
+        #[serde(default)]
+        headers: Option<std::collections::HashMap<String, String>>,
+    },
+    /// Control a browser (navigate, screenshot, get text, extract links, etc.).
+    BrowserAction {
+        action: String,
+        #[serde(default)]
+        url: Option<String>,
+        #[serde(default)]
+        timeout_secs: Option<u64>,
     },
     WaitForInput {
         prompt: String,
@@ -92,6 +126,7 @@ impl SkillManager {
     }
 
     /// Load a skill definition by name (without the .json extension).
+    /// Handles backward compatibility with schema_version "1.0" (no schema_version field).
     pub fn load_skill(&self, name: &str) -> AgentResult<SkillDef> {
         let path = self.skills_dir.join(format!("{name}.json"));
         if !path.exists() {
@@ -101,8 +136,80 @@ impl SkillManager {
             )));
         }
         let content = std::fs::read_to_string(&path)?;
-        let skill: SkillDef = serde_json::from_str(&content)?;
-        Ok(skill)
+        
+        // Try parsing as v2.0 first (has schema_version field)
+        if let Ok(skill) = serde_json::from_str::<SkillDef>(&content) {
+            return Ok(skill);
+        }
+        
+        // Fallback: parse as v1.0 and add schema_version
+        #[derive(Deserialize)]
+        struct SkillDefV1 {
+            pub name: String,
+            pub description: String,
+            pub version: String,
+            #[serde(default)]
+            pub trigger: Vec<String>,
+            pub steps: Vec<serde_json::Value>,
+        }
+        
+        let skill_v1: SkillDefV1 = serde_json::from_str(&content)?;
+        
+        // Convert v1 steps to v2 SkillStep enum
+        let v2_steps: Vec<SkillStep> = skill_v1
+            .steps
+            .into_iter()
+            .map(|s| {
+                let map = serde_json::from_value::<serde_json::Map<String, serde_json::Value>>(s)
+                    .unwrap_or_default();
+                let type_str = map.get("type")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("think");
+                
+                match type_str {
+                    "think" => SkillStep::Think {
+                        instruction: map.get("instruction")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string(),
+                    },
+                    "toolCall" => SkillStep::ToolCall {
+                        tool_name: map.get("toolName")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string(),
+                        params: map.get("params")
+                            .cloned()
+                            .unwrap_or(serde_json::json!({})),
+                    },
+                    "waitForInput" => SkillStep::WaitForInput {
+                        prompt: map.get("prompt")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string(),
+                    },
+                    "finish" => SkillStep::Finish {
+                        summary: map.get("summary")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string(),
+                    },
+                    _ => SkillStep::Think {
+                        instruction: format!("Unknown step type: {}", type_str),
+                    },
+                }
+            })
+            .collect();
+        
+        // Build the v2 SkillDef
+        Ok(SkillDef {
+            name: skill_v1.name,
+            description: skill_v1.description,
+            version: skill_v1.version,
+            schema_version: "1.0".to_string(),
+            trigger: skill_v1.trigger,
+            steps: v2_steps,
+        })
     }
 
     /// Save a skill definition to a file.
@@ -132,6 +239,7 @@ impl SkillManager {
     }
 
     /// Convert a SkillDef into a Plan that can be executed by the Agent.
+    /// Handles backward compatibility with schema_version "1.0".
     pub fn skill_to_plan(&self, skill: &SkillDef) -> Plan {
         let steps: Vec<Step> = skill
             .steps
@@ -140,6 +248,33 @@ impl SkillManager {
                 SkillStep::Think { instruction } => think_step(instruction),
                 SkillStep::ToolCall { tool_name, params } => {
                     tool_call_step(tool_name, params.clone())
+                }
+                SkillStep::Exec { command, args, timeout_secs } => {
+                    crate::task::exec_step(command, args.clone(), *timeout_secs)
+                }
+                SkillStep::HttpRequest { url, method, body, headers } => {
+                    let http_method = match method.to_uppercase().as_str() {
+                        "POST" => crate::task::HttpMethod::POST,
+                        _ => crate::task::HttpMethod::GET,
+                    };
+                    crate::task::http_request_step(url, http_method, body.clone(), headers.clone())
+                }
+                SkillStep::BrowserAction { action, url, timeout_secs } => {
+                    let action_type = match action.to_lowercase().as_str() {
+                        "navigate" => crate::task::BrowserActionType::Navigate,
+                        "screenshot" => crate::task::BrowserActionType::Screenshot,
+                        "gettext" | "get_text" => crate::task::BrowserActionType::GetText,
+                        "click" => crate::task::BrowserActionType::Click,
+                        "extractlinks" | "extract_links" => crate::task::BrowserActionType::ExtractLinks,
+                        "javascript" | "js" => crate::task::BrowserActionType::JavaScript,
+                        _ => crate::task::BrowserActionType::Navigate,
+                    };
+                    crate::task::browser_action_step(
+                        action_type,
+                        url.clone(),
+                        None,
+                        *timeout_secs,
+                    )
                 }
                 SkillStep::WaitForInput { prompt } => {
                     crate::task::wait_for_input_step(prompt)
@@ -171,23 +306,42 @@ impl SkillManager {
                     tool_name: tool_name.clone(),
                     params: params.clone(),
                 },
+                crate::task::Step::Exec { command, args, timeout_secs, .. } => SkillStep::Exec {
+                    command: command.clone(),
+                    args: args.clone(),
+                    timeout_secs: *timeout_secs,
+                },
+                crate::task::Step::HttpRequest { url, method, body, headers, .. } => {
+                    SkillStep::HttpRequest {
+                        url: url.clone(),
+                        method: match method {
+                            crate::task::HttpMethod::GET => "GET".to_string(),
+                            crate::task::HttpMethod::POST => "POST".to_string(),
+                        },
+                        body: body.clone(),
+                        headers: headers.clone(),
+                    }
+                }
+                crate::task::Step::BrowserAction { action, url, timeout_secs, .. } => {
+                    let action_str = match action {
+                        crate::task::BrowserActionType::Navigate => "navigate",
+                        crate::task::BrowserActionType::Screenshot => "screenshot",
+                        crate::task::BrowserActionType::GetText => "getText",
+                        crate::task::BrowserActionType::Click => "click",
+                        crate::task::BrowserActionType::ExtractLinks => "extractLinks",
+                        crate::task::BrowserActionType::JavaScript => "javascript",
+                    };
+                    SkillStep::BrowserAction {
+                        action: action_str.to_string(),
+                        url: url.clone(),
+                        timeout_secs: *timeout_secs,
+                    }
+                }
                 crate::task::Step::WaitForInput { prompt, .. } => SkillStep::WaitForInput {
                     prompt: prompt.clone(),
                 },
                 crate::task::Step::Finish { summary, .. } => SkillStep::Finish {
                     summary: summary.clone(),
-                },
-                crate::task::Step::Exec { command, args, .. } => SkillStep::ToolCall {
-                    tool_name: command.clone(),
-                    params: serde_json::json!({ "args": args }),
-                },
-                crate::task::Step::HttpRequest { url, method, .. } => SkillStep::ToolCall {
-                    tool_name: "http_request".into(),
-                    params: serde_json::json!({ "url": url, "method": method }),
-                },
-                crate::task::Step::BrowserAction { action, url, .. } => SkillStep::ToolCall {
-                    tool_name: "browser".into(),
-                    params: serde_json::json!({ "action": action, "url": url }),
                 },
             })
             .collect();
@@ -196,6 +350,7 @@ impl SkillManager {
             name: name.to_string(),
             description: description.to_string(),
             version: "1.0".to_string(),
+            schema_version: "2.0".to_string(),
             trigger: vec![],
             steps,
         }
@@ -211,6 +366,7 @@ impl SkillManager {
             name: "code-review".into(),
             description: "Review code changes for bugs and best practices".into(),
             version: "1.0".into(),
+            schema_version: "2.0".into(),
             trigger: vec!["review".into(), "code review".into(), "审查".into()],
             steps: vec![
                 SkillStep::Think {
@@ -235,6 +391,7 @@ impl SkillManager {
             name: "generate-readme".into(),
             description: "Automatically generate a README.md from project files".into(),
             version: "1.0".into(),
+            schema_version: "2.0".into(),
             trigger: vec!["readme".into(), "generate readme".into(), "文档".into()],
             steps: vec![
                 SkillStep::ToolCall {
@@ -299,6 +456,7 @@ mod tests {
             name: "test-skill".into(),
             description: "A test skill".into(),
             version: "1.0".into(),
+            schema_version: "2.0".into(),
             trigger: vec!["test".into()],
             steps: vec![
                 SkillStep::Think {
@@ -323,6 +481,7 @@ mod tests {
             name: "skill-a".into(),
             description: "A".into(),
             version: "1.0".into(),
+            schema_version: "2.0".into(),
             trigger: vec![],
             steps: vec![],
         };
@@ -339,6 +498,7 @@ mod tests {
             name: "plan-test".into(),
             description: "test".into(),
             version: "1.0".into(),
+            schema_version: "2.0".into(),
             trigger: vec![],
             steps: vec![
                 SkillStep::Think {
@@ -399,6 +559,7 @@ mod tests {
             name: "delete-me".into(),
             description: "to be deleted".into(),
             version: "1.0".into(),
+            schema_version: "2.0".into(),
             trigger: vec![],
             steps: vec![],
         };

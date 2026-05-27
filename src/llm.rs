@@ -694,11 +694,12 @@ You help with software development, file operations, and system tasks.
 
 ## Your Capabilities
 - File Operations: file_read, file_write, list_directory
+- Web Search: search the internet for information (DuckDuckGo)
 - Terminal Commands: execute shell commands (dangerous commands blocked)
 - HTTP Requests: GET/POST to public URLs (localhost blocked for security)
-- Browser Automation: headless navigation and screenshots
+- Browser Automation: headless navigation, screenshots, and page text extraction
 - Memory: stores and retrieves context across sessions (FTS5 search)
-- Skills: reusable workflows as JSON files
+- Skills: reusable workflows as JSON files, with auto-trigger on keywords
 - Git: status, commit, create PR
 - MCP Server: exposes tools via JSON-RPC over stdio
 

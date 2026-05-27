@@ -13,6 +13,8 @@ pub enum BrowserActionType {
     Screenshot,
     Click,
     GetText,
+    ExtractLinks,
+    JavaScript,
 }
 
 // ---------------------------------------------------------------------------

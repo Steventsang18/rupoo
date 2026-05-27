@@ -68,93 +68,41 @@ struct McpToolDescription {
 }
 
 // ---------------------------------------------------------------------------
-// Tool metadata (for tools/list only; execution delegates to McpToolExecutor)
+// Server (dynamically loads tools from executor)
 // ---------------------------------------------------------------------------
 
-struct McpToolEntry {
-    name: &'static str,
-    description: &'static str,
-    parameters: serde_json::Value,
-}
-
 struct McpServer {
-    tools: Vec<McpToolEntry>,
-    initialized: bool,
+    /// The executor holds all registered tools dynamically.
     executor: McpToolExecutor,
+    initialized: bool,
 }
 
 impl McpServer {
     fn new(safety_ctx: SafetyContext) -> Self {
         Self {
-            tools: Self::builtin_tools(),
-            initialized: false,
             executor: McpToolExecutor::with_safety(safety_ctx),
+            initialized: false,
         }
     }
 
-    fn builtin_tools() -> Vec<McpToolEntry> {
-        vec![
-            McpToolEntry {
-                name: "echo",
-                description: "Echo back a message. Useful for testing.",
-                parameters: serde_json::json!({
+    /// Build tool descriptions dynamically from the executor.
+    async fn build_tool_descriptions(&self) -> Vec<McpToolDescription> {
+        let tools = self.executor.list_tools_with_schema().await;
+        tools
+            .into_iter()
+            .map(|(name, description, schema)| {
+                let input_schema = serde_json::json!({
                     "type": "object",
-                    "properties": {
-                        "message": {
-                            "type": "string",
-                            "description": "The message to echo back"
-                        }
-                    },
-                    "required": ["message"]
-                }),
-            },
-            McpToolEntry {
-                name: "file_read",
-                description: "Read the contents of a file at the given path.",
-                parameters: serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "path": {
-                            "type": "string",
-                            "description": "Absolute or relative path to the file"
-                        }
-                    },
-                    "required": ["path"]
-                }),
-            },
-            McpToolEntry {
-                name: "file_write",
-                description: "Write content to a file. Overwrites existing content.",
-                parameters: serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "path": {
-                            "type": "string",
-                            "description": "Path to the file to write"
-                        },
-                        "content": {
-                            "type": "string",
-                            "description": "Content to write to the file"
-                        }
-                    },
-                    "required": ["path", "content"]
-                }),
-            },
-            McpToolEntry {
-                name: "list_directory",
-                description: "List entries in a directory.",
-                parameters: serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "path": {
-                            "type": "string",
-                            "description": "Path to the directory to list"
-                        }
-                    },
-                    "required": ["path"]
-                }),
-            },
-        ]
+                    "properties": schema["properties"].clone(),
+                    "required": schema["required"].clone(),
+                });
+                McpToolDescription {
+                    name,
+                    description,
+                    input_schema,
+                }
+            })
+            .collect()
     }
 
     /// Handle a JSON-RPC request and return an optional response.
@@ -186,19 +134,7 @@ impl McpServer {
                 if !self.initialized {
                     return Some(self.error_response(id, -32000, "Not initialized"));
                 }
-                let tools: Vec<McpToolDescription> = self
-                    .tools
-                    .iter()
-                    .map(|t| McpToolDescription {
-                        name: t.name.to_string(),
-                        description: t.description.to_string(),
-                        input_schema: serde_json::json!({
-                            "type": "object",
-                            "properties": t.parameters["properties"].clone(),
-                            "required": t.parameters["required"].clone(),
-                        }),
-                    })
-                    .collect();
+                let tools = self.build_tool_descriptions().await;
 
                 Some(JsonRpcResponse {
                     jsonrpc: "2.0",
@@ -389,6 +325,8 @@ mod tests {
         let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
         assert!(names.contains(&"echo"));
         assert!(names.contains(&"file_read"));
+        // web_search should now be included
+        assert!(names.contains(&"web_search"));
     }
 
     #[tokio::test]
