@@ -145,6 +145,10 @@ impl ConversationHistory {
         self.messages.is_empty()
     }
 
+    pub fn len(&self) -> usize {
+        self.messages.len()
+    }
+
     pub fn message_count(&self) -> usize {
         self.messages.len()
     }

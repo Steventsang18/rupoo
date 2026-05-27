@@ -74,6 +74,81 @@ impl AgentUiBridge {
                         // Plan Mode: generate plan and execute
                         let task = text.trim_start_matches("/plan ").trim();
                         self.handle_plan_mode(task).await;
+                    } else if text.starts_with("/model ") {
+                        // /model <provider> [model] — hot switch LLM
+                        let args = text.trim_start_matches("/model ").trim();
+                        if args.is_empty() {
+                            // Show current model
+                            let current = if self.agent.has_llm() {
+                                "configured".to_string()
+                            } else {
+                                "not configured".to_string()
+                            };
+                            let _ = self.ui_tx.send(AgentToTui::Message(
+                                ChatMessage::system(format!("Current LLM: {}", current)),
+                            ));
+                        } else {
+                            let parts: Vec<&str> = args.splitn(2, ' ').collect();
+                            let provider = parts[0].to_string();
+                            let model = parts.get(1).map(|s| s.to_string());
+                            match self.agent.switch_llm(&provider, model.as_deref(), &self.repo).await {
+                                Ok(label) => {
+                                    // Persist the active provider
+                                    let _ = self.repo.set_setting("active_provider", &provider).await;
+                                    let _ = self.ui_tx.send(AgentToTui::Message(
+                                        ChatMessage::system(format!("Switched to {}", label)),
+                                    ));
+                                    let _ = self.ui_tx.send(AgentToTui::LlmStatus {
+                                        configured: true,
+                                        provider: provider.clone(),
+                                    });
+                                }
+                                Err(e) => {
+                                    let _ = self.ui_tx.send(AgentToTui::Message(
+                                        ChatMessage::error(format!("Failed to switch: {}", e)),
+                                    ));
+                                }
+                            }
+                        }
+                        let _ = self.ui_tx.send(AgentToTui::Idle);
+                    } else if text == "/clear" {
+                        // Clear conversation history
+                        self.conversation_history.clear();
+                        if let Err(e) = self.repo.save_conversation_history(&self.session_id, &self.conversation_history).await {
+                            tracing::warn!(error = %e, "failed to clear history in DB");
+                        }
+                        let _ = self.ui_tx.send(AgentToTui::Message(
+                            ChatMessage::system("Conversation history cleared".to_string()),
+                        ));
+                        let _ = self.ui_tx.send(AgentToTui::Idle);
+                    } else if text == "/status" {
+                        // Show session status
+                        let llm_status = if self.agent.has_llm() { "configured" } else { "not configured" };
+                        let status = format!(
+                            "Session: {}\nLLM: {}\nApprove all: {}\nHistory: {} turns",
+                            self.session_id,
+                            llm_status,
+                            self.approve_all,
+                            self.conversation_history.len(),
+                        );
+                        let _ = self.ui_tx.send(AgentToTui::Message(
+                            ChatMessage::system(status),
+                        ));
+                        let _ = self.ui_tx.send(AgentToTui::Idle);
+                    } else if text == "/help" || text == "/?" {
+                        // Show help
+                        let help = "\
+Available commands:
+  /plan <task>    — Generate and execute a step-by-step plan
+  /model <prov> [model] — Switch LLM provider/model
+  /clear          — Clear conversation history
+  /status         — Show current session status
+  /help           — Show this help message
+  Ctrl+C         — Quit";
+                        let _ = self.ui_tx.send(AgentToTui::Message(
+                            ChatMessage::system(help.to_string()),
+                        ));
+                        let _ = self.ui_tx.send(AgentToTui::Idle);
                     } else {
                         // Chat Mode: multi-turn agent chat
                         self.handle_chat_message(&text).await;

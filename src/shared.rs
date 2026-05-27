@@ -100,3 +100,18 @@ pub enum AgentToTui {
     /// Step progress update for Plan Mode.
     StepProgress { step_index: usize, total: usize, step_name: String },
 }
+
+impl AgentToTui {
+    /// Check if this is a state event (triggers UI state change).
+    pub fn is_event(&self) -> bool {
+        matches!(self,
+            Self::Message(_) | Self::Thinking | Self::Idle |
+            Self::StreamChunk { .. } | Self::RequestApproval(_) |
+            Self::StepProgress { .. })
+    }
+
+    /// Check if this is a data update (informational, non-UI-state).
+    pub fn is_data(&self) -> bool {
+        matches!(self, Self::TokenUpdate { .. } | Self::LlmStatus { .. })
+    }
+}

@@ -209,8 +209,8 @@ impl RupooApp {
                     app.messages.push(ChatMessage::command_output(format!("{marker} [{i}] {label}")));
                 }
             }),
-            CommandDef::with_handler("model", "Show/set model", "Config", |app| {
-                app.messages.push(ChatMessage::system("Model: run 'rupoo config set model.anthropic <name>' to configure".to_string()));
+            CommandDef::with_handler("model", "Show/set model (also /model <provider> [model])", "Config", |app| {
+                app.messages.push(ChatMessage::system("Model: use /model <provider> or rupoo config set".to_string()));
             }),
             CommandDef::with_handler("exit", "Exit Rupoo", "General", |app| {
                 app.messages.push(ChatMessage::assistant("Goodbye!".to_string()));
@@ -226,6 +226,16 @@ impl RupooApp {
             CommandDef::with_handler("clear-history", "Clear conversation history for current session", "Chat", |app| {
                 app.conversation_history.clear();
                 app.messages.push(ChatMessage::system("Conversation history cleared.".to_string()));
+            }),
+            CommandDef::with_handler("status", "Show current session status", "General", |app| {
+                let llm_status = if app.llm_configured { "configured" } else { "not configured" };
+                let status = format!(
+                    "LLM: {}\nApprove all: {}\nHistory: {} turns",
+                    llm_status,
+                    "false",
+                    app.conversation_history.len(),
+                );
+                app.messages.push(ChatMessage::system(status));
             }),
         ];
 

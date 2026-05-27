@@ -143,6 +143,64 @@ impl Agent {
     }
 
     // ------------------------------------------------------------------
+    // Hot LLM reconfiguration — switch provider/model at runtime
+    // ------------------------------------------------------------------
+
+    /// Switch the LLM provider/model at runtime.
+    /// Reconfigures the LLM gateway based on DB settings or explicit args.
+    pub async fn switch_llm(
+        &mut self,
+        provider: &str,
+        model: Option<&str>,
+        repo: &TaskRepo,
+    ) -> AgentResult<String> {
+        let api_key = repo.get_setting(&format!("api_key.{}", provider)).await
+            .map_err(|e| AgentError::Other(format!("DB error: {}", e)))?
+            .ok_or_else(|| AgentError::Other(format!("No API key for '{}'", provider)))?;
+
+        let llm_provider = match provider {
+            "anthropic" => crate::llm::LlmProvider::Anthropic,
+            "openai" => crate::llm::LlmProvider::OpenAI,
+            "ollama" => crate::llm::LlmProvider::Ollama,
+            _ => return Err(AgentError::Other(format!("Unknown provider: '{}'", provider))),
+        };
+
+        let mut cfg = crate::llm::LlmConfig::new(llm_provider, Some(api_key));
+        if let Some(m) = model {
+            cfg.model = m.to_string();
+        } else if let Ok(Some(m)) = repo.get_setting(&format!("model.{}", provider)).await {
+            cfg.model = m;
+        }
+
+        let model_label = cfg.model.clone();
+
+        let jail_root = self.safety_ctx.jail_root().map(|p| p.to_path_buf());
+        let gateway = if let Some(ref root) = jail_root {
+            crate::llm::LlmGateway::with_jail(cfg, root.clone())
+        } else {
+            crate::llm::LlmGateway::new(cfg)
+        };
+
+        self.llm_gateway = Some(gateway);
+        let label = format!("{}/{}", provider, model_label);
+        Ok(label)
+    }
+
+    /// Reload LLM configuration from database settings.
+    /// Call this after `rupoo config set` to apply changes without restart.
+    pub async fn reconfigure_from_db(&mut self, repo: &TaskRepo) -> AgentResult<String> {
+        // Try providers in priority order
+        for provider in &["anthropic", "openai", "ollama"] {
+            if let Ok(Some(_api_key)) = repo.get_setting(&format!("api_key.{}", provider)).await {
+                return self.switch_llm(provider, None, repo).await;
+            }
+        }
+        // No LLM configured
+        self.llm_gateway = None;
+        Ok("no LLM configured".to_string())
+    }
+
+    // ------------------------------------------------------------------
     // Agent Chat Mode — multi-turn conversation with memory
     // ------------------------------------------------------------------
 
