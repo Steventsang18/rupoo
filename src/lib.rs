@@ -14,7 +14,7 @@ pub mod task;
 pub mod tools;
 
 // Re-export shared types at crate root so cli/mod.rs can use rupoo::TuiToAgent etc.
-pub use shared::{AgentToTui, ApprovalChoice, ChatMessage, MessageRole, PendingTool, TuiToAgent};
+pub use shared::{AgentToTui, ApprovalChoice, ChatMessage, MessageRole, PendingTool, ToolPhase, TuiToAgent};
 
 // Re-export LLM types for CLI bridge
 pub use llm::{AgentEvent, ConversationHistory, LlmConfig, LlmGateway, LlmProvider, StepSpec, TokenUsage};

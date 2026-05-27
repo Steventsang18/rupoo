@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use tui_textarea::TextArea;
 use std::sync::Arc;
 use crossbeam_channel::Sender;
-use rupoo::{AgentToTui, ApprovalChoice, ChatMessage, PendingTool, TuiToAgent};
+use rupoo::{AgentToTui, ApprovalChoice, ChatMessage, PendingTool, ToolPhase, TuiToAgent};
 use rupoo::db::TaskRepo;
 use rupoo::llm::ConversationHistory;
 use rupoo::task::Plan;
@@ -165,6 +165,10 @@ pub struct RupooApp {
     pub chat_safe_mode: bool,
     /// Streaming text buffer for incremental display
     pub stream_buffer: String,
+    /// Current tool call status for progress display (tool_name, phase)
+    pub current_tool_status: Option<(String, String)>,
+    /// Cached chat lines — rebuilt only when change_counter changes
+    pub cached_lines: std::cell::Cell<Option<(u64, usize, Vec<ratatui::text::Line<'static>>)>>,
 }
 
 impl RupooApp {
@@ -281,6 +285,8 @@ impl RupooApp {
             current_step_info: None,
             chat_safe_mode: true,
             stream_buffer: String::new(),
+            current_tool_status: None,
+            cached_lines: std::cell::Cell::new(None),
         }
     }
 
@@ -382,6 +388,7 @@ impl RupooApp {
         self.thinking = true;
         self.input_mode = InputMode::Thinking;
         self.stream_buffer.clear();
+        self.current_tool_status = None;
     }
 
     pub fn set_idle(&mut self) {
@@ -389,12 +396,14 @@ impl RupooApp {
         if self.input_mode == InputMode::Thinking {
             self.input_mode = InputMode::Chat;
         }
-        // Flush any remaining stream buffer
+        // Flush stream buffer — but only if chat_mode didn't already push it.
+        // chat_mode.rs pushes ChatMessage::assistant(full_response) itself,
+        // so we just clear the buffer without pushing again.
         if !self.stream_buffer.is_empty() {
-            self.push_message(ChatMessage::assistant(self.stream_buffer.clone()));
             self.stream_buffer.clear();
-            self.persist_sessions();
+            self.change_counter = self.change_counter.wrapping_add(1);
         }
+        self.current_tool_status = None;
     }
 
     pub fn update_tokens(&mut self, in_count: u64, out_count: u64) {
@@ -447,6 +456,14 @@ impl RupooApp {
             AgentToTui::StepProgress { step_index, total, step_name } => {
                 self.current_step_info = Some((step_index, total, step_name.clone()));
                 self.status = format!("Step {}/{}: {}", step_index + 1, total, step_name);
+            }
+            AgentToTui::ToolStatus { tool_name, phase } => {
+                let phase_str = match phase {
+                    ToolPhase::Calling => "calling",
+                    ToolPhase::Completed => "completed",
+                };
+                self.current_tool_status = Some((tool_name.clone(), phase_str.to_string()));
+                self.change_counter = self.change_counter.wrapping_add(1);
             }
         }
     }

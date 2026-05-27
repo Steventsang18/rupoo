@@ -44,12 +44,8 @@ pub fn render(frame: &mut Frame, app: &RupooApp) {
     }
 
     // ── Anchor cursor inside the input area ───────────────────────────
-    let center = rects.center;
-    let input_y = center.y.saturating_add(center.height.saturating_sub(2));
-    frame.set_cursor_position(ratatui::layout::Position {
-        x: center.x.saturating_add(1),
-        y: input_y,
-    });
+    // Cursor position is managed by TextArea rendering, so we just ensure
+    // the cursor is visible within the input bounds. TextArea handles it.
 }
 
 // ── Layout ─────────────────────────────────────────────────────────────────
@@ -108,12 +104,16 @@ fn render_left(frame: &mut Frame, area: Rect, app: &RupooApp) {
 // ── Center column ───────────────────────────────────────────────────────────
 
 fn render_center(frame: &mut Frame, area: Rect, app: &RupooApp) {
+    // Calculate dynamic input height: min 5, max 8, grows with content
+    let input_lines = app.input.lines().len().max(1);
+    let input_h = (input_lines as u16 + 2).clamp(5, 8); // +2 for borders
+
     let [title, chat, input, status] = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(1),
             Constraint::Min(1),
-            Constraint::Length(3),
+            Constraint::Length(input_h),
             Constraint::Length(1),
         ])
         .areas(area);
@@ -143,7 +143,7 @@ fn render_center_title(frame: &mut Frame, area: Rect, app: &RupooApp) {
     frame.render_widget(Paragraph::new(Text::from(vec![text])), area);
 }
 
-// ── Chat area — builds lines fresh every frame, pre-wrapped at max_w ────────
+// ── Chat area — uses cached lines, renders stream buffer, shows tool status ─
 
 fn render_chat_area(frame: &mut Frame, area: Rect, app: &RupooApp) {
     if area.height < 2 || area.width < 2 {
@@ -152,15 +152,64 @@ fn render_chat_area(frame: &mut Frame, area: Rect, app: &RupooApp) {
     let max_w = area.width.saturating_sub(4) as usize;
     let view_h = area.height as usize;
 
-    // Build display lines (pre-wrapped so Paragraph::scroll sees accurate counts)
-    let mut display_lines = build_chat_lines(app, max_w);
+    // ── Use cached lines or rebuild ────────────────────────────────────
+    let mut display_lines = match app.cached_lines.take() {
+        Some((counter, cached_max_w, lines)) if counter == app.change_counter && cached_max_w == max_w => {
+            // Cache hit — store it back and use it
+            app.cached_lines.set(Some((counter, cached_max_w, lines.clone())));
+            lines
+        }
+        cache_miss => {
+            let lines = build_chat_lines(app, max_w);
+            app.cached_lines.set(Some((app.change_counter, max_w, lines.clone())));
+            // Drop the old cache value we took
+            drop(cache_miss);
+            lines
+        }
+    };
+
+    // ── Streaming buffer: show in-progress text during thinking ───────
+    if app.thinking && !app.stream_buffer.is_empty() {
+        // Add a streaming assistant "draft" bubble
+        let header_span = Span::styled(
+            " A ",
+            Style::default().fg(Color::Cyan).bg(Color::Indexed(17)).add_modifier(Modifier::BOLD),
+        );
+        let role_span = Span::styled(
+            " Rupoo",
+            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+        );
+        display_lines.push(Line::from(vec![header_span, role_span]));
+
+        let indent = " ";
+        for line in app.stream_buffer.lines() {
+            for wrapped in wrap_to(line, max_w.saturating_sub(indent.len())) {
+                display_lines.push(Line::from(Span::styled(
+                    format!("{}{}", indent, wrapped),
+                    Style::default().fg(Color::White),
+                )));
+            }
+        }
+    }
 
     // ── Thinking spinner (appended after messages) ─────────────────────
     if app.thinking {
         let frame_idx = app.spinner_frame % SPINNER_FRAMES.len();
         let spinner_char = SPINNER_FRAMES[frame_idx];
+        let status_text = if let Some((ref tool_name, ref phase)) = app.current_tool_status {
+            match phase.as_str() {
+                "calling" => format!(" {} {} is calling {}… ", spinner_char, "Rupoo", tool_name),
+                "completed" => format!(" {} Processing result… ", spinner_char),
+                _ => format!(" {} Rupoo is thinking… ", spinner_char),
+            }
+        } else if app.stream_buffer.is_empty() {
+            format!(" {} Rupoo is thinking… ", spinner_char)
+        } else {
+            // Stream buffer has content — spinner shows "generating"
+            format!(" {} Generating… ", spinner_char)
+        };
         display_lines.push(Line::from(Span::styled(
-            format!(" {} Rupoo is thinking… ", spinner_char),
+            status_text,
             Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
         )));
     }
@@ -221,6 +270,22 @@ fn build_chat_lines(app: &RupooApp, max_w: usize) -> Vec<Line<'static>> {
     for msg in &app.messages {
         let is_user = msg.role == MessageRole::User;
         let is_error = msg.role == MessageRole::System && msg.content.contains("Error");
+        let is_tool_call = msg.role == MessageRole::System && msg.content.starts_with("🔧");
+        let is_tool_result = msg.role == MessageRole::System && msg.content.starts_with("✅");
+
+        // Tool call/result messages get a compact style
+        if is_tool_call || is_tool_result {
+            let fg_color = if is_tool_call { Color::Magenta } else { Color::Green };
+            for line in msg.content.lines() {
+                for wrapped in wrap_to(line, max_w.saturating_sub(1)) {
+                    all_lines.push(Line::from(Span::styled(
+                        format!(" {}", wrapped),
+                        Style::default().fg(fg_color),
+                    )));
+                }
+            }
+            continue;
+        }
 
         let (bracket, bg, fg_color) = if is_error {
             ("!", Color::Red, Color::White)
@@ -392,15 +457,22 @@ fn render_input_area(frame: &mut Frame, area: Rect, app: &RupooApp) {
 }
 
 fn render_center_status(frame: &mut Frame, area: Rect, app: &RupooApp) {
-    let mode_str = match app.input_mode {
-        InputMode::Thinking => "⏳ thinking",
-        InputMode::Approval => "⚠ approval",
-        _ => "● ready",
-    };
-    let fg = if app.thinking {
-        Color::Yellow
+    let (mode_str, fg) = if app.thinking {
+        if let Some((ref tool, ref phase)) = app.current_tool_status {
+            match phase.as_str() {
+                "calling" => (format!("⏳ calling {}", tool), Color::Yellow),
+                "completed" => ("⏳ processing".to_string(), Color::Yellow),
+                _ => ("⏳ thinking".to_string(), Color::Yellow),
+            }
+        } else if !app.stream_buffer.is_empty() {
+            ("⏳ generating".to_string(), Color::Yellow)
+        } else {
+            ("⏳ thinking".to_string(), Color::Yellow)
+        }
+    } else if app.input_mode == InputMode::Approval {
+        ("⚠ approval".to_string(), Color::Yellow)
     } else {
-        Color::DarkGray
+        ("● ready".to_string(), Color::DarkGray)
     };
     let text = format!(
         "{} {} msgs | {} sess",

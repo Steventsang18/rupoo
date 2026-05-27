@@ -2,7 +2,7 @@
 
 use tracing::warn;
 
-use super::{AgentToTui, ChatMessage};
+use super::{AgentToTui, ChatMessage, ToolPhase};
 use super::bridge::AgentUiBridge;
 
 impl AgentUiBridge {
@@ -31,13 +31,33 @@ impl AgentUiBridge {
                     let _ = ui_tx.send(AgentToTui::StreamChunk { text });
                 }
                 rupoo::llm::AgentEvent::ToolCall { tool_name, args } => {
+                    let _ = ui_tx.send(AgentToTui::ToolStatus {
+                        tool_name: tool_name.clone(),
+                        phase: ToolPhase::Calling,
+                    });
+                    // Show compact tool call status
+                    let display_args = if args.len() > 60 {
+                        format!("{}…", &args[..57])
+                    } else {
+                        args.clone()
+                    };
                     let _ = ui_tx.send(AgentToTui::Message(
-                        ChatMessage::system(format!("Calling tool: {} with args: {}", tool_name, args)),
+                        ChatMessage::system(format!("🔧 {}({})", tool_name, display_args)),
                     ));
                 }
                 rupoo::llm::AgentEvent::ToolResult { tool_name, result } => {
+                    let _ = ui_tx.send(AgentToTui::ToolStatus {
+                        tool_name: tool_name.clone(),
+                        phase: ToolPhase::Completed,
+                    });
+                    // Show compact tool result
+                    let display_result = if result.len() > 120 {
+                        format!("{}…", &result[..117])
+                    } else {
+                        result.clone()
+                    };
                     let _ = ui_tx.send(AgentToTui::Message(
-                        ChatMessage::system(format!("Tool {} returned: {}", tool_name, result)),
+                        ChatMessage::system(format!("✅ {} → {}", tool_name, display_result)),
                     ));
                 }
             }

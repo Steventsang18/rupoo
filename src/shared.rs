@@ -99,6 +99,17 @@ pub enum AgentToTui {
     LlmStatus { configured: bool, provider: String },
     /// Step progress update for Plan Mode.
     StepProgress { step_index: usize, total: usize, step_name: String },
+    /// Tool call status update for Chat Mode progress display.
+    ToolStatus { tool_name: String, phase: ToolPhase },
+}
+
+/// Phase of a tool call for status display.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum ToolPhase {
+    /// Tool is being called (e.g. "searching…")
+    Calling,
+    /// Tool has returned a result
+    Completed,
 }
 
 impl AgentToTui {
@@ -107,7 +118,7 @@ impl AgentToTui {
         matches!(self,
             Self::Message(_) | Self::Thinking | Self::Idle |
             Self::StreamChunk { .. } | Self::RequestApproval(_) |
-            Self::StepProgress { .. })
+            Self::StepProgress { .. } | Self::ToolStatus { .. })
     }
 
     /// Check if this is a data update (informational, non-UI-state).

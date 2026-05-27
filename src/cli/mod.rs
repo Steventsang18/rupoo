@@ -8,7 +8,7 @@ mod chat_mode;
 mod plan_mode;
 mod approval;
 
-pub use rupoo::{AgentToTui, ApprovalChoice, ChatMessage, PendingTool, TuiToAgent};
+pub use rupoo::{AgentToTui, ApprovalChoice, ChatMessage, PendingTool, ToolPhase, TuiToAgent};
 pub use ui::render;
 pub use app::{FocusTarget, InputMode, OverlayState, RupooApp, SessionTab};
 
