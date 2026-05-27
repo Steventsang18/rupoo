@@ -663,6 +663,15 @@ Keep responses tight. Use Markdown naturally for structure.
         args: &[String],
         timeout_secs: Option<u64>,
     ) -> AgentResult<StepOutcome> {
+        // Exec steps also need approval for dangerous commands
+        if self.safety_ctx.needs_approval(command) {
+            return Ok(StepOutcome::RequiresApproval {
+                tool_name: command.to_string(),
+                params: serde_json::json!({"command": command, "args": args}),
+                step_index,
+            });
+        }
+
         let command_owned = command.to_string();
         let args_owned = args.to_vec();
         let timeout = timeout_secs;

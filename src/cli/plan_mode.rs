@@ -164,8 +164,7 @@ impl AgentUiBridge {
                 }
                 Ok(rupoo::agent::StepOutcome::RequiresApproval { ref tool_name, ref params, step_index }) => {
                     if self.approve_all {
-                        // Auto-approve: execute tool directly without user prompt.
-                        // Clone params to avoid borrow conflict with store_pending_plan.
+                        // Auto-approve: execute based on step type.
                         let p = params.clone();
                         let tn = tool_name.clone();
                         if let Err(e) = self.repo.update_step_progress(
@@ -173,22 +172,38 @@ impl AgentUiBridge {
                         ).await {
                             warn!(error = %e, "failed to mark step running");
                         }
-                        let mcp_result = self.tool_executor.execute_tool(&tn, p).await;
-                        match mcp_result {
-                            Ok(mcp) => {
+
+                        // Determine execution method based on step type
+                        let result = if let Some(rupoo::task::Step::Exec { command, args, timeout_secs, .. }) = plan.steps.get(step_index) {
+                            // Exec step: run via terminal executor
+                            let cmd = command.clone();
+                            let a = args.clone();
+                            let t = *timeout_secs;
+                            rupoo::tools::terminal::execute_command(
+                                &cmd, &a, t, &self.agent.safety_ctx,
+                            ).await.map_err(|e| e.to_string())
+                        } else {
+                            // ToolCall step: run via MCP executor
+                            self.tool_executor.execute_tool(&tn, p).await
+                                .map(|mcp| mcp.content)
+                                .map_err(|e| e.to_string())
+                        };
+
+                        match result {
+                            Ok(output) => {
                                 if let Some(step) = plan.steps.get_mut(step_index) {
                                     step.set_status(rupoo::task::StepStatus::Completed);
                                     if let rupoo::task::Step::ToolCall { ref mut result, .. } = step {
-                                        *result = Some(serde_json::json!({
-                                            "success": mcp.success,
-                                            "content": mcp.content,
-                                        }));
+                                        *result = Some(serde_json::json!({"success": true, "content": &output}));
+                                    }
+                                    if let rupoo::task::Step::Exec { output: ref mut out, .. } = step {
+                                        *out = Some(output);
                                     }
                                 }
                                 let _ = self.repo.record_step_completion(
                                     &plan.id, step_index,
                                     rupoo::task::StepStatus::Completed,
-                                    Some(mcp.content),
+                                    None,
                                 ).await;
                                 plan.current_step_index = step_index + 1;
                                 plan.updated_at = chrono::Utc::now();

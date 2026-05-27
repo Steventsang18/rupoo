@@ -27,6 +27,8 @@ pub(super) struct AgentUiBridge {
     pub(super) approve_all: bool,
     /// Conversation history for multi-turn Chat Mode.
     pub(super) conversation_history: rupoo::llm::ConversationHistory,
+    /// Session ID for persisting conversation history.
+    pub(super) session_id: String,
 }
 
 impl AgentUiBridge {
@@ -50,6 +52,10 @@ impl AgentUiBridge {
                 }
                 Ok(TuiToAgent::ApproveAll) => {
                     self.approve_all = true;
+                    // Persist approve_all setting
+                    if let Err(e) = self.repo.set_setting("approve_all", "true").await {
+                        tracing::warn!(error = %e, "failed to persist approve_all");
+                    }
                     self.handle_approval().await;
                 }
                 Ok(TuiToAgent::DenyTool) => {

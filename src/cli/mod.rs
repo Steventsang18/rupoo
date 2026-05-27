@@ -392,7 +392,7 @@ pub fn run_tui_with_agent(
 ) -> Result<(), &'static str> {
     // Pre-load UI data on the shared tokio runtime (no new thread, no new runtime).
     // Must happen before passing rt_handle into the TUI event loop.
-    let (sessions_data, model_label, llm_configured, llm_provider) = rt_handle.block_on(async {
+    let (sessions_data, model_label, llm_configured, llm_provider, conversation_history, approve_all) = rt_handle.block_on(async {
         let sessions = repo.load_ui_sessions().await.unwrap_or_default();
         let provider = repo
             .get_setting("active_provider")
@@ -419,7 +419,28 @@ pub fn run_tui_with_agent(
             .flatten()
             .is_some();
 
-        (sessions, label, llm_configured, provider)
+        // Load conversation history for the active session
+        let active_session_id = sessions.iter()
+            .find(|s| s.3)  // .3 = is_active (4th element of tuple)
+            .map(|s| s.0.clone())  // .0 = id (1st element)
+            .unwrap_or_else(|| "default".to_string());
+        let conversation_history = repo
+            .load_conversation_history(&active_session_id)
+            .await
+            .ok()
+            .flatten()
+            .unwrap_or_else(|| ConversationHistory::new(10));
+
+        // Load persisted approve_all setting
+        let approve_all = repo
+            .get_setting("approve_all")
+            .await
+            .ok()
+            .flatten()
+            .map(|v| v == "true")
+            .unwrap_or(false);
+
+        (sessions, label, llm_configured, provider, conversation_history, approve_all)
     });
 
     // Create channel pair
@@ -441,8 +462,9 @@ pub fn run_tui_with_agent(
                     pending_plan: std::sync::Mutex::new(None),
                     pending_step_index: std::sync::Mutex::new(None),
                     tool_executor: std::sync::Arc::clone(&tool_executor),
-                    approve_all: false,
-                    conversation_history: ConversationHistory::new(10),
+                    approve_all,
+                    conversation_history,
+                    session_id: "default".to_string(),
                 };
                 agent_task.run().await;
             });

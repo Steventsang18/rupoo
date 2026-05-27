@@ -43,12 +43,8 @@ impl Default for SafetyContext {
                 "kill", "killall", "pkill",
                 "iptables", "ufw",
                 "mount", "umount",
-                // Shell interpreters — can execute arbitrary commands bypassing the blacklist
-                "sh", "bash", "zsh", "dash", "ksh", "csh", "tcsh", "fish",
-                // Script interpreters — same risk as shells
-                "python", "python3", "perl", "ruby", "node", "lua",
-                // Direct binary execution paths
-                "/bin/sh", "/bin/bash", "/bin/zsh", "/usr/bin/env",
+                // Direct binary execution paths for truly dangerous shells
+                // (interactive shells are approval-required, not forbidden — see needs_approval)
             ]
             .iter()
             .map(|s| s.to_string())
@@ -223,21 +219,38 @@ impl SafetyContext {
         // High-risk tool names that require explicit user approval.
         // Extend this list as needed — the list is intentionally small to
         // avoid alert fatigue; most tools are auto-approved by default.
+        let lower = tool_name.to_lowercase();
+        let base = lower.split_whitespace().next().unwrap_or(&lower);
         matches!(
-            tool_name.to_lowercase().as_str(),
+            base,
             "delete_file"
                 | "rm"
                 | "remove"
                 | "exec"
                 | "run_command"
                 | "bash"
+                | "sh"
+                | "zsh"
+                | "dash"
+                | "ksh"
+                | "csh"
+                | "fish"
                 | "shell"
                 | "sudo"
                 | "reboot"
                 | "shutdown"
                 | "http_delete"
                 | "http_post"
-        )
+                // Script interpreters — can execute arbitrary code
+                | "python"
+                | "python3"
+                | "perl"
+                | "ruby"
+                | "node"
+                | "lua"
+        ) || base.starts_with("/bin/sh")
+            || base.starts_with("/bin/bash")
+            || base.starts_with("/usr/bin/env")
     }
 }
 
@@ -268,6 +281,31 @@ mod tests {
         assert!(ctx.validate_command("sudo rm -rf /").is_err());
         assert!(ctx.validate_command("rm -rf /").is_err());
         assert!(ctx.validate_command("echo hello").is_ok());
+        // sh/bash are no longer forbidden — they require approval instead
+        assert!(ctx.validate_command("bash -c 'echo hello'").is_ok());
+        assert!(ctx.validate_command("sh -c 'ls'").is_ok());
+    }
+
+    #[test]
+    fn test_needs_approval() {
+        let ctx = SafetyContext::default();
+        // Shell interpreters require approval
+        assert!(ctx.needs_approval("bash"));
+        assert!(ctx.needs_approval("sh"));
+        assert!(ctx.needs_approval("zsh"));
+        assert!(ctx.needs_approval("/bin/bash -c 'echo hi'"));
+        assert!(ctx.needs_approval("/usr/bin/env python3"));
+        // Script interpreters require approval
+        assert!(ctx.needs_approval("python3"));
+        assert!(ctx.needs_approval("node"));
+        assert!(ctx.needs_approval("perl"));
+        // Safe commands don't need approval
+        assert!(!ctx.needs_approval("echo"));
+        assert!(!ctx.needs_approval("ls"));
+        assert!(!ctx.needs_approval("cat"));
+        // Dangerous tool names still need approval
+        assert!(ctx.needs_approval("delete_file"));
+        assert!(ctx.needs_approval("http_post"));
     }
 
     #[test]

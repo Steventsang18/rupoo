@@ -60,8 +60,7 @@ impl AgentUiBridge {
                 self.conversation_history.push_assistant(&response);
 
                 // Persist history to DB
-                let session_id = "default".to_string();
-                if let Err(e) = self.repo.save_conversation_history(&session_id, &self.conversation_history).await {
+                if let Err(e) = self.repo.save_conversation_history(&self.session_id, &self.conversation_history).await {
                     warn!(error = %e, "failed to persist conversation history");
                 }
 
