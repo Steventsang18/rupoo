@@ -160,44 +160,119 @@ fn render_chat_area(frame: &mut Frame, area: Rect, app: &RupooApp) {
     let max_w = inner.width as usize;
     let view_h = inner.height as usize;
 
-    let mut display_lines = build_chat_lines(app, max_w);
+    // ── Use cached chat lines if change_counter and width match ───────
+    let display_lines = {
+        let cache = app.cached_chat_lines.borrow();
+        match cache.as_ref() {
+            Some((cc, w, lines)) if *cc == app.change_counter && *w == max_w => {
+                lines.clone()
+            }
+            _ => {
+                drop(cache);
+                let lines = build_chat_lines(app, max_w);
+                app.cached_chat_lines.borrow_mut().replace((app.change_counter, max_w, lines.clone()));
+                lines
+            }
+        }
+    };
+
+    let mut display_lines = display_lines;
 
     // ── Thinking indicator ─────────────────────────────────────────────
     if app.thinking {
-        let spinner_char = match app.spinner_frame % 4 {
-            0 => "⠋",
-            1 => "⠙",
-            2 => "⠹",
-            _ => "⠸",
-        };
         let status_text = if let Some((ref tool, ref phase)) = app.current_tool_status {
             match phase.as_str() {
-                "calling" => format!(" {} Calling {}… ", spinner_char, tool),
-                "completed" => format!(" {} Processing… ", spinner_char),
-                _ => format!(" {} Thinking… ", spinner_char),
+                "calling" => format!(" Calling {}…", tool),
+                "completed" => " Processing…".to_string(),
+                _ => " Thinking…".to_string(),
             }
         } else if app.stream_buffer.is_empty() {
-            format!(" {} Thinking… ", spinner_char)
+            " Thinking…".to_string()
         } else {
-            format!(" {} Generating… ", spinner_char)
-        };
-
-        // Typing dots animation
-        let dots = match app.spinner_frame % 3 {
-            0 => "● ○ ○",
-            1 => "● ● ○",
-            _ => "● ● ●",
+            " Generating…".to_string()
         };
 
         display_lines.push(Line::from(""));
-        display_lines.push(Line::from(vec![
-            Span::styled(" 🤖 ", Style::default().fg(Color::Cyan)),
-            Span::styled(status_text, Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
-        ]));
-        display_lines.push(Line::from(Span::styled(
-            format!("   {}", dots),
-            Style::default().fg(Color::Cyan).add_modifier(Modifier::DIM),
-        )));
+
+        // ── Show thinking chain or streaming content ──────────────
+        if !app.stream_buffer.is_empty() {
+            // Stream buffer has content — show as live typing bubble
+            display_lines.push(Line::from(vec![
+                Span::styled(" 🤖 ", Style::default().fg(Color::Cyan)),
+                Span::styled("Rupoo", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+            ]));
+
+            // Render stream buffer content in a cyan bubble
+            let bubble_w = (max_w * 3 / 4).max(20);
+            display_lines.push(Line::from(Span::styled(
+                format!("┌{}┐", "─".repeat(bubble_w.saturating_sub(2))),
+                Style::default().fg(Color::Cyan).add_modifier(Modifier::DIM),
+            )));
+
+            let stream_lines: Vec<&str> = app.stream_buffer.lines().collect();
+            let total_lines = stream_lines.len();
+            // Show last N lines to avoid flooding the viewport
+            let max_visible = view_h.saturating_sub(6).max(3);
+            let start = if total_lines > max_visible { total_lines - max_visible } else { 0 };
+
+            if start > 0 {
+                display_lines.push(Line::from(Span::styled(
+                    format!("│ ... ({} lines above) │", start),
+                    Style::default().fg(Color::DarkGray),
+                )));
+            }
+
+            for line in stream_lines.iter().skip(start) {
+                for wrapped in wrap_to(line, bubble_w.saturating_sub(4)) {
+                    display_lines.push(Line::from(Span::styled(
+                        format!("│ {} │", wrapped),
+                        Style::default().fg(Color::White),
+                    )));
+                }
+            }
+
+            // Blinking cursor at end of stream
+            let dots = match app.spinner_frame % 3 {
+                0 => "● ○ ○",
+                1 => "● ● ○",
+                _ => "● ● ●",
+            };
+            display_lines.push(Line::from(Span::styled(
+                format!("│ {} {}", dots, status_text.trim()),
+                Style::default().fg(Color::Yellow).add_modifier(Modifier::DIM),
+            )));
+            display_lines.push(Line::from(Span::styled(
+                format!("└{}┘", "─".repeat(bubble_w.saturating_sub(2))),
+                Style::default().fg(Color::Cyan).add_modifier(Modifier::DIM),
+            )));
+        } else {
+            // No stream content yet — show thinking indicator
+            let dots = match app.spinner_frame % 3 {
+                0 => "○ ○ ○",
+                1 => "● ○ ○",
+                2 => "● ● ○",
+                _ => "● ● ●",
+            };
+
+            let spinner_char = match app.spinner_frame % 4 {
+                0 => "⠋",
+                1 => "⠙",
+                2 => "⠹",
+                _ => "⠸",
+            };
+
+            display_lines.push(Line::from(vec![
+                Span::styled(" 🤖 ", Style::default().fg(Color::Cyan)),
+                Span::styled(
+                    format!("{}{}", spinner_char, status_text),
+                    Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+                ),
+            ]));
+            display_lines.push(Line::from(Span::styled(
+                format!("   {}", dots),
+                Style::default().fg(Color::Cyan).add_modifier(Modifier::DIM),
+            )));
+        }
     }
 
     // ── Compute scroll ─────────────────────────────────────────────────
@@ -252,25 +327,99 @@ fn build_chat_lines(app: &RupooApp, max_w: usize) -> Vec<Line<'static>> {
     }
 
     // ── Build message lines with bubbles ──────────────────────────────
-    for msg in &app.messages {
+    let mut i = 0;
+    while i < app.messages.len() {
+        let msg = &app.messages[i];
         let is_user = msg.role == MessageRole::User;
         let is_error = msg.role == MessageRole::System && msg.content.contains("Error");
         let is_tool_call = msg.role == MessageRole::System && msg.content.starts_with("🔧");
         let is_tool_result = msg.role == MessageRole::System && msg.content.starts_with("✅");
         let is_system = msg.role == MessageRole::System && !is_error && !is_tool_call && !is_tool_result;
 
-        // Tool call/result messages — compact card
-        if is_tool_call || is_tool_result {
-            let icon = if is_tool_call { "🔧" } else { "✅" };
-            let fg_color = if is_tool_call { Color::Magenta } else { Color::Green };
+        // ── Tool call + result: Claude Code style card ────────────────
+        if is_tool_call {
+            // Collect consecutive tool call + result pairs into a card
+            let mut card_lines: Vec<Line> = Vec::new();
+            let mut tool_name = "";
+            let mut has_result = false;
+
+            // Parse tool call: "🔧 tool_name(args)"
+            if let Some(rest) = msg.content.strip_prefix("🔧 ") {
+                tool_name = rest.split('(').next().unwrap_or(rest);
+            }
+            let card_w = (max_w * 3 / 4).max(30).min(max_w - 2);
+            let inner_w = card_w.saturating_sub(4);
+
+            // Top border
+            card_lines.push(Line::from(Span::styled(
+                format!("╭─ 🔧 {} ─{}", tool_name, "─".repeat(inner_w.saturating_sub(tool_name.len() + 5).min(60))),
+                Style::default().fg(Color::Magenta).add_modifier(Modifier::DIM),
+            )));
+
+            // Tool call args
+            let args_line = msg.content.strip_prefix("🔧 ").unwrap_or(&msg.content);
+            for wrapped in wrap_to(args_line, inner_w) {
+                card_lines.push(Line::from(Span::styled(
+                    format!("│ {}", wrapped),
+                    Style::default().fg(Color::Magenta),
+                )));
+            }
+
+            // Check if next message is the result
+            if i + 1 < app.messages.len() {
+                let next = &app.messages[i + 1];
+                if next.role == MessageRole::System && next.content.starts_with("✅") {
+                    has_result = true;
+                    i += 1;
+                    // Parse result: "✅ tool → result_text"
+                    let result_text = next.content.strip_prefix("✅ ").unwrap_or(&next.content);
+                    // Show result with compact format
+                    let result_lines: Vec<&str> = result_text.lines().take(8).collect();
+                    let truncated = result_text.lines().count() > 8;
+                    card_lines.push(Line::from(Span::styled(
+                        format!("│ {}", "─".repeat(inner_w.min(40))),
+                        Style::default().fg(Color::Green).add_modifier(Modifier::DIM),
+                    )));
+                    for rl in &result_lines {
+                        for wrapped in wrap_to(rl, inner_w.saturating_sub(2)) {
+                            card_lines.push(Line::from(Span::styled(
+                                format!("│ {}", wrapped),
+                                Style::default().fg(Color::Green),
+                            )));
+                        }
+                    }
+                    if truncated {
+                        card_lines.push(Line::from(Span::styled(
+                            format!("│ ... ({} more lines)", result_text.lines().count() - 8),
+                            Style::default().fg(Color::DarkGray),
+                        )));
+                    }
+                }
+            }
+
+            // Bottom border
+            let status = if has_result { "done" } else { "running" };
+            card_lines.push(Line::from(Span::styled(
+                format!("╰─ {} ─{}", status, "─".repeat(inner_w.saturating_sub(status.len() + 3).min(60))),
+                Style::default().fg(if has_result { Color::Green } else { Color::Yellow }).add_modifier(Modifier::DIM),
+            )));
+
+            all_lines.extend(card_lines);
+            i += 1;
+            continue;
+        }
+
+        // Standalone tool result (without preceding call) — compact
+        if is_tool_result {
             for line in msg.content.lines() {
                 for wrapped in wrap_to(line, max_w.saturating_sub(4)) {
                     all_lines.push(Line::from(Span::styled(
-                        format!("  {} {}", icon, wrapped),
-                        Style::default().fg(fg_color),
+                        format!("  ✅ {}", wrapped),
+                        Style::default().fg(Color::Green),
                     )));
                 }
             }
+            i += 1;
             continue;
         }
 
@@ -284,6 +433,7 @@ fn build_chat_lines(app: &RupooApp, max_w: usize) -> Vec<Line<'static>> {
                     )));
                 }
             }
+            i += 1;
             continue;
         }
 
@@ -301,6 +451,7 @@ fn build_chat_lines(app: &RupooApp, max_w: usize) -> Vec<Line<'static>> {
                     )));
                 }
             }
+            i += 1;
             continue;
         }
 
@@ -401,6 +552,8 @@ fn build_chat_lines(app: &RupooApp, max_w: usize) -> Vec<Line<'static>> {
                 Style::default().fg(Color::Cyan).add_modifier(Modifier::DIM),
             )));
         }
+
+        i += 1;
     }
 
     all_lines

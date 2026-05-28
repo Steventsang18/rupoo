@@ -165,6 +165,12 @@ pub struct RupooApp {
     pub ctrl_c_count: u8,
     /// Shared cancel flag — set when user interrupts generation
     pub cancel_flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// Cached chat display lines — rebuilt only when change_counter or area width changes
+    pub cached_chat_lines: std::cell::RefCell<Option<(u64, usize, Vec<ratatui::text::Line<'static>>)>>,
+    /// Render throttle: last render timestamp (ms) for streaming
+    pub last_render_ms: std::cell::Cell<u64>,
+    /// Pending stream chunks accumulated since last render
+    pub pending_stream_len: std::cell::Cell<usize>,
 }
 
 impl RupooApp {
@@ -280,6 +286,9 @@ impl RupooApp {
             current_tool_status: None,
             ctrl_c_count: 0,
             cancel_flag: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            cached_chat_lines: std::cell::RefCell::new(None),
+            last_render_ms: std::cell::Cell::new(0),
+            pending_stream_len: std::cell::Cell::new(0),
         }
     }
 
@@ -461,7 +470,19 @@ impl RupooApp {
                 // Append to streaming buffer for incremental display
                 self.stream_buffer.push_str(&text);
                 self.scroll_bottom = true;
-                self.change_counter = self.change_counter.wrapping_add(1);
+                // Throttle: only invalidate cache every ~50ms or every 20 chars
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis() as u64;
+                let last = self.last_render_ms.get();
+                let elapsed = now.saturating_sub(last);
+                let pending = self.stream_buffer.len().saturating_sub(self.pending_stream_len.get());
+                if elapsed >= 50 || pending >= 40 {
+                    self.change_counter = self.change_counter.wrapping_add(1);
+                    self.last_render_ms.set(now);
+                    self.pending_stream_len.set(self.stream_buffer.len());
+                }
             }
             AgentToTui::LlmStatus { configured, provider } => {
                 self.llm_configured = configured;

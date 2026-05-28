@@ -184,7 +184,7 @@ impl TuiSession {
             use crossterm::event::{poll, read};
             use std::time::Duration;
             let poll_dur = if self.app.thinking {
-                Duration::from_millis(80)
+                Duration::from_millis(33) // ~30fps for smooth spinner/streaming
             } else {
                 Duration::from_millis(500)
             };
