@@ -1,13 +1,31 @@
 # Rupoo — AI-powered Terminal Assistant
 
-Rupoo is a terminal-based AI assistant that supports plan execution, skill management, long-term memory, a secure sandbox, Git integration, and the MCP protocol — all through natural language or TUI interaction.
+Rupoo is a terminal-based AI assistant with a native REPL interface, featuring syntax-highlighted code blocks, Markdown rendering, theme switching, and Claude Code–style tool call display — all driven by a dual-mode agent engine (Chat + Plan).
 
 ```
-Version:  0.2.0        Language: Rust 2021
-Tests:    106 ✅       Binary:   ~14 MB (release, ARM64)
-TUI:      ratatui      LLM:      Anthropic / OpenAI / DeepSeek / Ollama
-DB:       SQLite (FTS5)  Safety:  path_jail sandbox + SSRF protection
+Version:   0.3.0          Language: Rust 2021
+Lines:     12,578         Tests:    67 ✅
+Interface: Native REPL    LLM:      Anthropic / OpenAI / DeepSeek / Ollama
+DB:        SQLite (FTS5)  Safety:   path_jail sandbox + SSRF protection
 ```
+
+---
+
+## What's New in v0.3
+
+| Area | Change |
+|------|--------|
+| **Interface** | Replaced ratatui TUI with native REPL — smooth scrolling, resize-safe, no frame buffer |
+| **Code Highlighting** | syntect-powered syntax highlighting with 3 themes (base16-ocean.dark / InspiredGitHub / base16-mocha.dark) |
+| **Markdown Rendering** | Tables, blockquotes, task lists, ordered lists, links, horizontal rules |
+| **Theme System** | `/theme dark\|light\|monokai` with persistent DB storage; cursor color follows theme |
+| **Chat Bubbles** | User messages right-aligned (▸), AI left-aligned (◂), clear visual separation |
+| **Tool Cards** | Claude Code–style `╭─🔧──╮` folding cards for tool calls |
+| **Thinking Chain** | Coze-style spinner + streaming bubble for AI reasoning |
+| **Streaming Code** | Two-phase render: `│` placeholders during stream → syntect rewrite on completion |
+| **History Search** | `Ctrl+R` incremental search with `~/.rupoo/history.txt` persistence (1000 entries) |
+| **Color Palette** | 12 RGB constants per theme (GitHub Dark Dimmed + Catppuccin Mocha), no more `dimmed()` |
+| **Input Editing** | rustyline Emacs mode: arrow keys, Home/End, Ctrl+A/E, green blinking bar cursor |
 
 ---
 
@@ -42,17 +60,32 @@ rupoo config set base_url.openai https://api.deepseek.com/v1
 ### Launch
 
 ```bash
-# Interactive TUI (default)
+# Interactive REPL (default)
 rupoo
-
-# TUI keyboard shortcuts
-# Ctrl+P   Command palette
-# Ctrl+C   Exit
-# Tab      Switch focus (input area ↔ sidebar)
-# ↑/↓      Input history
-# Shift+↑/↓   Scroll chat area (or mouse wheel)
-# PgUp/PgDn   Scroll by larger increments
 ```
+
+#### REPL Keyboard Shortcuts
+
+| Key | Action |
+|-----|--------|
+| `Enter` | Send message |
+| `↑` / `↓` | Navigate input history |
+| `Ctrl+R` | Incremental history search |
+| `Ctrl+A` / `Home` | Move cursor to start |
+| `Ctrl+E` / `End` | Move cursor to end |
+| `←` / `→` | Move cursor left/right |
+| `Ctrl+C` | Cancel current operation |
+| `Ctrl+D` | Exit |
+
+#### REPL Commands
+
+| Command | Description |
+|---------|-------------|
+| `/new` | Start a new conversation |
+| `/model` | Switch LLM model |
+| `/plan` | Enter Plan Mode |
+| `/theme dark\|light\|monokai` | Switch color theme |
+| `?` | Show help |
 
 ---
 
@@ -72,7 +105,7 @@ rupoo [OPTIONS] [COMMAND]
 
 | Command | Description |
 |---------|-------------|
-| _(none)_ | Launch the interactive TUI (three-column layout) |
+| _(none)_ | Launch the interactive REPL |
 | `run --task <id>` | Execute a saved Plan |
 | `demo` | Run the built-in demo Plan |
 | `status [--short]` | Display system status overview |
@@ -91,74 +124,110 @@ rupoo [OPTIONS] [COMMAND]
 ## Architecture
 
 ```
-┌─ CLI (clap) ─────────────────────────────────────────────┐
-│  rupoo  →  TUI (ratatui + crossterm)                     │
-│         →  Subcommands (status/model/session/doctor/logs…)│
-└──────────────────────┬───────────────────────────────────┘
+┌─ CLI (clap) ──────────────────────────────────────────────┐
+│  rupoo  →  Native REPL (rustyline + owo-colors)           │
+│         →  Subcommands (status/model/session/doctor/logs…) │
+└──────────────────────┬────────────────────────────────────┘
                        │
-┌──────────────────────▼───────────────────────────────────┐
-│  Agent State Machine                                      │
-│  Think → ToolCall → WaitForInput → Finish               │
-│  + Exec / HttpRequest / BrowserAction                    │
-├──────────────────────────────────────────────────────────┤
-│  LLM Gateway (rig-core)                                  │
-│  Anthropic / OpenAI / Ollama unified interface           │
-├──────────────────────────────────────────────────────────┤
-│  Tool Executor Layer                                     │
-│  McpToolExecutor → rig_tools (Echo, FileRead/Write, Ls)  │
-│  + MCP Server (JSON-RPC stdio)                          │
-├──────────────────────────────────────────────────────────┤
-│  SafetyContext                                           │
-│  path_jail sandbox · Command blocklist · SSRF protection │
-│  · Timeout protection                                    │
-├──────────────────────────────────────────────────────────┤
-│  SQLite (WAL + FTS5)                                     │
-│  Plan persistence · Checkpoint crash recovery · Session  │
-│  history · Long-term memory                              │
-└──────────────────────────────────────────────────────────┘
+┌──────────────────────▼────────────────────────────────────┐
+│  Agent State Machine                                       │
+│  Think → ToolCall → WaitForInput → Finish                 │
+│  + Exec / HttpRequest / BrowserAction / Search            │
+├───────────────────────────────────────────────────────────┤
+│  LLM Gateway (rig-core 0.30)                              │
+│  Anthropic / OpenAI / Ollama unified interface            │
+├───────────────────────────────────────────────────────────┤
+│  Output Layer                                             │
+│  theme.rs → output.rs → markdown.rs → syntect highlighting│
+│  Chat bubbles · Tool cards · Thinking chain · Code blocks │
+├───────────────────────────────────────────────────────────┤
+│  Tool Executor Layer                                      │
+│  McpToolExecutor → rig_tools (Echo, FileRead/Write, Ls)   │
+│  + MCP Server (JSON-RPC stdio)                           │
+├───────────────────────────────────────────────────────────┤
+│  SafetyContext                                            │
+│  path_jail sandbox · Command blocklist · SSRF protection  │
+│  · Timeout protection                                     │
+├───────────────────────────────────────────────────────────┤
+│  SQLite (WAL + FTS5)                                      │
+│  Plan persistence · Checkpoint crash recovery · Session   │
+│  history · Long-term memory · Theme preferences           │
+└───────────────────────────────────────────────────────────┘
 ```
 
 ### Module Overview
 
 | Module | Lines | Responsibility |
 |--------|-------|----------------|
-| `main.rs` | 700+ | CLI entry point, command dispatch, `build_engine` |
-| `agent.rs` | 840+ | Agent state machine, 7 Step types, crash recovery |
-| `db.rs` | 890 | SQLite layer, Plan CRUD + Checkpoints + FTS5 memory |
-| `llm.rs` | 350 | LLM gateway, unified Anthropic/OpenAI/Ollama |
-| `cli/mod.rs` | 680 | TUI event loop, Agent bridge thread |
-| `cli/app.rs` | 370 | TUI application state, session management, message routing |
-| `cli/ui.rs` | 420 | TUI rendering: three-column layout, bubbles, code blocks, status bar |
-| `cli/handlers.rs` | 380 | Input mode strategies (Chat/Thinking/Approval/Palette) |
-| `safety.rs` | 250 | Security sandbox, path_jail, SSRF, command blocklist |
-| `mcp.rs` | 250+ | MCP Tool dispatcher + JSON-RPC client |
-| `mcp_server.rs` | 380 | MCP server (reuses McpToolExecutor) |
-| `rig_tools.rs` | 400 | Echo / FileRead / FileWrite / ListDir tools |
+| `agent.rs` | 1082 | Agent state machine, 7 Step types, crash recovery |
+| `db.rs` | 1121 | SQLite layer, Plan CRUD + Checkpoints + FTS5 memory + theme |
+| `llm.rs` | 1172 | LLM gateway, unified Anthropic/OpenAI/Ollama |
+| `cli/mod.rs` | 733 | REPL event loop, Agent bridge thread |
+| `cli/markdown.rs` | 540 | Markdown renderer: tables, blockquotes, task lists, links |
+| `cli/output.rs` | 286 | Output formatting: chat bubbles, tool cards, thinking chain |
+| `cli/theme.rs` | 161 | Theme system: Dark/Light/Monokai with 12 RGB constants |
+| `cli/plan_mode.rs` | 297 | Plan Mode: interactive step execution |
+| `cli/app.rs` | 307 | REPL application state, session management |
+| `cli/bridge.rs` | 188 | Agent ↔ REPL bridge (crossbeam channels) |
+| `cli/chat_mode.rs` | 121 | Chat Mode handler |
+| `cli/approval.rs` | 133 | Tool approval workflow |
+| `main_cli.rs` | 398 | CLI entry point, command dispatch |
+| `safety.rs` | 364 | Security sandbox, path_jail, SSRF, command blocklist |
+| `mcp.rs` | 421 | MCP Tool dispatcher + JSON-RPC client |
+| `mcp_server.rs` | 400 | MCP server (reuses McpToolExecutor) |
+| `rig_tools.rs` | 566 | Echo / FileRead / FileWrite / ListDir tools |
+| `skill.rs` | 570 | Skill system (JSON files + auto-learning) |
 | `task.rs` | 340 | Step/Plan/Checkpoint type definitions |
-| `memory.rs` | 140 | Long-term memory (FTS5 full-text search) |
-| `skill.rs` | 390 | Skill system (JSON files + auto-learning) |
-| `git.rs` | 240 | Git integration (git2 + gh CLI) |
-| `error.rs` | 34 | Unified error types |
+| `tools/browser.rs` | 461 | Browser automation (Navigate/Screenshot/Click/GetText) |
+| `tools/search.rs` | 247 | Web search integration |
+| `tools/network.rs` | 150 | HTTP request tool |
+| `tools/terminal.rs` | 123 | Terminal command execution |
+| `git.rs` | 241 | Git integration (git2 + gh CLI) |
+| `memory.rs` | 143 | Long-term memory (FTS5 full-text search) |
+| `executor.rs` | 138 | Step executor dispatch |
+| `shared.rs` | 130 | Shared types and constants |
+| `error.rs` | 33 | Unified error types |
 
-### Security Architecture
+---
 
-| Protection Layer | Implementation |
-|------------------|----------------|
-| Command blocklist | 20+ dangerous commands blocked (sudo, rm, mkfs, dd, etc.) |
-| File path sandbox | `path_jail` crate — prevents `../../etc/passwd`, symlink escapes |
-| SSRF protection | Blocks localhost/127.0.0.1/0.0.0.0/`[::1]`/169.254.x.x/nip.io |
-| Timeout protection | Command 30s / HTTP 30s / Browser 30s |
-| Environment sanitization | Only PATH/HOME/USER/SHELL/LANG/TERM preserved |
-| Output truncation | Command output 10K / file reads 4K |
-| Multi-path security | Triple protection: McpToolExecutor + LLM Agent + MCP Server |
+## Theme System
+
+Three built-in themes with persistent preference storage:
+
+| Theme | Style | Code Highlighting | Cursor |
+|-------|-------|-------------------|--------|
+| `dark` (default) | GitHub Dark Dimmed + Catppuccin Mocha | base16-ocean.dark | `#3fb950` green |
+| `light` | GitHub Light | InspiredGitHub | `#238636` green |
+| `monokai` | Monokai | base16-mocha.dark | `#a6e22e` green |
+
+Switch with `/theme dark|light|monokai` — preference persists across sessions.
+
+### Color Palette (Dark Theme)
+
+| Role | Color | Hex |
+|------|-------|-----|
+| User message | Green | `#7ee787` |
+| User accent | Green | `#3fb950` |
+| AI message | Blue | `#58a6ff` |
+| AI accent | Blue | `#79c0ff` |
+| Tool call | Purple | `#d2a8ff` |
+| Thinking | Yellow | `#e3b341` |
+| Error | Red | `#f85149` |
+| Dim text | Gray | `#484f58` |
+| Border | Gray | `#30363d` |
 
 ---
 
 ## Core Features
 
-### Plan Execution Engine
+### Dual-Mode Agent Engine
 
-Supports 7 step types:
+| Mode | Trigger | Description |
+|------|---------|-------------|
+| **Chat Mode** | Default | Free-form conversation with streaming output |
+| **Plan Mode** | `/plan` | Structured multi-step execution with checkpoints |
+
+### 7 Step Types
 
 | Step | Description |
 |------|-------------|
@@ -176,14 +245,25 @@ Supports 7 step types:
 - **Transactional atomicity**: `record_step_completion` updates Plan + Checkpoint in a single SQLite transaction
 - **Three-tier recovery**: `reset_running_plans → get_last_checkpoint → resume point determined by state`
 
-### TUI
+### Markdown Rendering
 
-- **Three-column layout**: Session list on the left, chat area in the center, status panel on the right
-- **Message bubbles**: Three colors distinguish user / assistant / system messages
-- **Code block highlighting**: Code rendered with borders and pre-wrapping
-- **Input history**: ↑/↓ navigates through the last 100 inputs
-- **Auto-scroll**: New messages auto-scroll to the bottom; manual scroll resets after sending a new message
-- **Adaptive layout**: Automatically re-layouts and re-wraps when terminal size changes
+Full inline + block rendering:
+
+- **Tables**: Aligned columns with `│` borders
+- **Blockquotes**: `▎` left border + dim text
+- **Task lists**: `☐` unchecked / `☑` checked
+- **Ordered / unordered lists**: Indented with proper markers
+- **Code blocks**: syntect syntax highlighting + line numbers
+- **Inline code**: Background-highlighted spans
+- **Links**: `[text](url)` parsed and colored
+- **Horizontal rules**: `─` separator
+
+### Streaming Code Blocks
+
+Two-phase rendering eliminates flicker:
+
+1. **Stream phase**: Fast `│` placeholders with plain text
+2. **Completion phase**: Erase and rewrite with syntect highlighting + line numbers
 
 ### Skill System
 
@@ -195,8 +275,22 @@ Supports 7 step types:
 ### Long-term Memory
 
 - **FTS5 full-text search**: Supports BM25 relevance ranking
-- **Session persistence**: SQLite stores UI session history
+- **Session persistence**: SQLite stores conversation history
 - **Context injection**: Think steps automatically retrieve relevant memories
+
+---
+
+## Security Architecture
+
+| Protection Layer | Implementation |
+|------------------|----------------|
+| Command blocklist | 20+ dangerous commands blocked (sudo, rm, mkfs, dd, etc.) |
+| File path sandbox | `path_jail` crate — prevents `../../etc/passwd`, symlink escapes |
+| SSRF protection | Blocks localhost/127.0.0.1/0.0.0.0/`[::1]`/169.254.x.x/nip.io |
+| Timeout protection | Command 30s / HTTP 30s / Browser 30s |
+| Environment sanitization | Only PATH/HOME/USER/SHELL/LANG/TERM preserved |
+| Output truncation | Command output 10K / file reads 4K |
+| Multi-path security | Triple protection: McpToolExecutor + LLM Agent + MCP Server |
 
 ---
 
@@ -206,18 +300,20 @@ Supports 7 step types:
 |-------|---------|
 | tokio | Async runtime |
 | clap | CLI argument parsing |
-| ratatui + crossterm | TUI framework |
+| rustyline | REPL input with history + Ctrl+R search |
+| owo-colors | Zero-cost RGB color output |
+| syntect | Syntax highlighting (offline, 100+ languages) |
 | rig-core 0.30 | Multi-provider LLM gateway |
 | rusqlite (WAL + FTS5) | SQLite database |
 | git2 | Git operations |
 | reqwest | HTTP client |
 | path_jail | File path security |
-| tui-textarea | TUI input component |
 | serde + serde_json | Serialization |
 | tracing + tracing-subscriber | Logging |
 | uuid | Plan / Step IDs |
 | chrono | Timestamps |
 | crossbeam-channel | Cross-thread communication |
+| indicatif | Progress bars and spinners |
 
 ---
 
@@ -239,12 +335,8 @@ cargo test --test cli_db_test
 cargo run --release demo
 ```
 
-106 tests covering:
-- 54 unit tests (Agent, DB, LLM, MCP, Safety, Memories, Skills, Git)
-- 33 main crate tests (CLI commands + TUI handler)
-- 4 CLI-DB integration tests
-- 2 crash recovery integration tests
-- 13 DB integration tests
+67 tests covering:
+- Agent state machine, DB CRUD, LLM gateway, MCP, Safety, Memory, Skills, Git, Tools
 
 ---
 
@@ -260,8 +352,8 @@ cargo build --release
 # With GUI support
 cargo build --release --features gui
 
-# Binary size
-# ~14 MB (release, ARM64)
+# If project path contains non-ASCII characters:
+CARGO_TARGET_DIR=/tmp/rupoo-target cargo build --release
 ```
 
 ---
