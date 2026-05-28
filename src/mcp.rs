@@ -60,6 +60,67 @@ impl ToolKind {
         }
     }
 
+    /// Return the JSON Schema for this tool's parameters.
+    /// Single source of truth — kept in sync with rig_tools by convention.
+    fn parameters_schema(&self) -> serde_json::Value {
+        match self {
+            ToolKind::Echo => serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "message": {
+                        "type": "string",
+                        "description": "The message to echo back"
+                    }
+                },
+                "required": ["message"]
+            }),
+            ToolKind::FileRead { .. } => serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "Absolute or relative path to the file"
+                    }
+                },
+                "required": ["path"]
+            }),
+            ToolKind::FileWrite { .. } => serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "Path to the file to write"
+                    },
+                    "content": {
+                        "type": "string",
+                        "description": "Content to write to the file"
+                    }
+                },
+                "required": ["path", "content"]
+            }),
+            ToolKind::ListDir { .. } => serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "Path to the directory to list"
+                    }
+                },
+                "required": ["path"]
+            }),
+            ToolKind::WebSearch => serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "The search query"
+                    }
+                },
+                "required": ["query"]
+            }),
+        }
+    }
+
     async fn execute(&self, params: serde_json::Value) -> Result<serde_json::Value, String> {
         match self {
             ToolKind::Echo => {
@@ -209,68 +270,7 @@ impl McpToolExecutor {
         let reg = self.registry.read().await;
         reg.values()
             .map(|t| {
-                let schema = match t.name() {
-                    "echo" => serde_json::json!({
-                        "type": "object",
-                        "properties": {
-                            "message": {
-                                "type": "string",
-                                "description": "The message to echo back"
-                            }
-                        },
-                        "required": ["message"]
-                    }),
-                    "file_read" => serde_json::json!({
-                        "type": "object",
-                        "properties": {
-                            "path": {
-                                "type": "string",
-                                "description": "Absolute or relative path to the file"
-                            }
-                        },
-                        "required": ["path"]
-                    }),
-                    "file_write" => serde_json::json!({
-                        "type": "object",
-                        "properties": {
-                            "path": {
-                                "type": "string",
-                                "description": "Path to the file to write"
-                            },
-                            "content": {
-                                "type": "string",
-                                "description": "Content to write to the file"
-                            }
-                        },
-                        "required": ["path", "content"]
-                    }),
-                    "list_directory" => serde_json::json!({
-                        "type": "object",
-                        "properties": {
-                            "path": {
-                                "type": "string",
-                                "description": "Path to the directory to list"
-                            }
-                        },
-                        "required": ["path"]
-                    }),
-                    "web_search" => serde_json::json!({
-                        "type": "object",
-                        "properties": {
-                            "query": {
-                                "type": "string",
-                                "description": "The search query"
-                            }
-                        },
-                        "required": ["query"]
-                    }),
-                    _ => serde_json::json!({
-                        "type": "object",
-                        "properties": {},
-                        "required": []
-                    }),
-                };
-                (t.name().to_string(), t.description().to_string(), schema)
+                (t.name().to_string(), t.description().to_string(), t.parameters_schema())
             })
             .collect()
     }

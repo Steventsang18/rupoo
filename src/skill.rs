@@ -84,9 +84,13 @@ impl SkillManager {
         Self { skills_dir }
     }
 
-    /// Return the default skills directory (`$HOME/.skills` or `./.skills`).
+    /// Return the default skills directory.
+    ///
+    /// Priority: `RUPOO_SKILLS_DIR` env var > `$HOME/.skills` > `./.skills`
     pub fn default_dir() -> PathBuf {
-        if let Ok(home) = std::env::var("HOME") {
+        if let Ok(dir) = std::env::var("RUPOO_SKILLS_DIR") {
+            PathBuf::from(dir)
+        } else if let Ok(home) = std::env::var("HOME") {
             PathBuf::from(home).join(".skills")
         } else {
             PathBuf::from(".skills")
