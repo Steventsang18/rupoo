@@ -17,6 +17,21 @@ use std::sync::OnceLock;
 
 use super::theme;
 
+/// Get the current terminal width. Falls back to 80 if detection fails.
+fn terminal_width() -> usize {
+    std::process::Command::new("stty")
+        .arg("size")
+        .stdin(std::process::Stdio::inherit())
+        .output()
+        .ok()
+        .and_then(|o| {
+            let s = String::from_utf8_lossy(&o.stdout);
+            // "rows cols\n" format
+            s.split_whitespace().nth(1).and_then(|c| c.parse::<usize>().ok())
+        })
+        .unwrap_or(80)
+}
+
 struct Highlighter {
     ss: SyntaxSet,
     ts: ThemeSet,
@@ -317,9 +332,9 @@ fn flush_table(ctx: &mut RenderContext) {
         }
     }
 
-    // Cap column widths so total doesn't exceed 90
+    // Cap column widths so total doesn't exceed terminal width
     let total: usize = col_widths.iter().sum::<usize>() + col_count * 3 + 1;
-    let max_width = 90;
+    let max_width = terminal_width().saturating_sub(4).max(40);
     if total > max_width {
         let scale = (max_width as f64) / (total as f64);
         for w in &mut col_widths {

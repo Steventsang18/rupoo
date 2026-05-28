@@ -137,28 +137,62 @@ impl SafetyContext {
     /// For thorough protection, use `is_private_host` which resolves DNS.
     pub fn is_localhost_url(url: &str) -> bool {
         let lower = url.to_lowercase();
-        // Direct localhost addresses
-        if lower.starts_with("http://localhost")
-            || lower.starts_with("https://localhost")
-            || lower.starts_with("http://127.0.0.1")
-            || lower.starts_with("https://127.0.0.1")
-            || lower.starts_with("http://[::1]")
-            || lower.starts_with("https://[::1]")
-            || lower.starts_with("http://0.0.0.0")
-            || lower.starts_with("https://0.0.0.0")
-            || lower.starts_with("http://[0:0:0:0:0:0:0:1]")
-            || lower.starts_with("https://[0:0:0:0:0:0:0:1]")
+
+        // Helper: check if URL starts with http:// or https:// for a given host prefix
+        let starts_with_host = |prefix: &str| -> bool {
+            lower.starts_with(&format!("http://{prefix}"))
+                || lower.starts_with(&format!("https://{prefix}"))
+        };
+
+        // localhost hostname
+        if starts_with_host("localhost") {
+            return true;
+        }
+
+        // 127.0.0.0/8 — entire loopback range (127.x.x.x all resolve to localhost)
+        if starts_with_host("127.") {
+            return true;
+        }
+
+        // 0.0.0.0 — binds all interfaces
+        if starts_with_host("0.0.0.0") {
+            return true;
+        }
+
+        // IPv6 loopback — [::1] and expanded form [0:0:0:0:0:0:0:1]
+        if starts_with_host("[::1]") || starts_with_host("[0:0:0:0:0:0:0:1]") {
+            return true;
+        }
+
+        // IPv4-mapped IPv6 loopback — [::ffff:127.0.0.1], [::ffff:7f00:1], [0:0:0:0:0:ffff:127.0.0.1]
+        if starts_with_host("[::ffff:127.")
+            || starts_with_host("[0:0:0:0:0:ffff:127.")
+            || starts_with_host("[::ffff:7f")
+            || starts_with_host("[0:0:0:0:0:ffff:7f")
         {
             return true;
         }
-        // Cloud metadata IP (169.254.x.x range)
-        if lower.starts_with("http://169.254.") || lower.starts_with("https://169.254.") {
+
+        // IPv6 unspecified address — [::] (equivalent to 0.0.0.0)
+        if starts_with_host("[::]") || starts_with_host("[0:0:0:0:0:0:0:0]") {
             return true;
         }
+
+        // Octal loopback — 0177.0.0.1 == 127.0.0.1 (some resolvers accept this)
+        if starts_with_host("0177.") {
+            return true;
+        }
+
+        // Cloud metadata IP (169.254.169.254 and entire link-local range)
+        if starts_with_host("169.254.") {
+            return true;
+        }
+
         // DNS rebinding domains that resolve arbitrary IPs
         if lower.contains("nip.io") || lower.contains("xip.io") || lower.contains("sslip.io") {
             return true;
         }
+
         false
     }
 
@@ -310,9 +344,51 @@ mod tests {
 
     #[test]
     fn test_localhost_detection() {
+        // Basic cases
         assert!(SafetyContext::is_localhost_url("http://localhost:8080"));
+        assert!(SafetyContext::is_localhost_url("https://localhost/path"));
         assert!(SafetyContext::is_localhost_url("http://127.0.0.1/api"));
+        assert!(SafetyContext::is_localhost_url("https://127.0.0.1/"));
+
+        // Full 127.0.0.0/8 loopback range
+        assert!(SafetyContext::is_localhost_url("http://127.1.2.3/test"));
+        assert!(SafetyContext::is_localhost_url("http://127.255.255.255/"));
+
+        // 0.0.0.0
+        assert!(SafetyContext::is_localhost_url("http://0.0.0.0/"));
+        assert!(SafetyContext::is_localhost_url("https://0.0.0.0:8080/"));
+
+        // IPv6 loopback
+        assert!(SafetyContext::is_localhost_url("http://[::1]/"));
+        assert!(SafetyContext::is_localhost_url("https://[::1]:8080/"));
+        assert!(SafetyContext::is_localhost_url("http://[0:0:0:0:0:0:0:1]/"));
+
+        // IPv4-mapped IPv6
+        assert!(SafetyContext::is_localhost_url("http://[::ffff:127.0.0.1]/"));
+        assert!(SafetyContext::is_localhost_url("https://[::ffff:127.0.0.1]:80/"));
+        assert!(SafetyContext::is_localhost_url("http://[0:0:0:0:0:ffff:127.0.0.1]/"));
+        assert!(SafetyContext::is_localhost_url("http://[::ffff:7f00:1]/"));
+
+        // IPv6 unspecified
+        assert!(SafetyContext::is_localhost_url("http://[::]/"));
+        assert!(SafetyContext::is_localhost_url("http://[0:0:0:0:0:0:0:0]/"));
+
+        // Octal loopback
+        assert!(SafetyContext::is_localhost_url("http://0177.0.0.1/"));
+        assert!(SafetyContext::is_localhost_url("http://0177.0.0.2/"));
+
+        // Cloud metadata
+        assert!(SafetyContext::is_localhost_url("http://169.254.169.254/"));
+        assert!(SafetyContext::is_localhost_url("http://169.254.1.1/"));
+
+        // DNS rebinding
+        assert!(SafetyContext::is_localhost_url("http://evil.nip.io/"));
+        assert!(SafetyContext::is_localhost_url("http://10.0.0.1.xip.io/"));
+
+        // Should NOT be blocked
         assert!(!SafetyContext::is_localhost_url("http://example.com"));
+        assert!(!SafetyContext::is_localhost_url("https://github.com/user/repo"));
+        assert!(!SafetyContext::is_localhost_url("http://192.168.1.100/")); // private but not localhost
     }
 
     #[test]
