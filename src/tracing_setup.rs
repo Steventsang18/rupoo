@@ -41,12 +41,12 @@ pub fn init_logging(verbose: bool) {
         if verbose {
             builder
                 .with_env_filter(EnvFilter::from_default_env()
-                    .add_directive("debug".parse().unwrap()))
+                    .add_directive("debug".parse().unwrap_or_else(|_| tracing::Level::DEBUG.into())))
                 .init();
         } else {
             builder
                 .with_env_filter(EnvFilter::from_default_env()
-                    .add_directive("info".parse().unwrap()))
+                    .add_directive("info".parse().unwrap_or_else(|_| tracing::Level::INFO.into())))
                 .init();
         }
     };
@@ -68,13 +68,13 @@ pub fn init_logging(verbose: bool) {
             if verbose {
                 builder
                     .with_env_filter(EnvFilter::from_default_env()
-                        .add_directive("debug".parse().unwrap()))
+                        .add_directive("debug".parse().unwrap_or_else(|_| tracing::Level::DEBUG.into())))
                     .init();
                 eprintln!("[rupoo] verbose logging enabled");
             } else {
                 builder
                     .with_env_filter(EnvFilter::from_default_env()
-                        .add_directive("info".parse().unwrap()))
+                        .add_directive("info".parse().unwrap_or_else(|_| tracing::Level::INFO.into())))
                     .init();
             }
         }

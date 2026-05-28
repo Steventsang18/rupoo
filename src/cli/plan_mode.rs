@@ -97,7 +97,7 @@ impl AgentUiBridge {
     }
 
     pub(super) async fn run_plan(&self, plan: &mut rupoo::task::Plan) {
-        *self.pending_plan.lock().unwrap() = Some(plan.clone());
+        *self.pending_plan.lock().unwrap_or_else(|e| e.into_inner()) = Some(plan.clone());
         loop {
             // Send step progress update
             let step_name = plan.steps.get(plan.current_step_index)
@@ -120,8 +120,8 @@ impl AgentUiBridge {
                             ChatMessage::assistant(output),
                         ));
                         let _ = self.ui_tx.send(AgentToTui::Idle);
-                        *self.pending_plan.lock().unwrap() = None;
-                        *self.pending_step_index.lock().unwrap() = None;
+                        *self.pending_plan.lock().unwrap_or_else(|e| e.into_inner()) = None;
+                        *self.pending_step_index.lock().unwrap_or_else(|e| e.into_inner()) = None;
                         break;
                     }
                 }
@@ -131,8 +131,8 @@ impl AgentUiBridge {
                         ChatMessage::assistant(self.extract_output(plan)),
                     ));
                     let _ = self.ui_tx.send(AgentToTui::Idle);
-                    *self.pending_plan.lock().unwrap() = None;
-                    *self.pending_step_index.lock().unwrap() = None;
+                    *self.pending_plan.lock().unwrap_or_else(|e| e.into_inner()) = None;
+                    *self.pending_step_index.lock().unwrap_or_else(|e| e.into_inner()) = None;
                     break;
                 }
                 Ok(rupoo::agent::StepOutcome::Failed(e)) => {
@@ -140,8 +140,8 @@ impl AgentUiBridge {
                         ChatMessage::assistant(format!("Failed: {e}")),
                     ));
                     let _ = self.ui_tx.send(AgentToTui::Idle);
-                    *self.pending_plan.lock().unwrap() = None;
-                    *self.pending_step_index.lock().unwrap() = None;
+                    *self.pending_plan.lock().unwrap_or_else(|e| e.into_inner()) = None;
+                    *self.pending_step_index.lock().unwrap_or_else(|e| e.into_inner()) = None;
                     break;
                 }
                 Ok(rupoo::agent::StepOutcome::WaitingForInput(p)) => {
@@ -149,8 +149,8 @@ impl AgentUiBridge {
                         ChatMessage::assistant(format!("Input needed: {p}")),
                     ));
                     let _ = self.ui_tx.send(AgentToTui::Idle);
-                    *self.pending_plan.lock().unwrap() = None;
-                    *self.pending_step_index.lock().unwrap() = None;
+                    *self.pending_plan.lock().unwrap_or_else(|e| e.into_inner()) = None;
+                    *self.pending_step_index.lock().unwrap_or_else(|e| e.into_inner()) = None;
                     break;
                 }
                 Ok(rupoo::agent::StepOutcome::RequiresApproval { ref tool_name, ref params, step_index }) => {
@@ -223,8 +223,8 @@ impl AgentUiBridge {
                         ChatMessage::assistant(format!("Error: {e}")),
                     ));
                     let _ = self.ui_tx.send(AgentToTui::Idle);
-                    *self.pending_plan.lock().unwrap() = None;
-                    *self.pending_step_index.lock().unwrap() = None;
+                    *self.pending_plan.lock().unwrap_or_else(|e| e.into_inner()) = None;
+                    *self.pending_step_index.lock().unwrap_or_else(|e| e.into_inner()) = None;
                     break;
                 }
             }
@@ -273,8 +273,8 @@ impl AgentUiBridge {
         plan: &rupoo::task::Plan,
         step_index: usize,
     ) {
-        *self.pending_plan.lock().unwrap() = Some(plan.clone());
-        *self.pending_step_index.lock().unwrap() = Some(step_index);
+        *self.pending_plan.lock().unwrap_or_else(|e| e.into_inner()) = Some(plan.clone());
+        *self.pending_step_index.lock().unwrap_or_else(|e| e.into_inner()) = Some(step_index);
         let (tool_name, params_json) =
             if let Some(rupoo::task::Step::ToolCall {
                 ref tool_name,

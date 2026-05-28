@@ -48,6 +48,7 @@ const CODE_THEME: &str = "base16-ocean.dark";
 // ═══════════════════════════════════════════════════════════════════════════
 
 /// Render a complete markdown string.
+#[allow(dead_code)]
 pub fn render_markdown(text: &str) {
     let mut in_code = false;
     let mut code_lang = String::new();

@@ -82,8 +82,8 @@ impl ApprovalExt for AgentUiBridge {
     /// Handle user approval (ApproveTool or ApproveAll).
     /// Shared logic for both ApproveTool and ApproveAll commands.
     async fn handle_approval(&mut self) {
-        let pending = self.pending_plan.lock().unwrap().clone();
-        let step_idx = *self.pending_step_index.lock().unwrap();
+        let pending = self.pending_plan.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        let step_idx = *self.pending_step_index.lock().unwrap_or_else(|e| e.into_inner());
         if let (Some(mut plan), Some(step_index)) = (pending, step_idx) {
             self.execute_approved_tool(&mut plan, step_index).await;
             self.run_plan(&mut plan).await;
@@ -99,8 +99,8 @@ impl ApprovalExt for AgentUiBridge {
     /// Mark the step as Failed, do not execute.
     async fn handle_denial(&mut self) {
         // User denied the tool call — mark the step as Failed, do not execute.
-        let pending = self.pending_plan.lock().unwrap().clone();
-        let step_idx = *self.pending_step_index.lock().unwrap();
+        let pending = self.pending_plan.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        let step_idx = *self.pending_step_index.lock().unwrap_or_else(|e| e.into_inner());
         if let (Some(mut plan), Some(step_index)) = (pending, step_idx) {
             let pid = plan.id.clone();
 

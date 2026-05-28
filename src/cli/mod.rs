@@ -14,7 +14,7 @@ mod chat_mode;
 mod plan_mode;
 mod approval;
 
-pub use rupoo::{AgentToTui, ApprovalChoice, ChatMessage, PendingTool, ToolPhase, TuiToAgent};
+pub use rupoo::{AgentToTui, ChatMessage, PendingTool, ToolPhase, TuiToAgent};
 pub use app::RupooApp;
 
 use std::io::{self, Write};

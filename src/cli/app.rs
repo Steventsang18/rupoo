@@ -1,9 +1,8 @@
 //! REPL application state — stripped down for native terminal output.
 
-use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use crossbeam_channel::Sender;
-use rupoo::{AgentToTui, ApprovalChoice, ChatMessage, PendingTool, TuiToAgent};
+use rupoo::{AgentToTui, ChatMessage, PendingTool, TuiToAgent};
 use rupoo::db::TaskRepo;
 use rupoo::llm::ConversationHistory;
 use rupoo::task::Plan;
@@ -13,6 +12,7 @@ use rupoo::task::Plan;
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(dead_code)]
 pub enum OverlayState {
     None,
     Approval {
@@ -31,6 +31,7 @@ pub struct SessionTab {
     pub id: String,
     pub label: String,
     pub active: bool,
+    #[allow(dead_code)]
     pub has_context: bool,
 }
 
@@ -51,8 +52,11 @@ impl SessionTab {
 
 #[derive(Debug, Clone)]
 pub struct CommandDef {
+    #[allow(dead_code)]
     pub name: &'static str,
+    #[allow(dead_code)]
     pub description: &'static str,
+    #[allow(dead_code)]
     pub category: &'static str,
 }
 
@@ -66,6 +70,7 @@ impl CommandDef {
 // Main app state
 // ---------------------------------------------------------------------------
 
+#[allow(dead_code)]
 pub struct RupooApp {
     pub overlay: OverlayState,
     pub sessions: Vec<SessionTab>,
@@ -73,7 +78,6 @@ pub struct RupooApp {
     pub token_in: u64,
     pub token_out: u64,
     pub pending_tool: Option<PendingTool>,
-    pub approval_choice: Option<ApprovalChoice>,
     pub cmd_query: String,
     pub cmd_selected: usize,
     pub available_commands: Vec<CommandDef>,
@@ -101,6 +105,7 @@ pub struct RupooApp {
     pub approve_all: bool,
 }
 
+#[allow(dead_code)]
 impl RupooApp {
     pub fn set_repo(mut self, repo: Arc<TaskRepo>) -> Self {
         self.repo = Some(repo);
@@ -143,7 +148,6 @@ impl RupooApp {
             token_in: 0,
             token_out: 0,
             pending_tool: None,
-            approval_choice: None,
             cmd_query: String::new(),
             cmd_selected: 0,
             available_commands,
@@ -288,6 +292,7 @@ impl RupooApp {
         self.overlay = OverlayState::None;
     }
 
+    #[allow(dead_code)]
     pub fn filtered_commands(&self) -> Vec<CommandDef> {
         let q = self.cmd_query.to_lowercase();
         if q.is_empty() {
