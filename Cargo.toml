@@ -1,12 +1,12 @@
 [package]
 name = "rupoo"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 authors = ["Steventsang18"]
-description = "AI-powered Terminal Assistant — TUI-based plan execution agent with memory, skills, and MCP support"
+description = "AI-powered Terminal Assistant — native REPL with plan execution, memory, and MCP support"
 repository = "https://github.com/Steventsang18/rupoo"
 license = "MIT"
-keywords = ["ai", "agent", "tui", "llm", "plan-execution"]
+keywords = ["ai", "agent", "repl", "llm", "plan-execution"]
 categories = ["command-line-utilities", "artificial-intelligence"]
 
 [features]
@@ -28,11 +28,12 @@ clap = { version = "4", features = ["derive"] }
 async-trait = "0.1"
 rig-core = "0.30"
 futures = "0.3"
-ratatui = "0.29"
-crossterm = "0.28"
 crossbeam-channel = "0.5"
-tui-textarea = "0.7"
 unicode-width = "0.2"
+rustyline = "15"
+owo-colors = "4"
+syntect = "5"
+indicatif = "0.17"
 egui = { version = "0.27", optional = true }
 tray-icon = { version = "0.24", optional = true }
 git2 = { version = "0.19", features = ["vendored-libgit2"] }
@@ -49,7 +50,7 @@ path_jail = "0.3"
 name = "Rupoo"
 identifier = "com.plan-executor.agent"
 icon = []
-version = "0.2.0"
+version = "0.3.0"
 category = "Developer Tools"
 short_description = "AI-powered plan execution agent"
 long_description = "A desktop AI assistant with plan execution, memory, and skills management."

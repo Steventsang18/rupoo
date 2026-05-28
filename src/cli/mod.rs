@@ -1,7 +1,13 @@
+//! REPL-based CLI — native terminal output, rustyline input.
+//!
+//! No TUI framework. Terminal handles scrolling and resize.
+//! We just render content to stdout and let the terminal do the rest.
+
 pub mod app;
 pub mod cmds;
 pub mod handlers;
-mod ui;
+pub mod output;
+pub mod markdown;
 
 mod bridge;
 mod chat_mode;
@@ -9,68 +15,31 @@ mod plan_mode;
 mod approval;
 
 pub use rupoo::{AgentToTui, ApprovalChoice, ChatMessage, PendingTool, ToolPhase, TuiToAgent};
-pub use ui::render;
-pub use app::{FocusTarget, InputMode, OverlayState, RupooApp, SessionTab};
+pub use app::RupooApp;
 
-use std::io::{self, stdout, Write};
+use std::io::{self, Write};
 
-use crossterm::{
-    cursor::SetCursorStyle,
-    event::{
-        Event, KeyCode, KeyEventKind,
-    },
-    execute,
-    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen,
-        LeaveAlternateScreen},
-};
-
+use owo_colors::OwoColorize;
 use crossbeam_channel::{Receiver, Sender};
 use rupoo::db::TaskRepo;
 use rupoo::agent::Agent;
 use rupoo::llm::ConversationHistory;
 
 // ═══════════════════════════════════════════════════════════════════════════
-// E1: TuiSession — explicit lifecycle (init → run → cleanup)
+// REPL Session
 // ═══════════════════════════════════════════════════════════════════════════
 
-/// RAII guard: restores the terminal on drop (normal exit or panic unwind).
-struct TerminalGuard;
-
-impl Drop for TerminalGuard {
-    fn drop(&mut self) {
-        // Disable mouse tracking modes before leaving alternate screen
-        let _ = write!(stdout(), "\x1b[?1000l\x1b[?1006l");
-        let _ = execute!(
-            stdout(),
-            LeaveAlternateScreen,
-            crossterm::cursor::Show,
-            SetCursorStyle::DefaultUserShape,
-        );
-        let _ = disable_raw_mode();
-    }
-}
-
-/// E1: TuiSession — owns terminal, app state, and agent channels.
-///
-/// Lifecycle:
-///   1. `TuiSession::new(...)` — raw mode, alt screen, DB loading
-///   2. `session.run()` — event loop (blocks until quit)
-///   3. On exit/drop — TerminalGuard restores terminal
-pub struct TuiSession {
-    terminal: ratatui::Terminal<ratatui::backend::CrosstermBackend<io::Stdout>>,
+pub struct ReplSession {
     app: RupooApp,
-    /// Agent-to-TUI message channel (taken out before event loop to
-    /// avoid borrow conflicts with crossbeam_channel::select!).
-    ui_rx: Option<crossbeam_channel::Receiver<AgentToTui>>,
+    ui_rx: Option<Receiver<AgentToTui>>,
+    rl: rustyline::DefaultEditor,
+    /// Streaming state for current assistant response
+    stream_state: markdown::StreamState,
+    /// Timestamp when current generation started
+    gen_start: Option<std::time::Instant>,
 }
 
-impl TuiSession {
-    /// E1: Initialize terminal, create app state with pre-loaded data.
-    ///
-    /// Steps:
-    ///   - Enable raw mode + alternate screen + mouse capture
-    ///   - Create the RupooApp with pre-loaded sessions and model label
-    ///   - No new threads or tokio runtimes — data is loaded by caller
+impl ReplSession {
     pub fn new(
         agent_tx: Option<Sender<TuiToAgent>>,
         ui_rx: Option<Receiver<AgentToTui>>,
@@ -79,32 +48,9 @@ impl TuiSession {
         model_label: String,
         rt_handle: tokio::runtime::Handle,
     ) -> Result<Self, &'static str> {
-        // ── Terminal init ───────────────────────────────────────────────
-        if enable_raw_mode().is_err() {
-            return Err("not_a_tty");
-        }
-        let mut sout = stdout();
-        if execute!(
-            sout,
-            EnterAlternateScreen,
-            SetCursorStyle::BlinkingBar,
-        )
-        .is_err()
-        {
-            return Err("terminal_setup_failed");
-        }
-        // Enable mouse modes 1000 (basic press/release/scroll) + 1006 (SGR coordinates).
-        // NOT mode 1002 (drag tracking) — this lets terminal-native text selection work.
-        let _ = write!(sout, "\x1b[?1000h\x1b[?1006h");
-        let backend = ratatui::backend::CrosstermBackend::new(sout);
-        let terminal =
-            ratatui::Terminal::new(backend).map_err(|_| "terminal_setup_failed")?;
-
-        // ── Create app with pre-loaded data (no thread spawns) ───────────
         let mut app = RupooApp::new(agent_tx, rt_handle);
         app.model_label = model_label;
 
-        // ── Attach repo and restore sessions ────────────────────────────
         if let Some(r) = repo {
             app = app.set_repo(r);
         }
@@ -115,13 +61,12 @@ impl TuiSession {
             .map(|(id, _, _, _)| id.clone())
             .unwrap_or_else(|| "default".to_string());
 
-        // If DB has sessions, remove the constructor's default "New Chat"
         if !sessions_data.is_empty() {
             app.sessions.retain(|s| s.id != "default");
         }
 
         for (id, label, messages_json, is_active) in &sessions_data {
-            app.sessions.push(SessionTab {
+            app.sessions.push(app::SessionTab {
                 id: id.clone(),
                 label: label.clone(),
                 active: *is_active,
@@ -132,269 +77,495 @@ impl TuiSession {
             }
         }
 
-        // Mirror active session's messages into `messages` for rendering.
         app.messages = app
             .session_messages
             .get(&active_id)
             .cloned()
             .unwrap_or_default();
 
+        // Init rustyline with history
+        let rl = rustyline::DefaultEditor::new()
+            .map_err(|_| "readline_init_failed")?;
+
         Ok(Self {
-            terminal,
             app,
             ui_rx,
+            rl,
+            stream_state: markdown::StreamState::new(),
+            gen_start: None,
         })
     }
 
-    /// E1: Run the TUI event loop.
-    ///
-    /// Terminal cleanup is guaranteed by `TerminalGuard` drop, even on panic.
+    /// Run the REPL main loop.
     pub fn run(&mut self) -> Result<(), &'static str> {
-        let _guard = TerminalGuard;
-        // bracketed paste is implicitly enabled
-
-        // Take the receiver so crossbeam_channel doesn't borrow self.
-        let ui_rx = self.ui_rx.take();
-        let mut needs_redraw = true;
+        // Print welcome
+        output::welcome(env!("CARGO_PKG_VERSION"), &self.app.model_label);
 
         loop {
             if self.app.quit {
                 break Ok(());
             }
 
-            // ── Drain agent events (non-blocking, always) ────────────────
-            if let Some(ref rx) = ui_rx {
-                while let Ok(msg) = rx.try_recv() {
-                    self.app.apply_agent_event(msg);
-                    needs_redraw = true;
+            // If thinking, drain events and show spinner
+            if self.app.thinking {
+                self.drain_and_render()?;
+                continue;
+            }
+
+            // Read input
+            let prompt = self.build_prompt();
+            match self.rl.readline(&prompt) {
+                Ok(line) => {
+                    let input = line.trim().to_string();
+                    if input.is_empty() {
+                        continue;
+                    }
+
+                    // Add to rustyline history
+                    let _ = self.rl.add_history_entry(&input);
+
+                    // Handle slash commands
+                    if input.starts_with('/') {
+                        if self.handle_command(&input) {
+                            continue;
+                        }
+                    }
+
+                    // Submit user message
+                    self.submit_message(&input);
+                }
+                Err(rustyline::error::ReadlineError::Interrupted) => {
+                    // Ctrl+C — interrupt current generation
+                    if self.app.thinking {
+                        self.interrupt_generation();
+                    } else {
+                        // Double Ctrl+C to quit
+                        self.app.ctrl_c_count += 1;
+                        if self.app.ctrl_c_count >= 2 {
+                            println!("\n  Bye! 👋");
+                            break Ok(());
+                        }
+                        println!("\n  {} Press Ctrl+C again to quit", "›".dimmed());
+                    }
+                }
+                Err(rustyline::error::ReadlineError::Eof) => {
+                    // Ctrl+D — quit
+                    println!("\n  Bye! 👋");
+                    break Ok(());
+                }
+                Err(_) => {
+                    break Err("readline_error");
                 }
             }
 
-            // ── Render only when state changed ────────────────────────────
-            if needs_redraw {
-                self.terminal
-                    .draw(|frame| render(frame, frame.area(), &self.app))
-                    .map_err(|_| "terminal_draw_failed")?;
-                needs_redraw = false;
-            }
-
-            // ── Wait for terminal event (never block forever) ────────────────
-            //   thinking=true  → 80ms poll for smooth spinner animation
-            //   thinking=false → 500ms poll to check for agent events
-            use crossterm::event::{poll, read};
-            use std::time::Duration;
-            let poll_dur = if self.app.thinking {
-                Duration::from_millis(33) // ~30fps for smooth spinner/streaming
-            } else {
-                Duration::from_millis(500)
-            };
-            if poll(poll_dur).map_err(|_| "poll_failed")? {
-                if let Ok(e) = read() {
-                    self.handle_event(e);
-                    needs_redraw = true;
-                }
-            } else if self.app.thinking {
-                // timeout — advance spinner, redraw needed
-                self.app.spinner_frame =
-                    self.app.spinner_frame.wrapping_add(1);
-                needs_redraw = true;
-            }
-            // idle timeout — no spinner, just loop back to drain agent events
+            self.app.ctrl_c_count = 0;
         }
     }
 
-    // ═════════════════════════════════════════════════════════════════════
-    // E2: Event dispatch — routes events to the mode-specific handler
-    // ═════════════════════════════════════════════════════════════════════
-
-    /// Route a raw crossterm event through the appropriate handler strategy.
-    fn handle_event(&mut self, event: Event) {
-        let app = &mut self.app;
-
-        // ── Key events: delegate to the mode-specific handler ───────────
-        let mut handled = if let Event::Key(key) = &event {
-            handlers::dispatch(app, key)
+    /// Build the input prompt string.
+    fn build_prompt(&self) -> String {
+        if self.app.thinking {
+            format!("{} ", "⏳".to_string().yellow())
         } else {
-            false
+            format!("{} ", ">".green().bold())
+        }
+    }
+
+    /// Drain agent events and render streaming output.
+    fn drain_and_render(&mut self) -> Result<(), &'static str> {
+        let mut spinner_frame = 0;
+        let mut tool_card_open = false;
+
+        // Take the receiver to avoid borrow conflicts
+        let rx = self.ui_rx.take();
+        
+        loop {
+            // Drain all pending events
+            if let Some(ref rx_ref) = rx {
+                while let Ok(msg) = rx_ref.try_recv() {
+                    match msg {
+                        AgentToTui::StreamChunk { text } => {
+                            output::clear_spinner();
+                            markdown::render_stream_chunk(&text, &mut self.stream_state);
+                        }
+                        AgentToTui::Thinking => {
+                            // Show spinner
+                            output::thinking_spinner(spinner_frame, None);
+                        }
+                        AgentToTui::Message(m) => {
+                            output::clear_spinner();
+                            if m.role == rupoo::MessageRole::User {
+                                // User messages are already printed by submit_message
+                            } else if m.role == rupoo::MessageRole::System {
+                                if m.content.starts_with("🔧") {
+                                    // Tool call start
+                                    output::clear_spinner();
+                                    let (tool_name, args) = parse_tool_call(&m.content);
+                                    output::tool_call_start(&tool_name, &args);
+                                    tool_card_open = true;
+                                } else if m.content.starts_with("✅") && tool_card_open {
+                                    // Tool result — close the card
+                                    let result = m.content.strip_prefix("✅ ").unwrap_or(&m.content);
+                                    output::tool_result(result, result.lines().count() > 8);
+                                    output::tool_call_end(true, None);
+                                    tool_card_open = false;
+                                } else {
+                                    // Other system messages
+                                    if !m.content.is_empty() {
+                                        output::system(&m.content);
+                                    }
+                                }
+                            } else if m.role == rupoo::MessageRole::Assistant {
+                                // Final assistant message — flush any remaining stream
+                                markdown::flush_stream(&mut self.stream_state);
+                                self.stream_state = markdown::StreamState::new();
+                            } else if m.content.contains("Error") {
+                                output::error(&m.content);
+                            }
+                            self.app.push_message(m);
+                            self.app.persist_sessions();
+                        }
+                        AgentToTui::Idle => {
+                            output::clear_spinner();
+                            // Flush any remaining stream
+                            markdown::flush_stream(&mut self.stream_state);
+                            self.stream_state = markdown::StreamState::new();
+                            
+                            // Print footer
+                            if let Some(start) = self.gen_start.take() {
+                                let duration = start.elapsed().as_secs_f64();
+                                let ctx_tokens = self.app.conversation_history.estimated_tokens();
+                                let ctx_budget = self.app.conversation_history.token_budget();
+                                output::assistant_footer(
+                                    duration,
+                                    self.app.token_in,
+                                    self.app.token_out,
+                                    ctx_tokens,
+                                    ctx_budget,
+                                );
+                            }
+                            
+                            self.app.set_idle();
+                            // Put the receiver back
+                            self.ui_rx = rx;
+                            return Ok(());
+                        }
+                        AgentToTui::TokenUpdate { in_count, out_count } => {
+                            self.app.token_in = self.app.token_in.saturating_add(in_count);
+                            self.app.token_out = self.app.token_out.saturating_add(out_count);
+                        }
+                        AgentToTui::ToolStatus { tool_name, phase } => {
+                            let phase_str = match phase {
+                                ToolPhase::Calling => "calling",
+                                ToolPhase::Completed => "completed",
+                            };
+                            self.app.current_tool_status = Some((tool_name.clone(), phase_str.to_string()));
+                        }
+                        AgentToTui::RequestApproval(t) => {
+                            output::clear_spinner();
+                            self.handle_approval(t);
+                        }
+                        AgentToTui::LlmStatus { configured, provider } => {
+                            self.app.llm_configured = configured;
+                            self.app.llm_provider = provider.clone();
+                        }
+                        AgentToTui::StepProgress { step_index, total, step_name } => {
+                            output::clear_spinner();
+                            println!("  {} {}/{}: {}", "▸".yellow().bold(), step_index + 1, total, step_name.dimmed());
+                        }
+                    }
+                }
+            }
+
+            // Show spinner animation while thinking
+            if self.app.thinking {
+                let tool_name = self.app.current_tool_status.as_ref().map(|(n, _)| n.clone());
+                output::thinking_spinner(spinner_frame, tool_name.as_deref());
+                spinner_frame += 1;
+            }
+
+            // Brief sleep to avoid busy-wait
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+    }
+
+    /// Submit a user message to the agent.
+    fn submit_message(&mut self, message: &str) {
+        output::user_message(message);
+
+        self.app.push_message(ChatMessage::user(message.to_string()));
+        self.app.persist_sessions();
+        self.app.scroll_bottom = true;
+
+        // Save input history
+        self.app.input_history.push(message.to_string());
+        if self.app.input_history.len() > 100 {
+            self.app.input_history.remove(0);
+        }
+        self.app.input_history_index = self.app.input_history.len();
+
+        // Send to agent
+        if let Some(ref tx) = self.app.agent_tx {
+            let _ = tx.send(TuiToAgent::SubmitMessage(message.to_string()));
+        }
+
+        self.app.set_thinking();
+        self.gen_start = Some(std::time::Instant::now());
+        self.stream_state = markdown::StreamState::new();
+    }
+
+    /// Handle slash commands.
+    fn handle_command(&mut self, input: &str) -> bool {
+        let parts: Vec<&str> = input.splitn(2, ' ').collect();
+        let cmd = parts[0];
+        let arg = parts.get(1).copied().unwrap_or("");
+
+        match cmd {
+            "/help" | "/h" | "/?" => {
+                println!();
+                println!("  {}", "Commands:".cyan().bold());
+                println!("  {} /help        — show this help", "›".dimmed());
+                println!("  {} /new         — new session", "›".dimmed());
+                println!("  {} /sessions    — list sessions", "›".dimmed());
+                println!("  {} /switch <n>  — switch to session #n", "›".dimmed());
+                println!("  {} /model       — show current model", "›".dimmed());
+                println!("  {} /plan <msg>  — plan mode", "›".dimmed());
+                println!("  {} /clear       — clear screen", "›".dimmed());
+                println!("  {} /quit        — exit rupoo", "›".dimmed());
+                println!();
+                true
+            }
+            "/new" => {
+                self.create_new_session();
+                true
+            }
+            "/sessions" | "/ls" => {
+                self.list_sessions();
+                true
+            }
+            "/switch" | "/s" => {
+                if let Ok(idx) = arg.parse::<usize>() {
+                    self.switch_to_session(idx);
+                } else {
+                    println!("  {} Usage: /switch <number>", "✗".red());
+                }
+                true
+            }
+            "/model" | "/m" => {
+                println!("  {} {}", "Model:".cyan(), self.app.model_label.cyan().bold());
+                true
+            }
+            "/clear" | "/cls" => {
+                print!("\x1b[2J\x1b[H"); // Clear screen + cursor home
+                let _ = io::stdout().flush();
+                true
+            }
+            "/quit" | "/q" | "/exit" => {
+                self.app.quit = true;
+                true
+            }
+            "/plan" => {
+                if !arg.is_empty() {
+                    output::user_message(arg);
+                    if let Some(ref tx) = self.app.agent_tx {
+                        let _ = tx.send(TuiToAgent::SubmitMessage(format!("/plan {}", arg)));
+                    }
+                    self.app.set_thinking();
+                    self.gen_start = Some(std::time::Instant::now());
+                    self.stream_state = markdown::StreamState::new();
+                } else {
+                    println!("  {} Usage: /plan <your goal>", "✗".red());
+                }
+                true
+            }
+            _ => false, // Not a recognized command, treat as regular input
+        }
+    }
+
+    /// Handle tool approval request.
+    fn handle_approval(&mut self, pending: PendingTool) {
+        println!();
+        println!("  {} Approval Required", "⚠".yellow().bold());
+        println!("  {} Tool: {}", "│".dimmed(), pending.tool_name.cyan().bold());
+        let display_args = if pending.args.len() > 80 {
+            format!("{}…", &pending.args[..77])
+        } else {
+            pending.args.clone()
+        };
+        println!("  {} Args:  {}", "│".dimmed(), display_args);
+        println!();
+
+        // Auto-approve if approve_all is set
+        if self.app.approve_all {
+            if let Some(ref tx) = self.app.agent_tx {
+                let _ = tx.send(TuiToAgent::ApproveTool("approved".to_string()));
+            }
+            println!("  {} Auto-approved", "✓".green());
+            return;
+        }
+
+        // Ask user
+        loop {
+            match self.rl.readline("  Approve? [y/n/a(ll)] ") {
+                Ok(line) => {
+                    let answer = line.trim().to_lowercase();
+                    match answer.as_str() {
+                        "y" | "yes" => {
+                            if let Some(ref tx) = self.app.agent_tx {
+                                let _ = tx.send(TuiToAgent::ApproveTool("approved".to_string()));
+                            }
+                            break;
+                        }
+                        "n" | "no" => {
+                            if let Some(ref tx) = self.app.agent_tx {
+                                let _ = tx.send(TuiToAgent::DenyTool);
+                            }
+                            break;
+                        }
+                        "a" | "all" => {
+                            self.app.approve_all = true;
+                            if let Some(ref tx) = self.app.agent_tx {
+                                let _ = tx.send(TuiToAgent::ApproveAll);
+                            }
+                            println!("  {} Auto-approve enabled for this session", "✓".green());
+                            break;
+                        }
+                        _ => continue,
+                    }
+                }
+                Err(_) => {
+                    if let Some(ref tx) = self.app.agent_tx {
+                        let _ = tx.send(TuiToAgent::DenyTool);
+                    }
+                    break;
+                }
+            }
+        }
+    }
+
+    /// Interrupt current generation.
+    fn interrupt_generation(&mut self) {
+        self.app.cancel_flag.store(true, std::sync::atomic::Ordering::Relaxed);
+        output::clear_spinner();
+        markdown::flush_stream(&mut self.stream_state);
+        self.stream_state = markdown::StreamState::new();
+        println!("\n  {} Generation interrupted", "⚠".yellow());
+        self.app.set_idle();
+    }
+
+    /// Create a new session.
+    fn create_new_session(&mut self) {
+        let id = uuid::Uuid::new_v4().to_string();
+        let tab = app::SessionTab {
+            id: id.clone(),
+            label: format!("Chat {}", self.app.sessions.len() + 1),
+            active: true,
+            has_context: false,
         };
 
-        // ── Mouse events (limited mode 1000+1006: scroll + click only) ──
-        // Drag events are NOT tracked, so terminal-native text selection works.
-        if let Event::Mouse(m) = &event {
-            match m.kind {
-                crossterm::event::MouseEventKind::ScrollDown => {
-                    if !app.scroll_bottom {
-                        app.scroll_offset = app.scroll_offset.saturating_add(3);
-                    }
-                    handled = true;
-                }
-                crossterm::event::MouseEventKind::ScrollUp => {
-                    if app.scroll_bottom {
-                        app.scroll_bottom = false;
-                        app.scroll_offset = app.max_scroll_cache.get();
-                    }
-                    app.scroll_offset = app.scroll_offset.saturating_sub(3);
-                    handled = true;
-                }
-                crossterm::event::MouseEventKind::Down(_) => {
-                    // Left column click → switch session
-                    if m.column < 20 && !app.sessions.is_empty() {
-                        let idx = (m.row.saturating_sub(1) as usize) / 2;
-                        if idx < app.sessions.len() {
-                            let new_id = app.sessions[idx].id.clone();
-                            if app.current_session_id() != new_id {
-                                app.switch_session(&new_id);
-                            }
-                        }
-                    }
-                    handled = true;
-                }
-                _ => {}
-            }
+        // Deactivate all
+        for s in &mut self.app.sessions {
+            s.active = false;
         }
 
-        // ── Tab: command completion / focus switching (Chat mode) ──────
-        if !handled
-            && app.input_mode == InputMode::Chat
-            && matches!(
-                &event,
-                Event::Key(key)
-                    if key.code == KeyCode::Tab && key.kind == KeyEventKind::Press
-            )
-        {
-            let input_text = app.input.lines().join("");
-            if input_text.starts_with('/') {
-                let query =
-                    input_text.trim_start_matches('/').to_lowercase();
-                if let Some(cmd) = app
-                    .available_commands
-                    .iter()
-                    .find(|c| c.name.starts_with(&query))
-                {
-                    let mut ta = tui_textarea::TextArea::default();
-                    ta.insert_str(format!("/{}", cmd.name));
-                    app.input = ta;
-                }
-            } else {
-                app.focus = match app.focus {
-                    FocusTarget::Input => FocusTarget::Sessions,
-                    FocusTarget::Sessions => FocusTarget::Input,
-                };
-            }
-            handled = true;
+        // Save current messages
+        let old_id = self.app.current_session_id();
+        self.app.session_messages.insert(old_id, self.app.messages.clone());
+
+        // Switch to new
+        self.app.sessions.push(tab);
+        self.app.messages = Vec::new();
+        self.app.conversation_history = ConversationHistory::new(10).with_token_budget(60000);
+        self.app.persist_sessions();
+
+        println!("  {} New session started", "✓".green());
+    }
+
+    /// List all sessions.
+    fn list_sessions(&self) {
+        println!();
+        println!("  {}", "Sessions:".cyan().bold());
+        for (i, s) in self.app.sessions.iter().enumerate() {
+            let marker = if s.active { "▸" } else { " " };
+            let color = if s.active { "●".green().to_string() } else { "○".dimmed().to_string() };
+            println!("  {} {} [{}] {}", marker, color, i + 1, s.label);
+        }
+        println!();
+    }
+
+    /// Switch to a session by index (1-based).
+    fn switch_to_session(&mut self, idx: usize) {
+        if idx == 0 || idx > self.app.sessions.len() {
+            println!("  {} Invalid session number", "✗".red());
+            return;
         }
 
-        // ── Session navigation (↑/↓/←/→ when Sessions focused) ──────────
-        if !handled
-            && app.input_mode == InputMode::Chat
-            && app.focus == FocusTarget::Sessions
-            && app.sessions.len() > 1
-        {
-            if let Event::Key(key) = &event {
-                if key.kind == KeyEventKind::Press {
-                    let active_id = app.current_session_id();
-                    let active_pos = app.sessions.iter().position(|s| s.id == active_id);
-                    match key.code {
-                        KeyCode::Down | KeyCode::Right => {
-                            if let Some(pos) = active_pos {
-                                let next = (pos + 1) % app.sessions.len();
-                                let new_id = app.sessions[next].id.clone();
-                                if new_id != active_id {
-                                    app.switch_session(&new_id);
-                                }
-                            }
-                            handled = true;
+        let new_id = self.app.sessions[idx - 1].id.clone();
+        let old_id = self.app.current_session_id();
+
+        if new_id == old_id {
+            println!("  {} Already on this session", "│".dimmed());
+            return;
+        }
+
+        // Save current messages
+        self.app.session_messages.insert(old_id, self.app.messages.clone());
+
+        // Switch
+        for s in &mut self.app.sessions {
+            s.active = s.id == new_id;
+        }
+        self.app.messages = self.app.session_messages.get(&new_id).cloned().unwrap_or_default();
+
+        // Load conversation history
+        if let Some(ref repo) = self.app.repo {
+            if let Some(ref handle) = self.app.rt_handle {
+                let repo = std::sync::Arc::clone(repo);
+                let new_id_clone = new_id.clone();
+                if let Ok(ch) = handle.block_on(async {
+                    repo.load_conversation_history(&new_id_clone).await
+                }) {
+                    if let Some(ch) = ch {
+                        self.app.conversation_history = ch;
+                        if self.app.conversation_history.token_budget() == 0 {
+                            self.app.conversation_history = self.app.conversation_history.clone().with_token_budget(60000);
                         }
-                        KeyCode::Up | KeyCode::Left => {
-                            if let Some(pos) = active_pos {
-                                let prev = (pos + app.sessions.len() - 1) % app.sessions.len();
-                                let new_id = app.sessions[prev].id.clone();
-                                if new_id != active_id {
-                                    app.switch_session(&new_id);
-                                }
-                            }
-                            handled = true;
-                        }
-                        KeyCode::Enter => {
-                            app.focus = FocusTarget::Input;
-                            handled = true;
-                        }
-                        _ => {}
                     }
                 }
             }
         }
 
-        // ── Input history ↑/↓ (Chat mode) ──────────────────────────────
-        if !handled && app.input_mode == InputMode::Chat {
-            if let Event::Key(key) = &event {
-                if key.kind == KeyEventKind::Press {
-                    match key.code {
-                        KeyCode::Up if app.input_history_index > 0 => {
-                            app.input_history_index -= 1;
-                            if let Some(prev) =
-                                app.input_history.get(app.input_history_index)
-                            {
-                                let mut ta = tui_textarea::TextArea::default();
-                                ta.insert_str(prev);
-                                app.input = ta;
-                            }
-                            handled = true;
-                        }
-                        KeyCode::Down => {
-                            let next = app.input_history_index + 1;
-                            if next < app.input_history.len() {
-                                app.input_history_index = next;
-                                if let Some(prev) =
-                                    app.input_history.get(next)
-                                {
-                                    let mut ta =
-                                        tui_textarea::TextArea::default();
-                                    ta.insert_str(prev);
-                                    app.input = ta;
-                                }
-                            } else {
-                                app.input_history_index =
-                                    app.input_history.len();
-                                app.input = tui_textarea::TextArea::default();
-                            }
-                            handled = true;
-                        }
-                        _ => {}
-                    }
-                }
-            }
-        }
-
-        // ── Fall through to TextArea (Chat mode) ────────────────────────
-        if !handled && app.input_mode == InputMode::Chat {
-            if let Event::Key(key) = &event {
-                if key.kind == KeyEventKind::Press
-                    || key.kind == KeyEventKind::Repeat
-                {
-                    app.input.input(*key);
-                }
-            }
-        }
+        self.app.persist_sessions();
+        println!("  {} Switched to session {}", "✓".green(), idx);
     }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// Public entry points
+// Helpers
 // ═══════════════════════════════════════════════════════════════════════════
 
-/// Run the interactive TUI with a Rupoo agent engine.
-/// `rt_handle` is the tokio runtime handle — must be captured on a tokio thread.
-/// `tool_executor` is stored in AgentUiBridge for direct approval-time tool
-/// execution (bypassing needs_approval checks to avoid infinite loops).
+/// Parse "🔧 tool_name(args)" into (tool_name, args).
+fn parse_tool_call(content: &str) -> (String, String) {
+    let rest = content.strip_prefix("🔧 ").unwrap_or(content);
+    if let Some(paren_pos) = rest.find('(') {
+        let name = rest[..paren_pos].to_string();
+        let args = rest[paren_pos..].trim_end_matches(')').trim_start_matches('(').to_string();
+        (name, args)
+    } else {
+        (rest.to_string(), String::new())
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Public entry point
+// ═══════════════════════════════════════════════════════════════════════════
+
 pub fn run_tui_with_agent(
     repo: std::sync::Arc<TaskRepo>,
     agent: Agent,
     tool_executor: std::sync::Arc<Box<dyn rupoo::agent::ToolExecutor>>,
     rt_handle: tokio::runtime::Handle,
 ) -> Result<(), &'static str> {
-    // Pre-load UI data on the shared tokio runtime (no new thread, no new runtime).
-    // Must happen before passing rt_handle into the TUI event loop.
     let (sessions_data, model_label, llm_configured, llm_provider, conversation_history, approve_all) = rt_handle.block_on(async {
         let sessions = repo.load_ui_sessions().await.unwrap_or_default();
         let provider = repo
@@ -422,10 +593,9 @@ pub fn run_tui_with_agent(
             .flatten()
             .is_some();
 
-        // Load conversation history for the active session
         let active_session_id = sessions.iter()
-            .find(|s| s.3)  // .3 = is_active (4th element of tuple)
-            .map(|s| s.0.clone())  // .0 = id (1st element)
+            .find(|s| s.3)
+            .map(|s| s.0.clone())
             .unwrap_or_else(|| "default".to_string());
         let mut conversation_history = repo
             .load_conversation_history(&active_session_id)
@@ -433,12 +603,10 @@ pub fn run_tui_with_agent(
             .ok()
             .flatten()
             .unwrap_or_else(|| ConversationHistory::new(10).with_token_budget(60000));
-        // Ensure token budget is set even for histories loaded from DB (older format has max_tokens=0)
         if conversation_history.token_budget() == 0 {
             conversation_history = conversation_history.with_token_budget(60000);
         }
 
-        // Load persisted approve_all setting
         let approve_all = repo
             .get_setting("approve_all")
             .await
@@ -455,11 +623,9 @@ pub fn run_tui_with_agent(
     let (tx_to_agent, rx) = crossbeam_channel::unbounded::<TuiToAgent>();
     let agent_tx = Some(tx_to_agent);
 
-    // Shared cancel flag between TUI and bridge thread
     let cancel_flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let cancel_flag_bridge = std::sync::Arc::clone(&cancel_flag);
 
-    // Spawn the async agent task with panic protection
     let repo_clone = std::sync::Arc::clone(&repo);
     let handle_for_agent = rt_handle.clone();
     std::thread::spawn(move || {
@@ -469,7 +635,7 @@ pub fn run_tui_with_agent(
                     agent,
                     repo: repo_clone,
                     rx,
-                    ui_tx: tx, // moved here — thread owns the AgentToTui sender
+                    ui_tx: tx,
                     pending_plan: std::sync::Mutex::new(None),
                     pending_step_index: std::sync::Mutex::new(None),
                     tool_executor: std::sync::Arc::clone(&tool_executor),
@@ -482,12 +648,11 @@ pub fn run_tui_with_agent(
             });
         }));
         if result.is_err() {
-            eprintln!("[rupoo] agent thread panicked — TUI will be unresponsive");
+            eprintln!("[rupoo] agent thread panicked");
         }
     });
 
-    // E1: Use TuiSession with pre-loaded data — no more thread spawns inside new()
-    let mut session = TuiSession::new(
+    let mut session = ReplSession::new(
         agent_tx,
         Some(ui_rx),
         Some(repo),
@@ -496,11 +661,10 @@ pub fn run_tui_with_agent(
         rt_handle,
     )?;
 
-    // Set LLM status on app
     session.app.llm_configured = llm_configured;
     session.app.llm_provider = llm_provider.clone();
-    // Share cancel flag with app so TUI can signal cancellation
     session.app.cancel_flag = cancel_flag;
+    session.app.approve_all = approve_all;
 
     session.run()
 }
