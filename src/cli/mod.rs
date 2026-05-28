@@ -24,6 +24,7 @@ use crossbeam_channel::{Receiver, Sender};
 use rupoo::db::TaskRepo;
 use rupoo::agent::Agent;
 use rupoo::llm::ConversationHistory;
+use rustyline::config::Configurer;
 
 // ═══════════════════════════════════════════════════════════════════════════
 // REPL Session
@@ -83,9 +84,14 @@ impl ReplSession {
             .cloned()
             .unwrap_or_default();
 
-        // Init rustyline with history
-        let rl = rustyline::DefaultEditor::new()
+        // Init rustyline: emacs mode (default) — supports arrow-key navigation + Home/End
+        let rl_config = rustyline::config::Config::builder()
+            .edit_mode(rustyline::config::EditMode::Emacs)
+            .completion_type(rustyline::config::CompletionType::Circular)
+            .build();
+        let mut rl = rustyline::DefaultEditor::with_config(rl_config)
             .map_err(|_| "readline_init_failed")?;
+        let _ = rl.set_max_history_size(1000);
 
         Ok(Self {
             app,
@@ -98,9 +104,22 @@ impl ReplSession {
 
     /// Run the REPL main loop.
     pub fn run(&mut self) -> Result<(), &'static str> {
+        // Set green blinking bar cursor
+        output::set_cursor_style_bar();
+
         // Print welcome
         output::welcome(env!("CARGO_PKG_VERSION"), &self.app.model_label);
 
+        let result = self.run_loop();
+
+        // Reset cursor style on exit
+        output::reset_cursor_style();
+
+        result
+    }
+
+    /// Inner REPL loop.
+    fn run_loop(&mut self) -> Result<(), &'static str> {
         loop {
             if self.app.quit {
                 break Ok(());
@@ -164,11 +183,7 @@ impl ReplSession {
 
     /// Build the input prompt string.
     fn build_prompt(&self) -> String {
-        if self.app.thinking {
-            format!("{} ", "⏳".to_string().yellow())
-        } else {
-            format!("{} ", ">".green().bold())
-        }
+        format!("{} ", "❯".green().bold())
     }
 
     /// Drain agent events and render streaming output.
@@ -291,7 +306,7 @@ impl ReplSession {
 
     /// Submit a user message to the agent.
     fn submit_message(&mut self, message: &str) {
-        output::user_message(message);
+        output::replace_readline_with_user_message(message);
 
         self.app.push_message(ChatMessage::user(message.to_string()));
         self.app.persist_sessions();

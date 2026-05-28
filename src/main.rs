@@ -10,7 +10,7 @@ mod executor;
 /// Rupoo — AI-powered assistant for your terminal.
 /// Run without subcommands to enter interactive mode.
 #[derive(Parser)]
-#[command(name = "rupoo", version = "0.2.0", about)]
+#[command(name = "rupoo", version = "0.3.0", about)]
 struct Cli {
     /// Show debug-level logs on stderr.
     #[arg(long, global = true)]

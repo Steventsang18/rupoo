@@ -1,4 +1,7 @@
 //! Markdown → ANSI renderer with syntect code highlighting.
+//!
+//! Uses "base16-ocean.dark" theme for dark-terminal code highlighting.
+//! Inline colors align with the output.rs palette.
 
 use owo_colors::OwoColorize;
 use std::io::Write;
@@ -7,6 +10,16 @@ use syntect::highlighting::ThemeSet;
 use syntect::parsing::SyntaxSet;
 
 use std::sync::OnceLock;
+
+use owo_colors::Rgb;
+
+// Palette — must match output.rs
+const AI_HEADER: Rgb  = Rgb(0x58, 0xA6, 0xFF);  // #58a6ff
+const AI_ACCENT: Rgb  = Rgb(0x79, 0xC0, 0xFF);  // #79c0ff
+const USER_BRIGHT: Rgb = Rgb(0x7E, 0xE7, 0x87);  // #7ee787
+const TOOL_PURPLE: Rgb = Rgb(0xD2, 0xA8, 0xFF);  // #d2a8ff
+const DIM_GRAY: Rgb   = Rgb(0x48, 0x4F, 0x58);   // #484f58
+const BORDER_GRAY: Rgb = Rgb(0x30, 0x36, 0x3D);  // #30363d
 
 struct Highlighter {
     ss: SyntaxSet,
@@ -26,6 +39,9 @@ static HIGHLIGHTER: OnceLock<Highlighter> = OnceLock::new();
 fn get_highlighter() -> &'static Highlighter {
     HIGHLIGHTER.get_or_init(Highlighter::new)
 }
+
+/// Name of the syntect theme to use (dark-terminal optimized).
+const CODE_THEME: &str = "base16-ocean.dark";
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Public API
@@ -62,22 +78,22 @@ pub fn render_markdown(text: &str) {
         }
 
         if line.starts_with("### ") {
-            println!("  {}", line.trim_start_matches('#').trim().cyan().bold());
+            println!("  {}", line.trim_start_matches('#').trim().color(AI_HEADER).bold());
             continue;
         }
         if line.starts_with("## ") {
-            println!("  {}", line.trim_start_matches('#').trim().cyan().bold());
+            println!("  {}", line.trim_start_matches('#').trim().color(AI_HEADER).bold());
             continue;
         }
         if line.starts_with("# ") {
-            println!("{}", line.trim_start_matches('#').trim().cyan().bold());
+            println!("{}", line.trim_start_matches('#').trim().color(AI_HEADER).bold());
             continue;
         }
 
         let trimmed = line.trim_start();
         if trimmed.starts_with("- ") || trimmed.starts_with("* ") || trimmed.starts_with("• ") {
             let content = &trimmed[2..];
-            println!("  {} {}", "•".cyan(), render_inline(content));
+            println!("  {} {}", "•".color(AI_ACCENT), render_inline(content));
             continue;
         }
 
@@ -164,7 +180,7 @@ fn process_stream_line(line: &str, state: &mut StreamState) {
         state.code_buffer.push(line.to_string());
         let line_no = state.code_buffer.len();
         let highlighted = highlight_single_line(line, &state.code_lang);
-        println!("  {} {}", format!("{:>3}", line_no).dimmed(), highlighted);
+        println!("  {} {}", format!("{:>3}", line_no).color(DIM_GRAY), highlighted);
         let _ = std::io::stdout().flush();
         return;
     }
@@ -172,10 +188,10 @@ fn process_stream_line(line: &str, state: &mut StreamState) {
     if line.is_empty() {
         println!();
     } else if line.starts_with("### ") || line.starts_with("## ") || line.starts_with("# ") {
-        println!("  {}", line.trim_start_matches('#').trim().cyan().bold());
+        println!("  {}", line.trim_start_matches('#').trim().color(AI_HEADER).bold());
     } else if line.trim_start().starts_with("- ") || line.trim_start().starts_with("* ") {
         let content = &line.trim_start()[2..];
-        println!("  {} {}", "•".cyan(), render_inline(content));
+        println!("  {} {}", "•".color(AI_ACCENT), render_inline(content));
     } else {
         println!("  {}", render_inline(line));
     }
@@ -198,7 +214,7 @@ fn render_inline(text: &str) -> String {
                 }
                 code_content.push(chars.next().unwrap());
             }
-            result.push_str(&code_content.yellow().to_string());
+            result.push_str(&code_content.color(USER_BRIGHT).to_string());
             continue;
         }
 
@@ -220,7 +236,7 @@ fn render_inline(text: &str) -> String {
     result
 }
 
-/// Highlight a single code line using syntect.
+/// Highlight a single code line using syntect (dark theme).
 fn highlight_single_line(line: &str, lang: &str) -> String {
     let hl = get_highlighter();
     let syntax = if lang.is_empty() {
@@ -231,7 +247,7 @@ fn highlight_single_line(line: &str, lang: &str) -> String {
             .unwrap_or_else(|| hl.ss.find_syntax_plain_text())
     };
 
-    let mut highlighter = HighlightLines::new(syntax, &hl.ts.themes["InspiredGitHub"]);
+    let mut highlighter = HighlightLines::new(syntax, &hl.ts.themes[CODE_THEME]);
     let ranges = highlighter.highlight_line(line, &hl.ss).unwrap_or_default();
 
     let mut output = String::new();
@@ -259,15 +275,16 @@ fn flush_code_block(lines: &[String], lang: &str) {
     let lang_label = if lang.is_empty() { "code" } else { lang };
     let width = lines.iter().map(|l| l.len()).max().unwrap_or(20).min(80);
 
+    // Top border: ┌─ rust ─────
     println!(
         "  {}{}{}{}",
-        "┌─ ".magenta().dimmed(),
-        lang_label.magenta().bold(),
+        "┌─ ".color(TOOL_PURPLE),
+        lang_label.color(TOOL_PURPLE).bold(),
         " ",
-        "─".repeat(width.saturating_sub(lang_label.len() + 4)).magenta().dimmed(),
+        "─".repeat(width.saturating_sub(lang_label.len() + 4)).color(BORDER_GRAY),
     );
 
-    let mut highlighter = HighlightLines::new(syntax, &hl.ts.themes["InspiredGitHub"]);
+    let mut highlighter = HighlightLines::new(syntax, &hl.ts.themes[CODE_THEME]);
 
     for (i, line) in lines.iter().enumerate() {
         let line_no = format!("{:>3}", i + 1);
@@ -280,9 +297,10 @@ fn flush_code_block(lines: &[String], lang: &str) {
                 fg.r, fg.g, fg.b, text
             ));
         }
-        println!("  {} {}", line_no.dimmed(), highlighted);
+        println!("  {} {}", line_no.color(DIM_GRAY), highlighted);
     }
 
-    println!("  {}", format!("└{}", "─".repeat(width.saturating_sub(1).min(78))).magenta().dimmed());
+    // Bottom border: └──────
+    println!("  {}", format!("└{}", "─".repeat(width.saturating_sub(1).min(78))).color(BORDER_GRAY));
     println!();
 }
