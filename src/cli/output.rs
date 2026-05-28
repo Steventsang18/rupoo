@@ -1,46 +1,12 @@
 //! ANSI output layer — direct terminal rendering without TUI framework.
-//!
-//! Color palette (dark-terminal optimized):
-//!   ┌──────────────┬────────────┬──────────────────────────────┐
-//!   │ Element      │ Color      │ Usage                        │
-//!   ├──────────────┼────────────┼──────────────────────────────┤
-//!   │ User text    │ #7ee787    │ Bright green — right-aligned │
-//!   │ User accent  │ #3fb950    │ Medium green — separators    │
-//!   │ User dim     │ #238636    │ Dark green — faded lines     │
-//!   │ AI header    │ #58a6ff    │ Soft blue — assistant label  │
-//!   │ AI accent    │ #79c0ff    │ Light blue — inline code     │
-//!   │ Tool card    │ #d2a8ff    │ Purple — tool borders/name   │
-//!   │ Tool result  │ #8b949e    │ Silver — tool output         │
-//!   │ Thinking     │ #e3b341    │ Amber — spinner/text         │
-//!   │ Error        │ #f85149    │ Red — errors                 │
-//!   │ Dim text     │ #484f58    │ Muted gray — footer/line no  │
-//!   │ Separator    │ #30363d    │ Border gray — lines          │
-//!   └──────────────┴────────────┴──────────────────────────────┘
-//!
-//! Reference: GitHub Dark Dimmed + Catppuccin Mocha fusion
+//! Colors come from the runtime-switchable Theme (cli::theme).
 
 use owo_colors::OwoColorize;
 use std::io::Write;
 use unicode_width::UnicodeWidthStr;
 use console::Term;
 
-// ═══════════════════════════════════════════════════════════════════════════
-// Custom color constants (RGB)
-// ═══════════════════════════════════════════════════════════════════════════
-
-use owo_colors::Rgb;
-
-const USER_BRIGHT: Rgb = Rgb(0x7E, 0xE7, 0x87);   // #7ee787
-const USER_MED: Rgb   = Rgb(0x3F, 0xB9, 0x50);     // #3fb950
-const USER_DIM: Rgb   = Rgb(0x23, 0x86, 0x36);     // #238636
-const AI_HEADER: Rgb  = Rgb(0x58, 0xA6, 0xFF);     // #58a6ff
-const AI_ACCENT: Rgb  = Rgb(0x79, 0xC0, 0xFF);     // #79c0ff
-const TOOL_PURPLE: Rgb = Rgb(0xD2, 0xA8, 0xFF);    // #d2a8ff
-const TOOL_DIM: Rgb   = Rgb(0x8B, 0x95, 0x9E);     // #8b949e
-const THINK_AMBER: Rgb = Rgb(0xE3, 0xB3, 0x41);    // #e3b341
-const ERR_RED: Rgb    = Rgb(0xF8, 0x51, 0x49);     // #f85149
-const DIM_GRAY: Rgb   = Rgb(0x48, 0x4F, 0x58);     // #484f58
-const BORDER_GRAY: Rgb = Rgb(0x30, 0x36, 0x3D);    // #30363d
+use super::theme;
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Terminal helpers
@@ -54,11 +20,13 @@ fn terminal_width() -> usize {
 // Cursor style
 // ═══════════════════════════════════════════════════════════════════════════
 
-/// Set cursor style: green blinking bar (thin vertical line).
+/// Set cursor style: blinking bar with theme cursor color.
 pub fn set_cursor_style_bar() {
+    let t = theme::current();
+    let c = t.cursor;
     // DECSCUSR 5 = blinking bar cursor
-    // OSC 12    = set cursor color to green
-    print!("\x1b[5 q\x1b]12;#3fb950\x1b\\");
+    // OSC 12    = set cursor color
+    print!("\x1b[5 q\x1b]12;#{:02x}{:02x}{:02x}\x1b\\", c.0, c.1, c.2);
     let _ = std::io::stdout().flush();
 }
 
@@ -75,11 +43,13 @@ pub fn reset_cursor_style() {
 // ═══════════════════════════════════════════════════════════════════════════
 
 pub fn separator() {
-    println!("{}", "─".repeat(60).color(BORDER_GRAY));
+    let t = theme::current();
+    println!("{}", "─".repeat(60).color(t.border));
 }
 
 pub fn thick_separator() {
-    println!("{}", "━".repeat(60).color(BORDER_GRAY));
+    let t = theme::current();
+    println!("{}", "━".repeat(60).color(t.border));
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -92,21 +62,22 @@ fn print_right_aligned(line: &str, width: usize) {
         println!();
         return;
     }
-    let marker = "▸ ".color(USER_MED).bold().to_string();
-    let content = line.color(USER_BRIGHT).bold().to_string();
+    let t = theme::current();
+    let marker = "▸ ".color(t.user_med).bold().to_string();
+    let content = line.color(t.user_bright).bold().to_string();
     let plain = format!("▸ {}", line);
     let vw = plain.width();
     if vw >= width {
         println!("{}{}", marker, content);
     } else {
         let padding = width - vw;
-        print!("{}{}{}", " ".repeat(padding), marker, content);
-        println!();
+        println!("{}{}{}", " ".repeat(padding), marker, content);
     }
 }
 
 /// Print a right-aligned separator line.
 fn print_right_separator(text: &str, width: usize) {
+    let t = theme::current();
     let max_w = text
         .lines()
         .filter(|l| !l.is_empty())
@@ -115,7 +86,7 @@ fn print_right_separator(text: &str, width: usize) {
         .unwrap_or(10);
     let sep_len = (max_w + 4).min(width);
     let sep_pad = width.saturating_sub(sep_len);
-    println!("{}{}", " ".repeat(sep_pad), "─".repeat(sep_len).color(USER_DIM));
+    println!("{}{}", " ".repeat(sep_pad), "─".repeat(sep_len).color(t.user_dim));
 }
 
 /// Erase the rustyline input line(s) and replace with a right-aligned user message.
@@ -157,29 +128,31 @@ pub fn user_message(text: &str) {
 }
 
 pub fn assistant_header() {
-    println!("{} {}", "◂".color(AI_HEADER), "Rupoo".color(AI_HEADER).bold());
+    let t = theme::current();
+    println!("{} {}", "◂".color(t.ai_header), "Rupoo".color(t.ai_header).bold());
     thick_separator();
 }
 
 pub fn assistant_footer(duration_s: f64, token_in: u64, token_out: u64, ctx_tokens: usize, ctx_budget: usize) {
+    let t = theme::current();
     println!();
     let ctx_pct = if ctx_budget > 0 { ctx_tokens * 100 / ctx_budget } else { 0 };
     let ctx_str = format!("{:.1}k/{}k", ctx_tokens as f64 / 1000.0, ctx_budget / 1000);
 
     let ctx_display = if ctx_pct > 80 {
-        ctx_str.color(ERR_RED).to_string()
+        ctx_str.color(t.error).to_string()
     } else if ctx_pct > 50 {
-        ctx_str.color(THINK_AMBER).to_string()
+        ctx_str.color(t.think).to_string()
     } else {
-        ctx_str.color(USER_MED).to_string()
+        ctx_str.color(t.user_med).to_string()
     };
 
     println!(
         "{} {:.1}s │ {} in │ {} out │ ctx {}",
-        "⏱".color(DIM_GRAY),
+        "⏱".color(t.dim),
         duration_s,
-        token_in.to_string().color(DIM_GRAY),
-        token_out.to_string().color(DIM_GRAY),
+        token_in.to_string().color(t.dim),
+        token_out.to_string().color(t.dim),
         ctx_display,
     );
     thick_separator();
@@ -190,6 +163,7 @@ pub fn assistant_footer(duration_s: f64, token_in: u64, token_out: u64, ctx_toke
 // ═══════════════════════════════════════════════════════════════════════════
 
 pub fn tool_call_start(tool_name: &str, args: &str) {
+    let t = theme::current();
     println!();
     let display_args = if args.len() > 80 {
         format!("{}…", &args[..77])
@@ -198,14 +172,15 @@ pub fn tool_call_start(tool_name: &str, args: &str) {
     };
     println!(
         "{} {} {}({})",
-        "╭─".color(TOOL_PURPLE),
-        "🔧".to_string().color(TOOL_PURPLE),
-        tool_name.color(TOOL_PURPLE).bold(),
-        display_args.color(TOOL_PURPLE),
+        "╭─".color(t.tool_accent),
+        "🔧".to_string().color(t.tool_accent),
+        tool_name.color(t.tool_accent).bold(),
+        display_args.color(t.tool_accent),
     );
 }
 
 pub fn tool_result(result: &str, truncated: bool) {
+    let t = theme::current();
     let lines: Vec<&str> = result.lines().collect();
     let max_lines = 8;
     let display_lines: Vec<&str> = lines.iter().take(max_lines).copied().collect();
@@ -216,33 +191,34 @@ pub fn tool_result(result: &str, truncated: bool) {
         } else {
             line.to_string()
         };
-        println!("{} {}", "│".color(TOOL_DIM), display.color(TOOL_DIM));
+        println!("{} {}", "│".color(t.tool_dim), display.color(t.tool_dim));
     }
 
     if truncated || lines.len() > max_lines {
         let extra = if lines.len() > max_lines { lines.len() - max_lines } else { 0 };
-        println!("{} {}", "│".color(DIM_GRAY), format!("... ({} more lines)", extra).color(DIM_GRAY));
+        println!("{} {}", "│".color(t.dim), format!("... ({} more lines)", extra).color(t.dim));
     }
 }
 
 pub fn tool_call_end(done: bool, duration_s: Option<f64>) {
+    let t = theme::current();
     let status = if done { "✅ done" } else { "⏳ running" };
     let duration_str = duration_s.map(|d| format!(" ({:.1}s)", d)).unwrap_or_default();
     if done {
         println!(
             "{} {}{} {}",
-            "╰─".color(BORDER_GRAY),
-            status.color(USER_MED),
-            duration_str.color(USER_MED),
-            "─".repeat(30).color(BORDER_GRAY),
+            "╰─".color(t.border),
+            status.color(t.user_med),
+            duration_str.color(t.user_med),
+            "─".repeat(30).color(t.border),
         );
     } else {
         println!(
             "{} {}{} {}",
-            "╰─".color(BORDER_GRAY),
-            status.color(THINK_AMBER),
-            duration_str.color(THINK_AMBER),
-            "─".repeat(30).color(BORDER_GRAY),
+            "╰─".color(t.border),
+            status.color(t.think),
+            duration_str.color(t.think),
+            "─".repeat(30).color(t.border),
         );
     }
     println!();
@@ -253,6 +229,7 @@ pub fn tool_call_end(done: bool, duration_s: Option<f64>) {
 // ═══════════════════════════════════════════════════════════════════════════
 
 pub fn thinking_spinner(frame: usize, tool_name: Option<&str>) {
+    let t = theme::current();
     let spinner = match frame % 10 {
         0 => "⠋", 1 => "⠙", 2 => "⠹", 3 => "⠸",
         4 => "⠼", 5 => "⠴", 6 => "⠦", 7 => "⠧",
@@ -267,7 +244,7 @@ pub fn thinking_spinner(frame: usize, tool_name: Option<&str>) {
         None => "Thinking…".to_string(),
     };
 
-    eprint!("\r  {} {} {}   ", spinner.color(THINK_AMBER).bold(), msg.color(THINK_AMBER), dots.color(AI_HEADER));
+    eprint!("\r  {} {} {}   ", spinner.color(t.think).bold(), msg.color(t.think), dots.color(t.ai_header));
     let _ = std::io::stderr().flush();
 }
 
@@ -281,13 +258,15 @@ pub fn clear_spinner() {
 // ═══════════════════════════════════════════════════════════════════════════
 
 pub fn error(msg: &str) {
+    let t = theme::current();
     println!();
-    println!("{} {}", "✗ Error:".color(ERR_RED).bold(), msg.color(ERR_RED));
+    println!("{} {}", "✗ Error:".color(t.error).bold(), msg.color(t.error));
     println!();
 }
 
 pub fn system(msg: &str) {
-    println!("{} {}", "│".color(DIM_GRAY), msg.color(DIM_GRAY));
+    let t = theme::current();
+    println!("{} {}", "│".color(t.dim), msg.color(t.dim));
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -295,11 +274,13 @@ pub fn system(msg: &str) {
 // ═══════════════════════════════════════════════════════════════════════════
 
 pub fn welcome(version: &str, model: &str) {
+    let t = theme::current();
     println!();
-    println!("  {} {}", "Rupoo".color(AI_HEADER).bold(), format!("v{}", version).color(DIM_GRAY));
-    println!("  {} {}", "Model:".color(DIM_GRAY), model.color(AI_ACCENT));
+    println!("  {} {}", "Rupoo".color(t.ai_header).bold(), format!("v{}", version).color(t.dim));
+    println!("  {} {}", "Model:".color(t.dim), model.color(t.ai_accent));
+    println!("  {} Theme: {}", "│".color(t.dim), t.name.color(t.ai_accent));
     println!();
-    println!("  {} /help for commands │ /new for new session │ Ctrl+C to interrupt", "›".color(DIM_GRAY));
+    println!("  {} /help for commands │ /new for new session │ /theme <name> to switch", "›".color(t.dim));
     println!();
     separator();
 }

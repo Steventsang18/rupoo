@@ -93,3 +93,8 @@ pub fn data_dir() -> PathBuf {
         PathBuf::from(".rupoo")
     }
 }
+
+/// Return the history file path `~/.rupoo/history.txt`.
+pub fn history_path() -> PathBuf {
+    data_dir().join("history.txt")
+}

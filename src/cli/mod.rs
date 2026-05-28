@@ -8,6 +8,7 @@ pub mod cmds;
 pub mod handlers;
 pub mod output;
 pub mod markdown;
+pub mod theme;
 
 mod bridge;
 mod chat_mode;
@@ -84,7 +85,7 @@ impl ReplSession {
             .cloned()
             .unwrap_or_default();
 
-        // Init rustyline: emacs mode (default) — supports arrow-key navigation + Home/End
+        // Init rustyline: emacs mode — Ctrl+R search, arrow-key nav, Home/End
         let rl_config = rustyline::config::Config::builder()
             .edit_mode(rustyline::config::EditMode::Emacs)
             .completion_type(rustyline::config::CompletionType::Circular)
@@ -92,6 +93,13 @@ impl ReplSession {
         let mut rl = rustyline::DefaultEditor::with_config(rl_config)
             .map_err(|_| "readline_init_failed")?;
         let _ = rl.set_max_history_size(1000);
+
+        // Persist history to ~/.rupoo/history.txt — survives restarts
+        let history_path = crate::tracing_setup::history_path();
+        if let Some(parent) = history_path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let _ = rl.load_history(&history_path); // ignore error — file may not exist yet
 
         Ok(Self {
             app,
@@ -111,6 +119,10 @@ impl ReplSession {
         output::welcome(env!("CARGO_PKG_VERSION"), &self.app.model_label);
 
         let result = self.run_loop();
+
+        // Save history on exit
+        let history_path = crate::tracing_setup::history_path();
+        let _ = self.rl.save_history(&history_path);
 
         // Reset cursor style on exit
         output::reset_cursor_style();
@@ -344,6 +356,7 @@ impl ReplSession {
                 println!("  {} /sessions    — list sessions", "›".dimmed());
                 println!("  {} /switch <n>  — switch to session #n", "›".dimmed());
                 println!("  {} /model       — show current model", "›".dimmed());
+                println!("  {} /theme <name>— switch theme (dark/light/monokai)", "›".dimmed());
                 println!("  {} /plan <msg>  — plan mode", "›".dimmed());
                 println!("  {} /clear       — clear screen", "›".dimmed());
                 println!("  {} /quit        — exit rupoo", "›".dimmed());
@@ -368,6 +381,41 @@ impl ReplSession {
             }
             "/model" | "/m" => {
                 println!("  {} {}", "Model:".cyan(), self.app.model_label.cyan().bold());
+                true
+            }
+            "/theme" | "/t" => {
+                if arg.is_empty() {
+                    // Show current theme and available options
+                    let current = theme::current_name();
+                    let names: Vec<String> = theme::Theme::all_names()
+                        .iter()
+                        .map(|n| {
+                            if *n == current {
+                                format!("{} (active)", n)
+                            } else {
+                                n.to_string()
+                            }
+                        })
+                        .collect();
+                    println!("  {} Themes: {}", "▸".cyan(), names.join(", "));
+                } else if let Some(t) = theme::Theme::from_name(arg) {
+                    theme::set(t);
+                    output::set_cursor_style_bar();
+                    println!("  {} Switched to {} theme", "✓".green(), arg);
+                    // Persist theme preference
+                    if let Some(ref repo) = self.app.repo {
+                        if let Some(ref handle) = self.app.rt_handle {
+                            let repo = std::sync::Arc::clone(repo);
+                            let theme_name = arg.to_string();
+                            let _ = handle.spawn(async move {
+                                let _ = repo.set_setting("theme", &theme_name).await;
+                            });
+                        }
+                    }
+                } else {
+                    let names = theme::Theme::all_names().join("/");
+                    println!("  {} Unknown theme '{}'. Available: {}", "✗".red(), arg, names);
+                }
                 true
             }
             "/clear" | "/cls" => {
