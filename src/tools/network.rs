@@ -25,11 +25,23 @@ fn extract_host(url: &str) -> Option<String> {
     url.strip_prefix("https://")
         .or_else(|| url.strip_prefix("http://"))
         .and_then(|rest| {
-            // Remove port and path
-            let host = rest.split('/').next().unwrap_or(rest);
-            let hostname = host.split(':').next().unwrap_or(host);
-            // Strip userinfo (e.g. user@host)
-            Some(hostname.rsplit('@').next().unwrap_or(hostname).to_string())
+            // Remove path (first /)
+            let host_port = rest.split('/').next().unwrap_or(rest);
+            // Remove userinfo (user:pass@host → host)
+            let after_at = host_port.rsplit('@').next().unwrap_or(host_port);
+            // Handle IPv6 brackets: [::1]:8080 → [::1]
+            if after_at.starts_with('[') {
+                if let Some(end) = after_at.find(']') {
+                    return Some(after_at[..=end].to_string());
+                }
+            }
+            // Remove port for regular hostnames
+            let hostname = after_at.split(':').next().unwrap_or(after_at);
+            if hostname.is_empty() {
+                None
+            } else {
+                Some(hostname.to_string())
+            }
         })
 }
 
@@ -148,3 +160,16 @@ mod tests {
         assert!(result.is_err());
     }
 }
+
+    #[test]
+    fn test_extract_host() {
+        assert_eq!(extract_host("https://example.com/path"), Some("example.com".to_string()));
+        assert_eq!(extract_host("http://example.com:8080/path"), Some("example.com".to_string()));
+        assert_eq!(extract_host("https://user:pass@host.com/path"), Some("host.com".to_string()));
+        assert_eq!(extract_host("ftp://invalid"), None);
+    }
+
+    #[test]
+    fn test_extract_host_ipv6() {
+        assert_eq!(extract_host("http://[::1]/path"), Some("[::1]".to_string()));
+    }

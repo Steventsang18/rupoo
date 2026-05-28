@@ -553,3 +553,14 @@ fn flush_code_block(lines: &[String], lang: &str) {
     println!("  {}", format!("└{}", "─".repeat(width.saturating_sub(1).min(78))).color(theme::current().border));
     println!();
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_terminal_width_returns_value() {
+        let w = terminal_width();
+        assert!(w >= 40, "terminal_width returned {w}, expected >= 40");
+    }
+}
