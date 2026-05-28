@@ -18,6 +18,9 @@ cargo build
 # Run tests
 cargo test
 
+# If project path contains non-ASCII characters:
+CARGO_TARGET_DIR=/tmp/rupoo-target cargo build --release
+
 # Run with a specific model provider
 ANTHROPIC_API_KEY=sk-ant-... cargo run --release
 ```
@@ -26,65 +29,77 @@ ANTHROPIC_API_KEY=sk-ant-... cargo run --release
 
 ```
 src/
-├── main.rs          # CLI entry point, command dispatch, engine bootstrap
-├── lib.rs           # Crate root, re-exports shared types
-├── agent.rs         # Agent state machine: 7 step types, crash recovery
-├── db.rs            # SQLite (WAL + FTS5): Plan CRUD, checkpoints, memories
-├── llm.rs           # LLM gateway: unified interface for Anthropic/OpenAI/Ollama
+├── main.rs              # Binary entry, feature-gated dispatch (GUI vs CLI)
+├── main_cli.rs          # CLI entry point, command dispatch
+├── lib.rs               # Crate root, re-exports shared types
+├── build_engine.rs      # Engine bootstrap (LLM gateway + DB + agent)
+├── agent.rs             # Agent state machine: 7 step types, crash recovery
+├── db.rs                # SQLite (WAL + FTS5): Plan CRUD, checkpoints, memories, themes
+├── llm.rs               # LLM gateway: unified interface for Anthropic/OpenAI/Ollama
+├── executor.rs          # Step executor dispatch
 ├── cli/
-│   ├── mod.rs       # TUI event loop, AgentUiBridge thread, run_tui_with_agent
-│   ├── app.rs       # App state, InputMode routing, apply_agent_event
-│   ├── ui.rs        # ratatui render: 3-column layout, bubbles, code blocks
-│   ├── handlers.rs  # Input mode strategies (Chat/Thinking/Approval/Palette)
-│   └── cmds/        # CLI subcommands: status, model, session, doctor, logs...
-├── safety.rs        # Sandboxing: path_jail, command blacklist, SSRF protection
-├── mcp.rs           # MCP tool dispatcher + JSON-RPC client
-├── mcp_server.rs    # MCP protocol server (JSON-RPC over stdio)
-├── rig_tools.rs     # Built-in tools: Echo, FileRead, FileWrite, ListDir
-├── skill.rs         # Skill system: JSON files, auto-learn from plans
-├── memory.rs        # Long-term memory with FTS5 full-text search
-├── git.rs           # Git integration via git2 + gh CLI
-├── task.rs          # Step/Plan/Checkpoint type definitions
-├── shared.rs        # Shared types between agent core and TUI (AgentToTui, etc.)
-└── error.rs         # Unified error type
+│   ├── mod.rs           # REPL event loop, Agent bridge thread
+│   ├── app.rs           # App state, session management, message routing
+│   ├── bridge.rs        # Agent ↔ REPL bridge (crossbeam channels)
+│   ├── chat_mode.rs     # Chat Mode handler
+│   ├── plan_mode.rs     # Plan Mode: interactive step execution
+│   ├── approval.rs      # Tool approval workflow
+│   ├── output.rs        # Output formatting: chat bubbles, tool cards, thinking chain
+│   ├── markdown.rs      # Markdown renderer: tables, blockquotes, task lists, links
+│   ├── theme.rs         # Theme system: Dark/Light/Monokai with 12 RGB constants
+│   ├── handlers.rs      # Input mode strategies
+│   └── cmds/            # CLI subcommands: status, model, session, doctor, logs...
+├── tools/
+│   ├── browser.rs       # Browser automation (Navigate/Screenshot/Click/GetText)
+│   ├── search.rs        # Web search integration
+│   ├── network.rs       # HTTP request tool
+│   └── terminal.rs      # Terminal command execution
+├── safety.rs            # Sandboxing: path_jail, command blacklist, SSRF protection
+├── mcp.rs               # MCP tool dispatcher + JSON-RPC client
+├── mcp_server.rs        # MCP protocol server (JSON-RPC over stdio)
+├── rig_tools.rs         # Built-in tools: Echo, FileRead, FileWrite, ListDir
+├── skill.rs             # Skill system: JSON files, auto-learn from plans
+├── memory.rs            # Long-term memory with FTS5 full-text search
+├── git.rs               # Git integration via git2 + gh CLI
+├── task.rs              # Step/Plan/Checkpoint type definitions
+├── shared.rs            # Shared types between agent core and REPL
+├── error.rs             # Unified error type
+├── tracing_setup.rs     # Logging configuration
+├── gui.rs               # GUI mode (feature-gated)
+└── tray.rs              # System tray (feature-gated)
 ```
 
 ## Architecture Notes
 
-### Agent ↔ TUI Communication
+### Agent ↔ REPL Communication
 
-The TUI runs on the main thread in a synchronous event loop. The agent engine runs in a separate `AgentUiBridge` thread. Communication uses `crossbeam-channel`:
+The REPL runs on the main thread with rustyline for input. The agent engine runs in a separate bridge thread. Communication uses `crossbeam-channel`:
 
-- **TUI → Agent**: `TuiToAgent { SubmitMessage, ApproveTool, DenyTool }`
-- **Agent → TUI**: `AgentToTui { Message, Thinking, Idle, TokenUpdate, RequestApproval }`
+- **REPL → Agent**: `TuiToAgent { SubmitMessage, ApproveTool, ApproveAll, DenyTool, Cancel }`
+- **Agent → REPL**: `AgentToTui { Message, Thinking, Idle, TokenUpdate, RequestApproval }`
 
-### TextArea Serialization
+### Theme System
 
-`tui_textarea::TextArea` cannot be serialized. The pattern used:
+Themes are stored in SQLite and loaded at startup via `OnceLock + RwLock`. All output modules read colors from `theme::current()`. Three built-in themes: Dark (GitHub Dark Dimmed + Catppuccin Mocha), Light (GitHub Light), Monokai.
 
-```rust
-// App state holds both:
-pub struct RupooApp {
-    pub input: TextArea<'static>,   // runtime only, NOT serialized
-    #[serde(skip)]
-    pub input_text: String,         // mirror for serde
-}
-```
+### Streaming Code Block Rendering
 
-On save: copy `input.lines()` → `input_text`. On restore: `TextArea::from(input_text.split('\n'))`.
+Two-phase rendering eliminates flicker:
+1. **Stream phase**: Fast `│` placeholders with plain-colored text
+2. **Completion phase**: Erase block, rewrite with syntect highlighting + line numbers
 
-### TTY Requirement
+### Terminal Requirements
 
-The TUI requires a TTY (`enable_raw_mode()`). Subcommands (`status`, `doctor`, `logs`) work in pipes.
+The REPL requires a TTY for rustyline. Subcommands (`status`, `doctor`, `logs`) work in pipes. The green blinking bar cursor uses DECSCUSR escape sequences.
 
 ## Pull Request Process
 
-1. **Fork** the repository and create a feature branch from `main`.
+1. **Fork** the repository and create a feature branch from `master`.
 2. **Run tests**: `cargo test --lib && cargo test`
 3. **Run clippy**: `cargo clippy -- -D warnings`
 4. **Format**: `cargo fmt`
 5. **Commit** with a clear message describing the change.
-6. **Open a PR** targeting `main`.
+6. **Open a PR** targeting `master`.
 
 ## Reporting Bugs
 
@@ -103,7 +118,6 @@ Releases are managed via GitHub Releases with Git tags and a pre-built binary.
 
 ```bash
 # 1. Ensure the version is up to date in Cargo.toml
-#    (update version field, sync bundle metadata version)
 
 # 2. Run final checks
 cargo test --lib && cargo test
@@ -114,22 +128,21 @@ cargo fmt --check
 cargo build --release
 
 # 4. Tag the release
-git tag -a v0.2.0 -m "v0.2.0 — AI-powered Terminal Assistant"
+git tag -a v0.3.0 -m "v0.3.0 — AI-powered Terminal Assistant"
 
 # 5. Push the tag
-git push origin v0.2.0
+git push origin v0.3.0
 
 # 6. Create the GitHub Release with binary attachment
-gh release create v0.2.0 \
-  --title "v0.2.0 — AI-powered Terminal Assistant" \
+gh release create v0.3.0 \
+  --title "v0.3.0 — AI-powered Terminal Assistant" \
   --notes "## Release Notes
 
 ### ✨ Features
 - ... (list key changes since last release)
 
 ### 📦 Binary
-- ARM64 macOS binary attached (~14 MB)
-- Other platforms: build from source with \`cargo build --release\`
+- Build from source with \`cargo build --release\`
 " \
   target/release/rupoo
 ```
@@ -138,18 +151,9 @@ gh release create v0.2.0 \
 
 This project follows **Semantic Versioning** (SemVer):
 
-- **Patch** (0.2.x): Bug fixes, minor improvements — backward compatible
+- **Patch** (0.3.x): Bug fixes, minor improvements — backward compatible
 - **Minor** (0.x.0): New features, non-breaking API changes
 - **Major** (x.0.0): Breaking changes, significant architectural shifts
-
-### Pre-release Builds
-
-For testing before a full release:
-
-```bash
-cargo build --release
-./target/release/rupoo --version
-```
 
 ## Code Style
 
