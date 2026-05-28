@@ -155,14 +155,14 @@ impl Agent {
         repo: &TaskRepo,
     ) -> AgentResult<String> {
         let api_key = repo.get_setting(&format!("api_key.{}", provider)).await
-            .map_err(|e| AgentError::Other(format!("DB error: {}", e)))?
-            .ok_or_else(|| AgentError::Other(format!("No API key for '{}'", provider)))?;
+            .map_err(|e| AgentError::Config(format!("DB error: {}", e)))?
+            .ok_or_else(|| AgentError::Config(format!("No API key for '{}'", provider)))?;
 
         let llm_provider = match provider {
             "anthropic" => crate::llm::LlmProvider::Anthropic,
             "openai" => crate::llm::LlmProvider::OpenAI,
             "ollama" => crate::llm::LlmProvider::Ollama,
-            _ => return Err(AgentError::Other(format!("Unknown provider: '{}'", provider))),
+            _ => return Err(AgentError::Config(format!("Unknown provider: '{}'", provider))),
         };
 
         let mut cfg = crate::llm::LlmConfig::new(llm_provider, Some(api_key));
@@ -219,7 +219,7 @@ impl Agent {
     {
         // Check if LLM is configured
         let gateway = self.llm_gateway.as_ref()
-            .ok_or_else(|| AgentError::Other("LLM not configured. Set api_key and provider first.".into()))?;
+            .ok_or_else(|| AgentError::Config("LLM not configured. Set api_key and provider first.".into()))?;
 
         // Search memories for context
         let memory_context = self
@@ -440,8 +440,8 @@ impl Agent {
 ///
 /// Load order:
 /// 1. `~/.rupoo/prompt.toml` — per-user customization
-/// 2. `prompt.default.toml` — shipped with the project
-/// 3. Hardcoded default string — always works
+/// 2. `~/.rupoo/prompt.default.toml` — shipped defaults
+/// 3. Compiled-in `prompt.default.toml` via `include_str!` — always in sync, no drift
 fn build_system_prompt() -> String {
     let paths = [
         // User config in home directory
@@ -470,48 +470,20 @@ fn build_system_prompt() -> String {
         }
     }
 
-    // Fallback: hardcoded default (identical to prompt.default.toml)
-    "\
-You are Rupoo, an AI-powered terminal assistant running inside the user's terminal.
-You help with software development, file operations, and system tasks.
+    // Fallback: compiled-in prompt.default.toml — always in sync with the file, no hardcoded drift
+    const DEFAULT_PROMPT_TOML: &str = include_str!("../prompt.default.toml");
+    if let Ok(config) = DEFAULT_PROMPT_TOML.parse::<toml::Value>() {
+        if let Some(template) = config
+            .get("system_prompt")
+            .and_then(|v| v.get("template"))
+            .and_then(|v| v.as_str())
+        {
+            return template.to_string();
+        }
+    }
 
-## Your Capabilities
-- File Operations: file_read, file_write, list_directory
-- Web Search: search the internet for information (DuckDuckGo)
-- Terminal Commands: execute shell commands (dangerous commands blocked)
-- HTTP Requests: GET/POST to public URLs (localhost blocked for security)
-- Browser Automation (headless Chrome CLI):
-  - Navigate: load a URL and dump the DOM
-  - Screenshot: capture PNG screenshots
-  - GetText: extract plain text from pages (DOM dump with HTML stripped)
-  - Click: navigate with virtual-time-budget for JS execution
-  - ExtractLinks: parse all <a href> links from a page
-  - JavaScript: returns a clear message (not available in CLI mode)
-- Memory: stores and retrieves context across sessions (FTS5 search)
-- Skills: reusable workflows as JSON files, with auto-trigger on keywords
-- Git: status, commit, create PR
-- MCP Server: exposes tools via JSON-RPC over stdio
-
-## Output Format
-Be concise and structured.
-
-### Reading files:
-Show the file path, then the relevant content or summary.
-
-### Listing directories:
-Show the structure clearly.
-
-### Running commands:
-Show the command, then the output.
-
-### Analyzing code:
-Be specific about what you find. Show relevant snippets.
-
-### Errors:
-Be specific about the problem and the fix.
-
-Keep responses tight. Use Markdown naturally for structure.
-".to_string()
+    // Absolute last resort (should never happen if prompt.default.toml is valid)
+    "You are Rupoo, an AI-powered terminal assistant.".to_string()
 }
 
 // ---------------------------------------------------------------------------

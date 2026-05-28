@@ -53,7 +53,7 @@ pub async fn execute_command(
     // AWS_*, GITHUB_*, TOKEN, SECRET, PASSWORD, KEY, DOCKER_AUTH
 
     let child = cmd.spawn().map_err(|e| {
-        AgentError::Other(format!("failed to start '{}': {e}", command))
+        AgentError::Tool(format!("failed to start '{}': {e}", command))
     })?;
 
     // Use wait_with_output which captures stdout/stderr and waits for exit
@@ -85,8 +85,8 @@ pub async fn execute_command(
                 Ok(format!("Exit code: {}\n{}", output.status, truncated))
             }
         }
-        Ok(Err(e)) => Err(AgentError::Other(format!("command failed: {e}"))),
-        Err(_) => Err(AgentError::Other(format!(
+        Ok(Err(e)) => Err(AgentError::Tool(format!("command failed: {e}"))),
+        Err(_) => Err(AgentError::Tool(format!(
             "Command '{}' timed out after {}s",
             command,
             timeout.as_secs()

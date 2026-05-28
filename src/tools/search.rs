@@ -24,7 +24,7 @@ pub async fn web_search(query: &str, _safety: &SafetyContext) -> AgentResult<Str
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(30))
         .build()
-        .map_err(|e| crate::error::AgentError::Other(format!("reqwest build failed: {e}")))?;
+        .map_err(|e| crate::error::AgentError::Tool(format!("reqwest build failed: {e}")))?;
 
     let response = client
         .get(&url)
@@ -32,10 +32,10 @@ pub async fn web_search(query: &str, _safety: &SafetyContext) -> AgentResult<Str
         .header("Accept", "text/html")
         .send()
         .await
-        .map_err(|e| crate::error::AgentError::Other(format!("search request failed: {e}")))?;
+        .map_err(|e| crate::error::AgentError::Tool(format!("search request failed: {e}")))?;
 
     if !response.status().is_success() {
-        return Err(crate::error::AgentError::Other(format!(
+        return Err(crate::error::AgentError::Tool(format!(
             "search returned status: {}",
             response.status()
         )));
@@ -44,7 +44,7 @@ pub async fn web_search(query: &str, _safety: &SafetyContext) -> AgentResult<Str
     let body = response
         .text()
         .await
-        .map_err(|e| crate::error::AgentError::Other(format!("failed to read response: {e}")))?;
+        .map_err(|e| crate::error::AgentError::Tool(format!("failed to read response: {e}")))?;
 
     // Limit response size to 1MB
     let body = if body.len() > 1_048_576 {

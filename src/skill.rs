@@ -130,7 +130,7 @@ impl SkillManager {
     pub fn load_skill(&self, name: &str) -> AgentResult<SkillDef> {
         let path = self.skills_dir.join(format!("{name}.json"));
         if !path.exists() {
-            return Err(AgentError::Other(format!(
+            return Err(AgentError::Skill(format!(
                 "skill not found: '{name}' (looked at {})",
                 path.display()
             )));
@@ -234,7 +234,7 @@ impl SkillManager {
             info!(name = %name, "skill deleted");
             Ok(())
         } else {
-            Err(AgentError::Other(format!("skill not found: '{name}'")))
+            Err(AgentError::Skill(format!("skill not found: '{name}'")))
         }
     }
 

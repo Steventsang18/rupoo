@@ -42,7 +42,7 @@ pub async fn execute_http_request(
 ) -> AgentResult<String> {
     // SSRF protection: block localhost (string-based fast check)
     if SafetyContext::is_localhost_url(url) {
-        return Err(AgentError::Other(
+        return Err(AgentError::Network(
             "HTTP request to localhost is blocked for security".into(),
         ));
     }
@@ -50,7 +50,7 @@ pub async fn execute_http_request(
     // SSRF protection: DNS resolution check (prevents DNS rebinding)
     if let Some(host) = extract_host(url) {
         if SafetyContext::is_private_host(&host).await {
-            return Err(AgentError::Other(format!(
+            return Err(AgentError::Network(format!(
                 "HTTP request to '{host}' is blocked: resolves to private/local IP (SSRF protection)"
             )));
         }
@@ -59,7 +59,7 @@ pub async fn execute_http_request(
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(30))
         .build()
-        .map_err(|e| AgentError::Other(format!("failed to build HTTP client: {e}")))?;
+        .map_err(|e| AgentError::Network(format!("failed to build HTTP client: {e}")))?;
 
     let mut req = match method {
         HttpMethod::GET => client.get(url),
@@ -82,9 +82,9 @@ pub async fn execute_http_request(
 
     let resp = req.send().await.map_err(|e| {
         if e.is_timeout() {
-            AgentError::Other("HTTP request timed out after 30s".into())
+            AgentError::Network("HTTP request timed out after 30s".into())
         } else {
-            AgentError::Other(format!("HTTP request failed: {e}"))
+            AgentError::Network(format!("HTTP request failed: {e}"))
         }
     })?;
 
@@ -92,11 +92,11 @@ pub async fn execute_http_request(
 
     // Body size limit
     let content = resp.bytes().await.map_err(|e| {
-        AgentError::Other(format!("failed to read response body: {e}"))
+        AgentError::Network(format!("failed to read response body: {e}"))
     })?;
 
     if content.len() > MAX_RESPONSE_BYTES {
-        return Err(AgentError::Other(
+        return Err(AgentError::Network(
             format!(
                 "Response body too large: {} bytes (max {})",
                 content.len(),

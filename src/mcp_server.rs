@@ -232,7 +232,7 @@ pub async fn run_mcp_server() -> AgentResult<()> {
     let mut server = McpServer::new(safety_ctx);
 
     while let Some(line) = lines.next_line().await.map_err(|e| {
-        AgentError::Other(format!("stdin read error: {e}"))
+        AgentError::Mcp(format!("stdin read error: {e}"))
     })? {
         if line.trim().is_empty() {
             continue;

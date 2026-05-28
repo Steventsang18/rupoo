@@ -72,7 +72,7 @@ pub async fn execute_browser_action(
         });
 
     let browser_path = browser.ok_or_else(|| {
-        AgentError::Other(
+        AgentError::Browser(
             "No supported browser found (looked for Chrome/Chromium)".into(),
         )
     })?;
@@ -80,7 +80,7 @@ pub async fn execute_browser_action(
     match action {
         BrowserActionType::Navigate => {
             let url_str = url.ok_or_else(|| {
-                AgentError::Other("URL is required for Navigate action".into())
+                AgentError::Browser("URL is required for Navigate action".into())
             })?;
 
             let output = run_browser_with_timeout(
@@ -107,7 +107,7 @@ pub async fn execute_browser_action(
 
         BrowserActionType::Screenshot => {
             let url_str = url.ok_or_else(|| {
-                AgentError::Other("URL is required for Screenshot action".into())
+                AgentError::Browser("URL is required for Screenshot action".into())
             })?;
 
             // Screenshot is saved to system temp directory (not project dir).
@@ -142,7 +142,7 @@ pub async fn execute_browser_action(
                         .unwrap_or(0)
                 ))
             } else {
-                Err(AgentError::Other(
+                Err(AgentError::Browser(
                     "Screenshot file was not created by browser".into(),
                 ))
             }
@@ -151,7 +151,7 @@ pub async fn execute_browser_action(
         BrowserActionType::GetText => {
             // GetText: Load the page, dump DOM, then strip HTML tags for plain text
             let url_str = url.ok_or_else(|| {
-                AgentError::Other("URL is required for GetText action".into())
+                AgentError::Browser("URL is required for GetText action".into())
             })?;
 
             let output = run_browser_with_timeout(
@@ -191,7 +191,7 @@ pub async fn execute_browser_action(
             // after page load, then dump the resulting DOM.
             // This is a best-effort approach for JS-heavy pages.
             let url_str = url.ok_or_else(|| {
-                AgentError::Other("URL is required for Click action".into())
+                AgentError::Browser("URL is required for Click action".into())
             })?;
 
             let output = run_browser_with_timeout(
@@ -232,7 +232,7 @@ pub async fn execute_browser_action(
         BrowserActionType::ExtractLinks => {
             // ExtractLinks: Load page, dump DOM, parse <a href="..."> tags
             let url_str = url.ok_or_else(|| {
-                AgentError::Other("URL is required for ExtractLinks action".into())
+                AgentError::Browser("URL is required for ExtractLinks action".into())
             })?;
 
             let output = run_browser_with_timeout(
@@ -383,7 +383,7 @@ async fn run_browser_with_timeout(
         .stderr(std::process::Stdio::piped())
         .kill_on_drop(true)
         .spawn()
-        .map_err(|e| AgentError::Other(format!("failed to start browser: {e}")))?;
+        .map_err(|e| AgentError::Browser(format!("failed to start browser: {e}")))?;
 
     // wait_with_output consumes child, but kill_on_drop handles cleanup on drop
     let result = tokio::time::timeout(timeout, child.wait_with_output()).await;
@@ -403,10 +403,10 @@ async fn run_browser_with_timeout(
                 }
             }
         }
-        Ok(Err(e)) => Err(AgentError::Other(format!("browser error: {e}"))),
+        Ok(Err(e)) => Err(AgentError::Browser(format!("browser error: {e}"))),
         Err(_) => {
             // Timeout — child was dropped (kill_on_drop handles cleanup).
-            Err(AgentError::Other(format!(
+            Err(AgentError::Browser(format!(
                 "Browser operation timed out after {}s",
                 timeout_secs
             )))

@@ -92,7 +92,7 @@ impl SafetyContext {
         let base_lower = base.to_lowercase();
         if self.forbidden_commands.contains(&base_lower) {
             warn!(command = %base, "blocked forbidden command");
-            return Err(AgentError::Other(format!(
+            return Err(AgentError::Safety(format!(
                 "Command '{}' is forbidden by security policy",
                 base
             )));
@@ -125,7 +125,7 @@ impl SafetyContext {
 
         // path_jail::join validates the path against traversal attacks
         path_jail::join(&root_canonical, path).map_err(|e| {
-            AgentError::Other(format!(
+            AgentError::Safety(format!(
                 "Access denied to '{}': {e}",
                 path.display()
             ))

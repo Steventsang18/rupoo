@@ -22,7 +22,7 @@ impl GitRepo {
     /// Open a git repository at or above the given path.
     pub fn open(path: &str) -> AgentResult<Self> {
         let repo = git2::Repository::discover(path)
-            .map_err(|e| AgentError::Other(format!("not a git repository: {e}")))?;
+            .map_err(|e| AgentError::Git(format!("not a git repository: {e}")))?;
         let workdir = repo
             .workdir()
             .map(|p| p.to_string_lossy().to_string())
@@ -51,7 +51,7 @@ impl GitRepo {
                         return Ok(branch.trim().to_string());
                     }
                 }
-                Err(AgentError::Other(format!("failed to get HEAD: {e}")))
+                Err(AgentError::Git(format!("failed to get HEAD: {e}")))
             }
         }
     }
@@ -64,7 +64,7 @@ impl GitRepo {
         let statuses = self
             .repo
             .statuses(Some(&mut opts))
-            .map_err(|e| AgentError::Other(format!("status error: {e}")))?;
+            .map_err(|e| AgentError::Git(format!("status error: {e}")))?;
 
         let entries: Vec<StatusEntry> = statuses
             .iter()
@@ -85,30 +85,30 @@ impl GitRepo {
         let mut index = self
             .repo
             .index()
-            .map_err(|e| AgentError::Other(format!("index error: {e}")))?;
+            .map_err(|e| AgentError::Git(format!("index error: {e}")))?;
 
         index
             .add_all(["*"].iter(), git2::IndexAddOption::DEFAULT, None)
-            .map_err(|e| AgentError::Other(format!("add error: {e}")))?;
+            .map_err(|e| AgentError::Git(format!("add error: {e}")))?;
 
         index
             .write()
-            .map_err(|e| AgentError::Other(format!("index write error: {e}")))?;
+            .map_err(|e| AgentError::Git(format!("index write error: {e}")))?;
 
         let oid = index
             .write_tree()
-            .map_err(|e| AgentError::Other(format!("tree write error: {e}")))?;
+            .map_err(|e| AgentError::Git(format!("tree write error: {e}")))?;
 
         let tree = self
             .repo
             .find_tree(oid)
-            .map_err(|e| AgentError::Other(format!("find tree error: {e}")))?;
+            .map_err(|e| AgentError::Git(format!("find tree error: {e}")))?;
 
         // Get signature from git config
         let sig = self
             .repo
             .signature()
-            .map_err(|e| AgentError::Other(format!("signature error: {e}")))?;
+            .map_err(|e| AgentError::Git(format!("signature error: {e}")))?;
 
         // Get parent commit (HEAD)
         let parent = self.repo.head().ok().and_then(|h| h.peel_to_commit().ok());
@@ -118,7 +118,7 @@ impl GitRepo {
         let commit_oid = self
             .repo
             .commit(Some("HEAD"), &sig, &sig, message, &tree, &parents)
-            .map_err(|e| AgentError::Other(format!("commit error: {e}")))?;
+            .map_err(|e| AgentError::Git(format!("commit error: {e}")))?;
 
         let short_hash = &commit_oid.to_string()[..7];
 
@@ -155,17 +155,17 @@ pub fn create_gh_pr(title: &str, body: &str) -> AgentResult<String> {
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit())
         .spawn()
-        .map_err(|e| AgentError::Other(format!("gh CLI not found: {e}")))?;
+        .map_err(|e| AgentError::Git(format!("gh CLI not found: {e}")))?;
 
     if let Some(mut stdin) = child.stdin.take() {
         stdin
             .write_all(body.as_bytes())
-            .map_err(|e| AgentError::Other(format!("write stdin error: {e}")))?;
+            .map_err(|e| AgentError::Git(format!("write stdin error: {e}")))?;
     }
 
     let output = child
         .wait_with_output()
-        .map_err(|e| AgentError::Other(format!("gh pr create error: {e}")))?;
+        .map_err(|e| AgentError::Git(format!("gh pr create error: {e}")))?;
 
     let url = String::from_utf8_lossy(&output.stdout).trim().to_string();
 

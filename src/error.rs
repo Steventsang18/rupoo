@@ -26,6 +26,35 @@ pub enum AgentError {
     #[error("Join error: {0}")]
     Join(String),
 
+    // --- New typed variants (replacing generic Other) ---
+
+    #[error("LLM error: {0}")]
+    Llm(String),
+
+    #[error("Config error: {0}")]
+    Config(String),
+
+    #[error("Git error: {0}")]
+    Git(String),
+
+    #[error("Browser error: {0}")]
+    Browser(String),
+
+    #[error("Network error: {0}")]
+    Network(String),
+
+    #[error("Safety error: {0}")]
+    Safety(String),
+
+    #[error("Skill error: {0}")]
+    Skill(String),
+
+    #[error("Tool error: {0}")]
+    Tool(String),
+
+    #[error("Tray error: {0}")]
+    Tray(String),
+
     #[error("{0}")]
     Other(String),
 }

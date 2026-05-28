@@ -31,7 +31,7 @@ fn create_icon() -> AgentResult<tray_icon::Icon> {
         }
     }
     tray_icon::Icon::from_rgba(rgba, width, height)
-        .map_err(|e| AgentError::Other(format!("icon creation failed: {e}")))
+        .map_err(|e| AgentError::Tray(format!("icon creation failed: {e}")))
 }
 
 /// Build and return a tray icon with a menu. The receiver gets events
@@ -43,8 +43,8 @@ pub fn build_tray() -> AgentResult<(TrayIcon, mpsc::Receiver<TrayCommand>)> {
     let quit_item = MenuItem::new("Quit", true, None);
 
     let menu = Menu::new();
-    menu.append(&open_item).map_err(|e| AgentError::Other(format!("menu append failed: {e}")))?;
-    menu.append(&quit_item).map_err(|e| AgentError::Other(format!("menu append failed: {e}")))?;
+    menu.append(&open_item).map_err(|e| AgentError::Tray(format!("menu append failed: {e}")))?;
+    menu.append(&quit_item).map_err(|e| AgentError::Tray(format!("menu append failed: {e}")))?;
 
     let tray = TrayIconBuilder::new()
         .with_tooltip("Plan Executor Agent")
@@ -52,7 +52,7 @@ pub fn build_tray() -> AgentResult<(TrayIcon, mpsc::Receiver<TrayCommand>)> {
         .with_menu(Box::new(menu))
         .with_menu_on_left_click(true)
         .build()
-        .map_err(|e| AgentError::Other(format!("tray icon build failed: {e}")))?;
+        .map_err(|e| AgentError::Tray(format!("tray icon build failed: {e}")))?;
 
     // Spawn a thread to listen for tray events
     std::thread::spawn(move || {

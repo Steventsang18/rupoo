@@ -344,7 +344,7 @@ impl LlmGateway {
                 let response = agent.prompt(&prompt)
                     .extended_details()
                     .await
-                    .map_err(|e| AgentError::Other(format!("LLM request failed: {e}")))?;
+                    .map_err(|e| AgentError::Llm(format!("LLM request failed: {e}")))?;
                 (response.output, response.total_usage.input_tokens, response.total_usage.output_tokens)
             }
             LlmProvider::OpenAI => {
@@ -352,7 +352,7 @@ impl LlmGateway {
                 let response = agent.prompt(&prompt)
                     .extended_details()
                     .await
-                    .map_err(|e| AgentError::Other(format!("LLM request failed: {e}")))?;
+                    .map_err(|e| AgentError::Llm(format!("LLM request failed: {e}")))?;
                 (response.output, response.total_usage.input_tokens, response.total_usage.output_tokens)
             }
             LlmProvider::Ollama => {
@@ -360,7 +360,7 @@ impl LlmGateway {
                 let response = agent.prompt(&prompt)
                     .extended_details()
                     .await
-                    .map_err(|e| AgentError::Other(format!("LLM request failed: {e}")))?;
+                    .map_err(|e| AgentError::Llm(format!("LLM request failed: {e}")))?;
                 (response.output, response.total_usage.input_tokens, response.total_usage.output_tokens)
             }
         };
@@ -424,15 +424,15 @@ impl LlmGateway {
         match &self.config.provider {
             LlmProvider::Anthropic => {
                 let agent = build_anthropic_agent_streaming(&self.config, &preamble, self.jail_root.as_deref(), safe_mode)?;
-                self.chat_stream_anthropic(agent, messages, max_turns, &mut on_event).await
+                self.chat_stream_generic("Anthropic", agent, messages, max_turns, &mut on_event).await
             }
             LlmProvider::OpenAI => {
                 let agent = build_openai_agent_streaming(&self.config, &preamble, self.jail_root.as_deref(), safe_mode)?;
-                self.chat_stream_openai(agent, messages, max_turns, &mut on_event).await
+                self.chat_stream_generic("OpenAI", agent, messages, max_turns, &mut on_event).await
             }
             LlmProvider::Ollama => {
                 let agent = build_ollama_agent_streaming(&self.config, &preamble, self.jail_root.as_deref(), safe_mode)?;
-                self.chat_stream_ollama(agent, messages, max_turns, &mut on_event).await
+                self.chat_stream_generic("Ollama", agent, messages, max_turns, &mut on_event).await
             }
         }
     }
@@ -474,15 +474,19 @@ impl LlmGateway {
         }
     }
 
-    /// Generic streaming chat handler for Anthropic.
-    async fn chat_stream_anthropic<F>(
+    /// Generic streaming chat handler — shared by all providers.
+    /// Eliminates the previous three near-identical methods.
+    async fn chat_stream_generic<M, F>(
         &self,
-        agent: rig::agent::Agent<rig::providers::anthropic::completion::CompletionModel>,
+        provider_name: &str,
+        agent: rig::agent::Agent<M>,
         messages: Vec<rig::message::Message>,
         max_turns: usize,
         on_event: &mut F,
     ) -> AgentResult<(String, TokenUsage)>
     where
+        M: rig::completion::CompletionModel + 'static,
+        M::StreamingResponse: rig::completion::GetTokenUsage,
         F: FnMut(AgentEvent) + Send,
     {
         use futures::StreamExt;
@@ -498,139 +502,7 @@ impl LlmGateway {
         while let Some(result) = stream.next().await {
             let chunk = match result {
                 Ok(c) => c,
-                Err(e) => return Err(AgentError::Other(format!("Anthropic stream error: {e}"))),
-            };
-            match chunk {
-                rig::agent::MultiTurnStreamItem::StreamAssistantItem(content) => {
-                    match content {
-                        rig::streaming::StreamedAssistantContent::Text(text) => {
-                            let t = text.text.clone();
-                            full_text.push_str(&t);
-                            on_event(AgentEvent::TextDelta(t));
-                        }
-                        _ => {
-                            if let Some((tool_name, args)) = Self::extract_tool_info(&content) {
-                                on_event(AgentEvent::ToolCall {
-                                    tool_name,
-                                    args,
-                                });
-                            }
-                        }
-                    }
-                }
-                rig::agent::MultiTurnStreamItem::StreamUserItem(user_item) => {
-                    let rig::streaming::StreamedUserContent::ToolResult { tool_result, .. } = user_item;
-                    let tool_name = tool_result.call_id.clone()
-                        .unwrap_or_else(|| tool_result.id.clone());
-                    let result_text = Self::extract_tool_result_text(&tool_result.content);
-                    on_event(AgentEvent::ToolResult {
-                        tool_name,
-                        result: result_text,
-                    });
-                }
-                rig::agent::MultiTurnStreamItem::FinalResponse(response) => {
-                    let usage = response.usage();
-                    token_usage.prompt_tokens = usage.input_tokens as u32;
-                    token_usage.completion_tokens = usage.output_tokens as u32;
-                }
-                _ => {}
-            }
-        }
-
-        Ok((full_text, token_usage))
-    }
-
-    /// Generic streaming chat handler for OpenAI.
-    async fn chat_stream_openai<F>(
-        &self,
-        agent: rig::agent::Agent<rig::providers::openai::completion::CompletionModel>,
-        messages: Vec<rig::message::Message>,
-        max_turns: usize,
-        on_event: &mut F,
-    ) -> AgentResult<(String, TokenUsage)>
-    where
-        F: FnMut(AgentEvent) + Send,
-    {
-        use futures::StreamExt;
-
-        let mut stream = agent.stream_prompt("")
-            .with_history(messages)
-            .multi_turn(max_turns)
-            .await;
-
-        let mut full_text = String::new();
-        let mut token_usage = TokenUsage::default();
-
-        while let Some(result) = stream.next().await {
-            let chunk = match result {
-                Ok(c) => c,
-                Err(e) => return Err(AgentError::Other(format!("OpenAI stream error: {e}"))),
-            };
-            match chunk {
-                rig::agent::MultiTurnStreamItem::StreamAssistantItem(content) => {
-                    match content {
-                        rig::streaming::StreamedAssistantContent::Text(text) => {
-                            let t = text.text.clone();
-                            full_text.push_str(&t);
-                            on_event(AgentEvent::TextDelta(t));
-                        }
-                        _ => {
-                            if let Some((tool_name, args)) = Self::extract_tool_info(&content) {
-                                on_event(AgentEvent::ToolCall {
-                                    tool_name,
-                                    args,
-                                });
-                            }
-                        }
-                    }
-                }
-                rig::agent::MultiTurnStreamItem::StreamUserItem(user_item) => {
-                    let rig::streaming::StreamedUserContent::ToolResult { tool_result, .. } = user_item;
-                    let tool_name = tool_result.call_id.clone()
-                        .unwrap_or_else(|| tool_result.id.clone());
-                    let result_text = Self::extract_tool_result_text(&tool_result.content);
-                    on_event(AgentEvent::ToolResult {
-                        tool_name,
-                        result: result_text,
-                    });
-                }
-                rig::agent::MultiTurnStreamItem::FinalResponse(response) => {
-                    let usage = response.usage();
-                    token_usage.prompt_tokens = usage.input_tokens as u32;
-                    token_usage.completion_tokens = usage.output_tokens as u32;
-                }
-                _ => {}
-            }
-        }
-
-        Ok((full_text, token_usage))
-    }
-
-    /// Generic streaming chat handler for Ollama.
-    async fn chat_stream_ollama<F>(
-        &self,
-        agent: rig::agent::Agent<rig::providers::ollama::CompletionModel>,
-        messages: Vec<rig::message::Message>,
-        max_turns: usize,
-        on_event: &mut F,
-    ) -> AgentResult<(String, TokenUsage)>
-    where
-        F: FnMut(AgentEvent) + Send,
-    {
-        use futures::StreamExt;
-
-        let mut stream = agent.stream_prompt("")
-            .with_history(messages)
-            .multi_turn(max_turns)
-            .await;
-
-        let mut full_text = String::new();
-        let mut token_usage = TokenUsage::default();
-
-        while let Some(result) = stream.next().await {
-            let chunk = match result {
-                Ok(c) => c,
-                Err(e) => return Err(AgentError::Other(format!("Ollama stream error: {e}"))),
+                Err(e) => return Err(AgentError::Llm(format!("{provider_name} stream error: {e}"))),
             };
             match chunk {
                 rig::agent::MultiTurnStreamItem::StreamAssistantItem(content) => {
@@ -702,7 +574,7 @@ Respond with a JSON array of steps."#;
 
         // Parse JSON response
         let steps: Vec<StepSpec> = serde_json::from_str(&response)
-            .map_err(|e| AgentError::Other(format!("Failed to parse plan: {e}. Response: {}", response)))?;
+            .map_err(|e| AgentError::Llm(format!("Failed to parse plan: {e}. Response: {}", response)))?;
 
         Ok(steps)
     }
@@ -732,7 +604,7 @@ Respond with a JSON array of steps."#;
                 let response = agent.prompt(&prompt_text)
                     .extended_details()
                     .await
-                    .map_err(|e| AgentError::Other(format!("LLM request failed: {e}")))?;
+                    .map_err(|e| AgentError::Llm(format!("LLM request failed: {e}")))?;
                 (response.output, response.total_usage.input_tokens, response.total_usage.output_tokens)
             }
             LlmProvider::OpenAI => {
@@ -740,7 +612,7 @@ Respond with a JSON array of steps."#;
                 let response = agent.prompt(&prompt_text)
                     .extended_details()
                     .await
-                    .map_err(|e| AgentError::Other(format!("LLM request failed: {e}")))?;
+                    .map_err(|e| AgentError::Llm(format!("LLM request failed: {e}")))?;
                 (response.output, response.total_usage.input_tokens, response.total_usage.output_tokens)
             }
             LlmProvider::Ollama => {
@@ -748,7 +620,7 @@ Respond with a JSON array of steps."#;
                 let response = agent.prompt(&prompt_text)
                     .extended_details()
                     .await
-                    .map_err(|e| AgentError::Other(format!("LLM request failed: {e}")))?;
+                    .map_err(|e| AgentError::Llm(format!("LLM request failed: {e}")))?;
                 (response.output, response.total_usage.input_tokens, response.total_usage.output_tokens)
             }
         };
@@ -875,9 +747,9 @@ fn build_anthropic_agent(
     use rig::agent::AgentBuilder;
 
     let api_key = config.api_key.as_deref()
-        .ok_or_else(|| AgentError::Other("Anthropic requires an API key. Set it via: rupoo config set api_key.anthropic <key>".into()))?;
+        .ok_or_else(|| AgentError::Config("Anthropic requires an API key. Set it via: rupoo config set api_key.anthropic <key>".into()))?;
     let client = rig::providers::anthropic::client::Client::new(api_key)
-        .map_err(|e| AgentError::Other(format!("Anthropic client init failed: {e}")))?;
+        .map_err(|e| AgentError::Llm(format!("Anthropic client init failed: {e}")))?;
     let model = rig::providers::anthropic::completion::CompletionModel::new(client, &config.model);
 
     let builder = AgentBuilder::new(model)
@@ -900,18 +772,18 @@ fn build_openai_agent(
     use rig::agent::AgentBuilder;
 
     let api_key = config.api_key.as_deref()
-        .ok_or_else(|| AgentError::Other("OpenAI requires an API key. Set it via: rupoo config set api_key.openai <key>".into()))?;
+        .ok_or_else(|| AgentError::Config("OpenAI requires an API key. Set it via: rupoo config set api_key.openai <key>".into()))?;
     let client = match &config.base_url {
         Some(custom_url) => {
             rig::providers::openai::client::Client::builder()
                 .api_key(api_key)
                 .base_url(custom_url)
                 .build()
-                .map_err(|e| AgentError::Other(format!("OpenAI client init failed: {e}")))?
+                .map_err(|e| AgentError::Llm(format!("OpenAI client init failed: {e}")))?
         }
         None => {
             rig::providers::openai::client::Client::new(api_key)
-                .map_err(|e| AgentError::Other(format!("OpenAI client init failed: {e}")))?
+                .map_err(|e| AgentError::Llm(format!("OpenAI client init failed: {e}")))?
         }
     };
     let model = rig::providers::openai::completion::CompletionModel::new(
@@ -949,7 +821,7 @@ fn build_ollama_agent(
         .api_key(rig::client::Nothing)
         .base_url(base_url)
         .build()
-        .map_err(|e| AgentError::Other(format!("Ollama client init failed: {e}")))?;
+        .map_err(|e| AgentError::Llm(format!("Ollama client init failed: {e}")))?;
     let model = rig::providers::ollama::CompletionModel::new(client, &config.model);
 
     let builder = AgentBuilder::new(model)
@@ -994,9 +866,9 @@ fn build_anthropic_agent_streaming(
     use rig::agent::AgentBuilder;
 
     let api_key = config.api_key.as_deref()
-        .ok_or_else(|| AgentError::Other("Anthropic requires an API key. Set it via: rupoo config set api_key.anthropic <key>".into()))?;
+        .ok_or_else(|| AgentError::Config("Anthropic requires an API key. Set it via: rupoo config set api_key.anthropic <key>".into()))?;
     let client = rig::providers::anthropic::client::Client::new(api_key)
-        .map_err(|e| AgentError::Other(format!("Anthropic client init failed: {e}")))?;
+        .map_err(|e| AgentError::Llm(format!("Anthropic client init failed: {e}")))?;
     let model = rig::providers::anthropic::completion::CompletionModel::new(client, &config.model);
 
     finish_streaming_agent(AgentBuilder::new(model), preamble, config, jail_root, safe_mode)
@@ -1012,18 +884,18 @@ fn build_openai_agent_streaming(
     use rig::agent::AgentBuilder;
 
     let api_key = config.api_key.as_deref()
-        .ok_or_else(|| AgentError::Other("OpenAI requires an API key. Set it via: rupoo config set api_key.openai <key>".into()))?;
+        .ok_or_else(|| AgentError::Config("OpenAI requires an API key. Set it via: rupoo config set api_key.openai <key>".into()))?;
     let client = match &config.base_url {
         Some(custom_url) => {
             rig::providers::openai::client::Client::builder()
                 .api_key(api_key)
                 .base_url(custom_url)
                 .build()
-                .map_err(|e| AgentError::Other(format!("OpenAI client init failed: {e}")))?
+                .map_err(|e| AgentError::Llm(format!("OpenAI client init failed: {e}")))?
         }
         None => {
             rig::providers::openai::client::Client::new(api_key)
-                .map_err(|e| AgentError::Other(format!("OpenAI client init failed: {e}")))?
+                .map_err(|e| AgentError::Llm(format!("OpenAI client init failed: {e}")))?
         }
     };
     let model = rig::providers::openai::completion::CompletionModel::new(
@@ -1048,7 +920,7 @@ fn build_ollama_agent_streaming(
         .api_key(rig::client::Nothing)
         .base_url(base_url)
         .build()
-        .map_err(|e| AgentError::Other(format!("Ollama client init failed: {e}")))?;
+        .map_err(|e| AgentError::Llm(format!("Ollama client init failed: {e}")))?;
     let model = rig::providers::ollama::CompletionModel::new(client, &config.model);
 
     finish_streaming_agent(AgentBuilder::new(model), preamble, config, jail_root, safe_mode)
