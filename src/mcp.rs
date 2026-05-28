@@ -31,7 +31,7 @@ use rig::tool::Tool;
 // ToolKind enum — replaces Box<dyn Fn> dispatch
 // -----------------------------------------------------------------------------
 
-enum ToolKind {
+pub(crate) enum ToolKind {
     Echo,
     FileRead { jail_root: Option<std::path::PathBuf> },
     FileWrite { jail_root: Option<std::path::PathBuf> },
@@ -273,12 +273,6 @@ impl McpToolExecutor {
                 (t.name().to_string(), t.description().to_string(), schema)
             })
             .collect()
-    }
-
-    /// Register a new tool at runtime.
-    pub async fn register_tool(&self, name: String, tool: Arc<ToolKind>) {
-        let mut reg = self.registry.write().await;
-        reg.insert(name, tool);
     }
 
     /// Unregister a tool at runtime.

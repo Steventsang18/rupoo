@@ -275,7 +275,6 @@ impl TuiSession {
                 app.focus = match app.focus {
                     FocusTarget::Input => FocusTarget::Sessions,
                     FocusTarget::Sessions => FocusTarget::Input,
-                    FocusTarget::Chat => FocusTarget::Input,
                 };
             }
             handled = true;
@@ -424,12 +423,16 @@ pub fn run_tui_with_agent(
             .find(|s| s.3)  // .3 = is_active (4th element of tuple)
             .map(|s| s.0.clone())  // .0 = id (1st element)
             .unwrap_or_else(|| "default".to_string());
-        let conversation_history = repo
+        let mut conversation_history = repo
             .load_conversation_history(&active_session_id)
             .await
             .ok()
             .flatten()
-            .unwrap_or_else(|| ConversationHistory::new(10));
+            .unwrap_or_else(|| ConversationHistory::new(10).with_token_budget(60000));
+        // Ensure token budget is set even for histories loaded from DB (older format has max_tokens=0)
+        if conversation_history.token_budget() == 0 {
+            conversation_history = conversation_history.with_token_budget(60000);
+        }
 
         // Load persisted approve_all setting
         let approve_all = repo
@@ -448,6 +451,10 @@ pub fn run_tui_with_agent(
     let (tx_to_agent, rx) = crossbeam_channel::unbounded::<TuiToAgent>();
     let agent_tx = Some(tx_to_agent);
 
+    // Shared cancel flag between TUI and bridge thread
+    let cancel_flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let cancel_flag_bridge = std::sync::Arc::clone(&cancel_flag);
+
     // Spawn the async agent task with panic protection
     let repo_clone = std::sync::Arc::clone(&repo);
     let handle_for_agent = rt_handle.clone();
@@ -465,6 +472,7 @@ pub fn run_tui_with_agent(
                     approve_all,
                     conversation_history,
                     session_id: "default".to_string(),
+                    cancelled: cancel_flag_bridge,
                 };
                 agent_task.run().await;
             });
@@ -487,6 +495,8 @@ pub fn run_tui_with_agent(
     // Set LLM status on app
     session.app.llm_configured = llm_configured;
     session.app.llm_provider = llm_provider.clone();
+    // Share cancel flag with app so TUI can signal cancellation
+    session.app.cancel_flag = cancel_flag;
 
     session.run()
 }

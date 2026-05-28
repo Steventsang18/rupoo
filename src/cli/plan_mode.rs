@@ -96,15 +96,6 @@ impl AgentUiBridge {
         }
     }
 
-    pub(super) async fn build_plan(
-        &self,
-        text: &str,
-    ) -> anyhow::Result<rupoo::task::Plan> {
-        let label: String = text.chars().take(40).collect();
-        let plan = rupoo::task::Plan::new(&label, vec![rupoo::task::think_step(text)]);
-        Ok(plan)
-    }
-
     pub(super) async fn run_plan(&self, plan: &mut rupoo::task::Plan) {
         *self.pending_plan.lock().unwrap() = Some(plan.clone());
         loop {

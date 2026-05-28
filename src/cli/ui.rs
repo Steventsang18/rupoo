@@ -420,7 +420,7 @@ fn render_input_area(frame: &mut Frame, area: Rect, app: &RupooApp) {
     } else if disabled {
         " Input [blocked] "
     } else {
-        " Input "
+        " Input [Enter: send, Shift+Enter: newline] "
     };
     let block = Block::new()
         .borders(Borders::TOP)
@@ -582,6 +582,20 @@ fn render_right(frame: &mut Frame, area: Rect, app: &RupooApp) {
             } else {
                 "—".to_string()
             }),
+        ]),
+        Line::from(vec![
+            Span::raw(" "),
+            Span::styled("Ctx:", Style::default().fg(Color::DarkGray)),
+            {
+                let est = app.conversation_history.estimated_tokens();
+                let budget = app.conversation_history.token_budget();
+                let pct = if budget > 0 { est * 100 / budget } else { 0 };
+                let color = if pct > 80 { Color::Red } else if pct > 50 { Color::Yellow } else { Color::Green };
+                Span::styled(
+                    if budget > 0 { format!("{}k/{}k", est / 1000, budget / 1000) } else { format!("{}k", est / 1000) },
+                    Style::default().fg(color),
+                )
+            },
         ]),
         Line::from(""),
         Line::from(vec![Span::styled(

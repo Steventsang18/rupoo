@@ -31,15 +31,35 @@ impl InputHandler for ChatHandler {
         if key.kind != KeyEventKind::Press {
             return false;
         }
+        // Reset Ctrl+C counter on any non-Ctrl+C key
+        if !(key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL)) {
+            app.ctrl_c_count = 0;
+        }
         match key.code {
             KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                app.set_quit();
+                if app.thinking {
+                    // Interrupt generation, preserve partial output
+                    app.cancel_thinking();
+                } else {
+                    // Double Ctrl+C to quit
+                    app.ctrl_c_count += 1;
+                    if app.ctrl_c_count >= 2 {
+                        app.set_quit();
+                    } else {
+                        app.push_message(ChatMessage::system("Press Ctrl+C again to quit.".to_string()));
+                    }
+                }
                 true
             }
             KeyCode::Char('p') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 app.input_mode = InputMode::CommandPalette;
                 app.cmd_query.clear();
                 app.cmd_selected = 0;
+                true
+            }
+            KeyCode::Enter if key.modifiers.contains(KeyModifiers::SHIFT) => {
+                // Shift+Enter: insert newline for multi-line input
+                app.input.input(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
                 true
             }
             KeyCode::Enter => {
@@ -81,7 +101,7 @@ impl InputHandler for ChatHandler {
     }
 }
 
-/// Thinking mode: blocks all input except Esc/q to cancel.
+/// Thinking mode: Ctrl+C / Esc to cancel (preserves partial output), blocks other keys.
 pub struct ThinkingHandler;
 impl InputHandler for ThinkingHandler {
     fn handle_key(&mut self, app: &mut RupooApp, key: &KeyEvent) -> bool {
@@ -89,10 +109,12 @@ impl InputHandler for ThinkingHandler {
             return false;
         }
         match key.code {
+            KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                app.cancel_thinking();
+                true
+            }
             KeyCode::Char('q') | KeyCode::Esc => {
-                app.set_idle();
-                app.messages
-                    .push(ChatMessage::assistant("Cancelled.".to_string()));
+                app.cancel_thinking();
                 true
             }
             _ => true, // eat all keys
@@ -256,6 +278,11 @@ mod tests {
         app.input_mode = InputMode::Chat;
         let mut ctrl_c = press(KeyCode::Char('c'));
         ctrl_c.modifiers = KeyModifiers::CONTROL;
+        // First Ctrl+C: shows hint, doesn't quit
+        assert!(dispatch(&mut app, &ctrl_c));
+        assert!(!app.quit);
+        assert_eq!(app.ctrl_c_count, 1);
+        // Second Ctrl+C: quits
         assert!(dispatch(&mut app, &ctrl_c));
         assert!(app.quit);
     }
@@ -269,6 +296,31 @@ mod tests {
         assert!(ChatHandler.handle_key(&mut app, &enter));
         assert!(app.input.lines().join("").is_empty());
         assert!(!app.messages.is_empty());
+    }
+
+    #[test]
+    fn test_ctrl_c_while_thinking_cancels_not_quits() {
+        let mut app = test_app();
+        app.input_mode = InputMode::Chat;
+        app.thinking = true;
+        let mut ctrl_c = press(KeyCode::Char('c'));
+        ctrl_c.modifiers = KeyModifiers::CONTROL;
+        assert!(ChatHandler.handle_key(&mut app, &ctrl_c));
+        // Should cancel thinking, not quit
+        assert!(!app.quit);
+        assert!(!app.thinking);
+    }
+
+    #[test]
+    fn test_shift_enter_inserts_newline() {
+        let mut app = test_app();
+        app.input_mode = InputMode::Chat;
+        let mut shift_enter = press(KeyCode::Enter);
+        shift_enter.modifiers = KeyModifiers::SHIFT;
+        assert!(ChatHandler.handle_key(&mut app, &shift_enter));
+        // Input should now have a newline
+        let text: String = app.input.lines().join("\n");
+        assert!(text.contains('\n') || app.input.lines().len() > 1);
     }
 
     #[test]

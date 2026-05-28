@@ -15,7 +15,6 @@ use rupoo::task::Plan;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FocusTarget {
-    Chat,
     Input,
     Sessions,
 }
@@ -121,12 +120,10 @@ pub struct RupooApp {
     pub cmd_selected: usize,
     pub available_commands: Vec<CommandDef>,
     pub status: String,
-    pub loading: bool,
     pub agent_tx: Option<Sender<TuiToAgent>>,
     pub quit: bool,
     pub repo: Option<Arc<TaskRepo>>,
     pub plan: Option<Plan>,
-    pub current_step: usize,
     pub thinking: bool,
     /// Focus target for Tab switching
     pub focus: FocusTarget,
@@ -136,7 +133,6 @@ pub struct RupooApp {
     pub input_history: Vec<String>,
     pub input_history_index: usize,
     /// Chat rendering cache — invalidated when change_counter increments
-    pub chat_cache_lines: Vec<String>,
     pub change_counter: u64,
     /// Current model label (read from DB, set during TUI init)
     pub model_label: String,
@@ -157,8 +153,6 @@ pub struct RupooApp {
     pub llm_configured: bool,
     /// Current LLM provider name
     pub llm_provider: String,
-    /// First run flag (for onboarding hints)
-    pub is_first_run: bool,
     /// Current step info for Plan Mode progress display
     pub current_step_info: Option<(usize, usize, String)>,
     /// Safe mode for Chat Mode (true = only safe tools)
@@ -169,6 +163,10 @@ pub struct RupooApp {
     pub current_tool_status: Option<(String, String)>,
     /// Cached chat lines — rebuilt only when change_counter changes
     pub cached_lines: std::cell::Cell<Option<(u64, usize, Vec<ratatui::text::Line<'static>>)>>,
+    /// Ctrl+C press counter for double-press-to-quit behavior
+    pub ctrl_c_count: u8,
+    /// Shared cancel flag — set when user interrupts generation
+    pub cancel_flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl RupooApp {
@@ -259,18 +257,15 @@ impl RupooApp {
             cmd_selected: 0,
             available_commands,
             status: "Ready".to_string(),
-            loading: false,
             agent_tx,
             quit: false,
             repo: None,
             plan: None,
-            current_step: 0,
             thinking: false,
             focus: FocusTarget::Input,
             spinner_frame: 0,
             input_history: Vec::new(),
             input_history_index: 0,
-            chat_cache_lines: Vec::new(),
             change_counter: 0,
             model_label: "not configured".to_string(),
             session_messages: std::collections::HashMap::new(),
@@ -278,15 +273,16 @@ impl RupooApp {
             scroll_bottom: true,
             scroll_offset: 0,
             max_scroll_cache: std::cell::Cell::new(0),
-            conversation_history: ConversationHistory::new(10),
+            conversation_history: ConversationHistory::new(10).with_token_budget(60000),
             llm_configured: false,
             llm_provider: String::new(),
-            is_first_run: true,
             current_step_info: None,
             chat_safe_mode: true,
             stream_buffer: String::new(),
             current_tool_status: None,
             cached_lines: std::cell::Cell::new(None),
+            ctrl_c_count: 0,
+            cancel_flag: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
     }
 
@@ -329,7 +325,7 @@ impl RupooApp {
     /// Called by apply_agent_event whenever a new message arrives from the agent.
     /// Messages are pushed into app.messages AND persisted into session_messages
     /// for the active session.
-    fn push_message(&mut self, msg: ChatMessage) {
+    pub fn push_message(&mut self, msg: ChatMessage) {
         self.messages.push(msg.clone());
         let sid = self.current_session_id();
         self.session_messages
@@ -389,6 +385,7 @@ impl RupooApp {
         self.input_mode = InputMode::Thinking;
         self.stream_buffer.clear();
         self.current_tool_status = None;
+        self.cancel_flag.store(false, std::sync::atomic::Ordering::Relaxed);
     }
 
     pub fn set_idle(&mut self) {
@@ -406,9 +403,34 @@ impl RupooApp {
         self.current_tool_status = None;
     }
 
-    pub fn update_tokens(&mut self, in_count: u64, out_count: u64) {
-        self.token_in = in_count;
-        self.token_out = out_count;
+    /// Cancel the current thinking/generation, preserving any partial output.
+    pub fn cancel_thinking(&mut self) {
+        if !self.thinking {
+            // Not thinking — treat as quit signal
+            self.ctrl_c_count += 1;
+            if self.ctrl_c_count >= 2 {
+                self.set_quit();
+            }
+            return;
+        }
+        // Signal the bridge thread to stop
+        self.cancel_flag.store(true, std::sync::atomic::Ordering::Relaxed);
+        // Preserve partial stream buffer as an assistant message
+        if !self.stream_buffer.is_empty() {
+            let partial = std::mem::take(&mut self.stream_buffer);
+            self.push_message(ChatMessage::assistant(format!("{}[interrupted]", partial)));
+            self.persist_sessions();
+        } else {
+            self.push_message(ChatMessage::assistant("[cancelled]".to_string()));
+            self.persist_sessions();
+        }
+        self.thinking = false;
+        if self.input_mode == InputMode::Thinking {
+            self.input_mode = InputMode::Chat;
+        }
+        self.current_tool_status = None;
+        self.change_counter = self.change_counter.wrapping_add(1);
+        self.ctrl_c_count = 0;
     }
 
     pub fn show_tool_approval(&mut self, tool: PendingTool) {
@@ -492,8 +514,4 @@ impl RupooApp {
         }
     }
 
-    /// Get the current stream buffer content for rendering.
-    pub fn get_stream_buffer(&self) -> &str {
-        &self.stream_buffer
-    }
 }

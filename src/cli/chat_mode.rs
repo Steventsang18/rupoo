@@ -22,9 +22,14 @@ impl AgentUiBridge {
 
         // Create a callback closure to send events to TUI
         let ui_tx = self.ui_tx.clone();
+        let cancelled = self.cancelled.clone();
         let mut full_response = String::new();
 
         let on_event = |event: rupoo::llm::AgentEvent| {
+            // If cancelled, stop processing events
+            if cancelled.load(std::sync::atomic::Ordering::Relaxed) {
+                return;
+            }
             match event {
                 rupoo::llm::AgentEvent::TextDelta(text) => {
                     full_response.push_str(&text);

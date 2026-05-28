@@ -72,21 +72,30 @@ pub enum AgentEvent {
 pub struct ConversationHistory {
     messages: Vec<LlmChatMessage>,
     max_turns: usize,
+    /// Maximum estimated token budget for history (0 = no limit)
+    max_tokens: usize,
 }
 
 impl ConversationHistory {
     pub fn new(max_turns: usize) -> Self {
-        Self { messages: Vec::new(), max_turns }
+        Self { messages: Vec::new(), max_turns, max_tokens: 0 }
+    }
+
+    /// Set a token budget for conversation history. When exceeded, older messages are trimmed.
+    /// Uses a rough estimate of ~2 chars per token.
+    pub fn with_token_budget(mut self, max_tokens: usize) -> Self {
+        self.max_tokens = max_tokens;
+        self
     }
 
     pub fn push_user(&mut self, content: &str) {
         self.messages.push(LlmChatMessage::user(content));
-        self.trim_to_max_turns();
+        self.trim_to_limits();
     }
 
     pub fn push_assistant(&mut self, content: &str) {
         self.messages.push(LlmChatMessage::assistant(content));
-        self.trim_to_max_turns();
+        self.trim_to_limits();
     }
 
     pub fn clear(&mut self) {
@@ -117,7 +126,16 @@ impl ConversationHistory {
             .collect()
     }
 
-    fn trim_to_max_turns(&mut self) {
+    fn trim_to_limits(&mut self) {
+        // First trim by turn count
+        self.trim_by_turns();
+        // Then trim by token budget if set
+        if self.max_tokens > 0 {
+            self.trim_by_token_budget();
+        }
+    }
+
+    fn trim_by_turns(&mut self) {
         // Keep system messages, trim user/assistant pairs from the front
         let systems: Vec<_> = self
             .messages
@@ -141,6 +159,47 @@ impl ConversationHistory {
         self.messages.extend(trimmed);
     }
 
+    /// Trim oldest non-system messages until estimated token count is within budget.
+    /// Rough estimate: ~2 chars per token.
+    fn trim_by_token_budget(&mut self) {
+        let budget = self.max_tokens;
+        // Calculate total estimated tokens
+        let total_chars: usize = self.messages.iter().map(|m| m.content.len()).sum();
+        let estimated_tokens = total_chars / 2;
+
+        if estimated_tokens <= budget {
+            return;
+        }
+
+        // Remove oldest non-system messages until within budget
+        let systems: Vec<_> = self
+            .messages
+            .iter()
+            .filter(|m| m.role == LlmChatRole::System)
+            .cloned()
+            .collect();
+
+        let mut non_system: Vec<_> = self
+            .messages
+            .iter()
+            .filter(|m| m.role != LlmChatRole::System)
+            .cloned()
+            .collect();
+
+        // Remove from front until budget is met
+        let system_chars: usize = systems.iter().map(|m| m.content.len()).sum();
+        let budget_chars = budget.saturating_mul(2).saturating_sub(system_chars);
+
+        let mut current_chars: usize = non_system.iter().map(|m| m.content.len()).sum();
+        while current_chars > budget_chars && non_system.len() > 2 {
+            current_chars -= non_system.remove(0).content.len();
+        }
+
+        self.messages.clear();
+        self.messages.extend(systems);
+        self.messages.extend(non_system);
+    }
+
     pub fn is_empty(&self) -> bool {
         self.messages.is_empty()
     }
@@ -151,6 +210,16 @@ impl ConversationHistory {
 
     pub fn message_count(&self) -> usize {
         self.messages.len()
+    }
+
+    /// Get the current token budget (0 = no limit)
+    pub fn token_budget(&self) -> usize {
+        self.max_tokens
+    }
+
+    /// Get estimated token count for current history
+    pub fn estimated_tokens(&self) -> usize {
+        self.messages.iter().map(|m| m.content.len()).sum::<usize>() / 2
     }
 }
 

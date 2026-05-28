@@ -78,6 +78,8 @@ pub enum TuiToAgent {
     ApproveAll,
     /// User denied the currently pending tool call.
     DenyTool,
+    /// User cancelled the current generation.
+    Cancel,
 }
 
 /// Events sent FROM the agent bridge thread TO the TUI.

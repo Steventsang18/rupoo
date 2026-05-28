@@ -1,6 +1,7 @@
 //! AgentUiBridge — runs in a separate thread, bridges async agent to TUI
 
 use std::sync::{Arc, Mutex};
+use std::sync::atomic::AtomicBool;
 
 use crossbeam_channel::{Receiver, Sender};
 
@@ -30,6 +31,8 @@ pub(super) struct AgentUiBridge {
     pub(super) conversation_history: rupoo::llm::ConversationHistory,
     /// Session ID for persisting conversation history.
     pub(super) session_id: String,
+    /// Cancel flag — set by TUI when user interrupts generation.
+    pub(super) cancelled: Arc<AtomicBool>,
 }
 
 impl AgentUiBridge {
@@ -167,6 +170,10 @@ Available commands:
                 }
                 Ok(TuiToAgent::DenyTool) => {
                     self.handle_denial().await;
+                }
+                Ok(TuiToAgent::Cancel) => {
+                    // Cancel signal — the cancelled flag is already set by the TUI,
+                    // just continue the loop; the chat callback will check the flag.
                 }
                 Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
                     // No message — continue loop
