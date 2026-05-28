@@ -169,7 +169,7 @@ impl TuiSession {
             // ── Render only when state changed ────────────────────────────
             if needs_redraw {
                 self.terminal
-                    .draw(|frame| render(frame, &self.app))
+                    .draw(|frame| render(frame, frame.area(), &self.app))
                     .map_err(|_| "terminal_draw_failed")?;
                 needs_redraw = false;
             }

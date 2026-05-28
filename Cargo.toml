@@ -32,6 +32,7 @@ ratatui = "0.29"
 crossterm = "0.28"
 crossbeam-channel = "0.5"
 tui-textarea = "0.7"
+unicode-width = "0.2"
 egui = { version = "0.27", optional = true }
 tray-icon = { version = "0.24", optional = true }
 git2 = { version = "0.19", features = ["vendored-libgit2"] }

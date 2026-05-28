@@ -24,31 +24,25 @@ use super::{
 };
 use rupoo::MessageRole;
 
-// Spinner frames for "thinking" animation.
-const SPINNER_FRAMES: &[char] = &['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+// ═══════════════════════════════════════════════════════════════════════════
+// Public entry point
+// ═══════════════════════════════════════════════════════════════════════════
 
-// ── Public entry ────────────────────────────────────────────────────────────
-
-/// Render the full TUI. Called once per `terminal.draw()`.
-pub fn render(frame: &mut Frame, app: &RupooApp) {
-    let area = frame.area();
-    let rects = compute_three_column(area);
-
-    render_left(frame, rects.left, app);
-    render_center(frame, rects.center, app);
-    render_right(frame, rects.right, app);
+pub fn render(frame: &mut Frame, area: Rect, app: &RupooApp) {
+    let cols = compute_three_column(area);
+    render_left(frame, cols.left, app);
+    render_center(frame, cols.center, app);
+    render_right(frame, cols.right, app);
 
     // Overlays always on top.
     if matches!(app.overlay, OverlayState::Approval { .. }) {
         render_approval_dialog(frame, area, app);
     }
-
-    // ── Anchor cursor inside the input area ───────────────────────────
-    // Cursor position is managed by TextArea rendering, so we just ensure
-    // the cursor is visible within the input bounds. TextArea handles it.
 }
 
-// ── Layout ─────────────────────────────────────────────────────────────────
+// ═══════════════════════════════════════════════════════════════════════════
+// Layout
+// ═══════════════════════════════════════════════════════════════════════════
 
 #[derive(Debug)]
 struct ThreeColumnRects {
@@ -69,7 +63,9 @@ fn compute_three_column(area: Rect) -> ThreeColumnRects {
     ThreeColumnRects { left, center, right }
 }
 
-// ── Left sidebar — session tabs ────────────────────────────────────────────
+// ═══════════════════════════════════════════════════════════════════════════
+// Left sidebar — session tabs
+// ═══════════════════════════════════════════════════════════════════════════
 
 fn render_left(frame: &mut Frame, area: Rect, app: &RupooApp) {
     let block = Block::new()
@@ -89,19 +85,29 @@ fn render_left(frame: &mut Frame, area: Rect, app: &RupooApp) {
         } else {
             Color::DarkGray
         };
-        let is_focused = app.focus == FocusTarget::Sessions && is_active;
-        let style = if is_focused {
-            Style::default().fg(fg).bg(Color::Indexed(236))
+        let label = if tab.label.is_empty() {
+            format!("Session {}", i + 1)
         } else {
-            Style::default().fg(fg)
+            tab.label.clone()
         };
-        lines.push(Line::from(Span::styled(format!(" {} {}{}", marker, i, if i < 10 { " " } else { "" }), style)));
-        lines.push(Line::from(Span::styled(format!("  {}", tab.label), style)));
+        // Truncate label to fit in sidebar width
+        let max_len = 14;
+        let display = if label.len() > max_len {
+            format!("{}…", &label[..max_len.saturating_sub(1)])
+        } else {
+            label
+        };
+        lines.push(Line::from(Span::styled(
+            format!("{} {}", marker, display),
+            Style::default().fg(fg),
+        )));
     }
     frame.render_widget(Paragraph::new(Text::from(lines)).wrap(Wrap { trim: false }), inner);
 }
 
-// ── Center column ───────────────────────────────────────────────────────────
+// ═══════════════════════════════════════════════════════════════════════════
+// Center column — chat + input + status
+// ═══════════════════════════════════════════════════════════════════════════
 
 fn render_center(frame: &mut Frame, area: Rect, app: &RupooApp) {
     // Calculate dynamic input height: min 5, max 8, grows with content
@@ -136,81 +142,61 @@ fn render_center_title(frame: &mut Frame, area: Rect, app: &RupooApp) {
         InputMode::Approval | InputMode::Thinking => Color::Yellow,
         _ => Color::Cyan,
     };
-    let text = Line::from(vec![
-        Span::styled(" Rupoo ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
-        Span::styled(mode_label, Style::default().fg(fg)),
-    ]);
-    frame.render_widget(Paragraph::new(Text::from(vec![text])), area);
+    frame.render_widget(
+        Paragraph::new(Span::styled(mode_label, Style::default().fg(fg).add_modifier(Modifier::BOLD))),
+        area,
+    );
 }
 
-// ── Chat area — uses cached lines, renders stream buffer, shows tool status ─
+// ═══════════════════════════════════════════════════════════════════════════
+// Chat area — bubble-style messages
+// ═══════════════════════════════════════════════════════════════════════════
 
 fn render_chat_area(frame: &mut Frame, area: Rect, app: &RupooApp) {
-    if area.height < 2 || area.width < 2 {
-        return;
-    }
-    let max_w = area.width.saturating_sub(4) as usize;
-    let view_h = area.height as usize;
+    let inner = Block::new()
+        .borders(Borders::TOP)
+        .border_style(Style::default().fg(Color::DarkGray))
+        .inner(area);
+    let max_w = inner.width as usize;
+    let view_h = inner.height as usize;
 
-    // ── Use cached lines or rebuild ────────────────────────────────────
-    let mut display_lines = match app.cached_lines.take() {
-        Some((counter, cached_max_w, lines)) if counter == app.change_counter && cached_max_w == max_w => {
-            // Cache hit — store it back and use it
-            app.cached_lines.set(Some((counter, cached_max_w, lines.clone())));
-            lines
-        }
-        cache_miss => {
-            let lines = build_chat_lines(app, max_w);
-            app.cached_lines.set(Some((app.change_counter, max_w, lines.clone())));
-            // Drop the old cache value we took
-            drop(cache_miss);
-            lines
-        }
-    };
+    let mut display_lines = build_chat_lines(app, max_w);
 
-    // ── Streaming buffer: show in-progress text during thinking ───────
-    if app.thinking && !app.stream_buffer.is_empty() {
-        // Add a streaming assistant "draft" bubble
-        let header_span = Span::styled(
-            " A ",
-            Style::default().fg(Color::Cyan).bg(Color::Indexed(17)).add_modifier(Modifier::BOLD),
-        );
-        let role_span = Span::styled(
-            " Rupoo",
-            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
-        );
-        display_lines.push(Line::from(vec![header_span, role_span]));
-
-        let indent = " ";
-        for line in app.stream_buffer.lines() {
-            for wrapped in wrap_to(line, max_w.saturating_sub(indent.len())) {
-                display_lines.push(Line::from(Span::styled(
-                    format!("{}{}", indent, wrapped),
-                    Style::default().fg(Color::White),
-                )));
-            }
-        }
-    }
-
-    // ── Thinking spinner (appended after messages) ─────────────────────
+    // ── Thinking indicator ─────────────────────────────────────────────
     if app.thinking {
-        let frame_idx = app.spinner_frame % SPINNER_FRAMES.len();
-        let spinner_char = SPINNER_FRAMES[frame_idx];
-        let status_text = if let Some((ref tool_name, ref phase)) = app.current_tool_status {
+        let spinner_char = match app.spinner_frame % 4 {
+            0 => "⠋",
+            1 => "⠙",
+            2 => "⠹",
+            _ => "⠸",
+        };
+        let status_text = if let Some((ref tool, ref phase)) = app.current_tool_status {
             match phase.as_str() {
-                "calling" => format!(" {} {} is calling {}… ", spinner_char, "Rupoo", tool_name),
-                "completed" => format!(" {} Processing result… ", spinner_char),
-                _ => format!(" {} Rupoo is thinking… ", spinner_char),
+                "calling" => format!(" {} Calling {}… ", spinner_char, tool),
+                "completed" => format!(" {} Processing… ", spinner_char),
+                _ => format!(" {} Thinking… ", spinner_char),
             }
         } else if app.stream_buffer.is_empty() {
-            format!(" {} Rupoo is thinking… ", spinner_char)
+            format!(" {} Thinking… ", spinner_char)
         } else {
-            // Stream buffer has content — spinner shows "generating"
             format!(" {} Generating… ", spinner_char)
         };
+
+        // Typing dots animation
+        let dots = match app.spinner_frame % 3 {
+            0 => "● ○ ○",
+            1 => "● ● ○",
+            _ => "● ● ●",
+        };
+
+        display_lines.push(Line::from(""));
+        display_lines.push(Line::from(vec![
+            Span::styled(" 🤖 ", Style::default().fg(Color::Cyan)),
+            Span::styled(status_text, Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+        ]));
         display_lines.push(Line::from(Span::styled(
-            status_text,
-            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+            format!("   {}", dots),
+            Style::default().fg(Color::Cyan).add_modifier(Modifier::DIM),
         )));
     }
 
@@ -231,7 +217,7 @@ fn render_chat_area(frame: &mut Frame, area: Rect, app: &RupooApp) {
         )));
     }
 
-    // ── Render with wrapping disabled (we pre-wrapped already) ────────
+    // ── Render ─────────────────────────────────────────────────────────
     let chat_para = Paragraph::new(Text::from(display_lines))
         .scroll((scroll as u16, 0))
         .block(
@@ -242,9 +228,7 @@ fn render_chat_area(frame: &mut Frame, area: Rect, app: &RupooApp) {
     frame.render_widget(chat_para, area);
 }
 
-/// Build chat lines from app.messages, pre-wrapping each line to max_w.
-/// This ensures Paragraph::scroll() operates on display‑accurate line counts
-/// and no content is clipped at the bottom.
+/// Build chat lines from app.messages with bubble-style rendering.
 fn build_chat_lines(app: &RupooApp, max_w: usize) -> Vec<Line<'static>> {
     let mut all_lines: Vec<Line> = Vec::new();
 
@@ -258,9 +242,10 @@ fn build_chat_lines(app: &RupooApp, max_w: usize) -> Vec<Line<'static>> {
         all_lines.push(Line::from(Span::raw(" Type a message to start.")));
         all_lines.push(Line::from(Span::raw(" /help for commands.")));
         all_lines.push(Line::from(Span::raw(" Ctrl+P for command palette.")));
+        all_lines.push(Line::from(Span::raw(" Shift+Enter for multi-line input.")));
         all_lines.push(Line::from(""));
         all_lines.push(Line::from(Span::styled(
-            " Esc / Ctrl+C to quit.",
+            " Ctrl+C × 2 to quit.",
             Style::default().fg(Color::DarkGray),
         )));
         return all_lines;
@@ -272,14 +257,16 @@ fn build_chat_lines(app: &RupooApp, max_w: usize) -> Vec<Line<'static>> {
         let is_error = msg.role == MessageRole::System && msg.content.contains("Error");
         let is_tool_call = msg.role == MessageRole::System && msg.content.starts_with("🔧");
         let is_tool_result = msg.role == MessageRole::System && msg.content.starts_with("✅");
+        let is_system = msg.role == MessageRole::System && !is_error && !is_tool_call && !is_tool_result;
 
-        // Tool call/result messages get a compact style
+        // Tool call/result messages — compact card
         if is_tool_call || is_tool_result {
+            let icon = if is_tool_call { "🔧" } else { "✅" };
             let fg_color = if is_tool_call { Color::Magenta } else { Color::Green };
             for line in msg.content.lines() {
-                for wrapped in wrap_to(line, max_w.saturating_sub(1)) {
+                for wrapped in wrap_to(line, max_w.saturating_sub(4)) {
                     all_lines.push(Line::from(Span::styled(
-                        format!(" {}", wrapped),
+                        format!("  {} {}", icon, wrapped),
                         Style::default().fg(fg_color),
                     )));
                 }
@@ -287,131 +274,188 @@ fn build_chat_lines(app: &RupooApp, max_w: usize) -> Vec<Line<'static>> {
             continue;
         }
 
-        let (bracket, bg, fg_color) = if is_error {
-            ("!", Color::Red, Color::White)
-        } else if is_user {
-            ("U", Color::Indexed(22), Color::Green)
-        } else {
-            ("A", Color::Indexed(17), Color::Cyan)
-        };
-
-        let header_span = Span::styled(
-            format!(" {} ", bracket),
-            Style::default().fg(fg_color).bg(bg).add_modifier(Modifier::BOLD),
-        );
-        let role_span = Span::styled(
-            if is_user { " You" } else if is_error { " Error" } else { " Rupoo" },
-            Style::default().fg(fg_color).add_modifier(Modifier::BOLD),
-        );
-        all_lines.push(Line::from(vec![header_span, role_span]));
-
-        let content = &msg.content;
-        let mut in_code = false;
-        let mut code_lang = String::new();
-        let mut code_buffer: Vec<String> = Vec::new();
-
-        for line in content.lines() {
-            if line.starts_with("```") {
-                if in_code {
-                    // End code block — flush
-                    let border_w = max_w.saturating_sub(4);
+        // System messages — centered, gray
+        if is_system {
+            for line in msg.content.lines() {
+                for wrapped in wrap_to(line, max_w.saturating_sub(2)) {
                     all_lines.push(Line::from(Span::styled(
-                        format!(" ┌─{}", "─".repeat(border_w.min(200))),
-                        Style::default().fg(Color::Magenta).add_modifier(Modifier::DIM),
+                        format!(" {}", wrapped),
+                        Style::default().fg(Color::DarkGray),
                     )));
-                    for cb_line in &code_buffer {
-                        for wrapped in wrap_to(cb_line, max_w.saturating_sub(2)) {
-                            all_lines.push(Line::from(Span::styled(
-                                format!(" │ {}", wrapped),
-                                Style::default().fg(Color::Yellow),
-                            )));
-                        }
+                }
+            }
+            continue;
+        }
+
+        // Error messages — centered, red
+        if is_error {
+            all_lines.push(Line::from(Span::styled(
+                " ── Error ──".to_string(),
+                Style::default().fg(Color::Red).add_modifier(Modifier::DIM),
+            )));
+            for line in msg.content.lines() {
+                for wrapped in wrap_to(line, max_w.saturating_sub(2)) {
+                    all_lines.push(Line::from(Span::styled(
+                        format!(" {}", wrapped),
+                        Style::default().fg(Color::Red),
+                    )));
+                }
+            }
+            continue;
+        }
+
+        // ── Chat bubbles ──────────────────────────────────────────────
+        if is_user {
+            // User bubble: right-aligned, green accent
+            all_lines.push(Line::from(""));
+            all_lines.push(Line::from(Span::styled(
+                right_align_label("You ▾", max_w),
+                Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
+            )));
+            let bubble_w = (max_w * 3 / 4).max(20);
+            // Top border
+            all_lines.push(Line::from(Span::styled(
+                right_align_str(&format!("┌{}┐", "─".repeat(bubble_w.saturating_sub(2))), max_w),
+                Style::default().fg(Color::Green).add_modifier(Modifier::DIM),
+            )));
+            // Content
+            let content = &msg.content;
+            let mut in_code = false;
+            let mut code_buffer: Vec<String> = Vec::new();
+            for line in content.lines() {
+                if line.starts_with("```") {
+                    if in_code {
+                        flush_code_block_right(&mut all_lines, &code_buffer, bubble_w, Color::Green);
+                        code_buffer.clear();
+                        in_code = false;
+                    } else {
+                        in_code = true;
                     }
-                    all_lines.push(Line::from(Span::styled(
-                        format!(" └─{}", "─".repeat(border_w.min(200))),
-                        Style::default().fg(Color::Magenta).add_modifier(Modifier::DIM),
-                    )));
-                    code_buffer.clear();
-                    code_lang.clear();
-                    in_code = false;
-                } else {
-                    in_code = true;
-                    code_lang = line.trim_start_matches("```").trim().to_string();
+                    continue;
                 }
-                continue;
-            }
-            if in_code {
-                code_buffer.push(line.to_string());
-                continue;
-            }
-
-            // Normal content — pre-wrap to terminal width
-            let indent = if is_user { "  " } else { " " };
-            for wrapped in wrap_to(line, max_w.saturating_sub(indent.len())) {
-                let line_style = if is_error {
-                    Style::default().fg(Color::Red)
-                } else {
-                    Style::default().fg(Color::White)
-                };
-                all_lines.push(Line::from(Span::styled(
-                    format!("{}{}", indent, wrapped),
-                    line_style,
-                )));
-            }
-        }
-
-        // Flush any unclosed code block
-        if in_code && !code_buffer.is_empty() {
-            let border_w = max_w.saturating_sub(4);
-            all_lines.push(Line::from(Span::styled(
-                format!(" ┌─{}", "─".repeat(border_w.min(200))),
-                Style::default().fg(Color::Magenta).add_modifier(Modifier::DIM),
-            )));
-            for cb_line in &code_buffer {
-                for wrapped in wrap_to(cb_line, max_w.saturating_sub(2)) {
+                if in_code {
+                    code_buffer.push(line.to_string());
+                    continue;
+                }
+                for wrapped in wrap_to(line, bubble_w.saturating_sub(4)) {
+                    let padded = format!("│ {} │", wrapped);
                     all_lines.push(Line::from(Span::styled(
-                        format!(" │ {}", wrapped),
-                        Style::default().fg(Color::Yellow),
+                        right_align_str(&padded, max_w),
+                        Style::default().fg(Color::White),
                     )));
                 }
             }
+            if in_code && !code_buffer.is_empty() {
+                flush_code_block_right(&mut all_lines, &code_buffer, bubble_w, Color::Green);
+            }
+            // Bottom border
             all_lines.push(Line::from(Span::styled(
-                format!(" └─{}", "─".repeat(border_w.min(200))),
-                Style::default().fg(Color::Magenta).add_modifier(Modifier::DIM),
+                right_align_str(&format!("└{}┘", "─".repeat(bubble_w.saturating_sub(2))), max_w),
+                Style::default().fg(Color::Green).add_modifier(Modifier::DIM),
+            )));
+        } else {
+            // Assistant bubble: left-aligned, cyan accent
+            all_lines.push(Line::from(""));
+            all_lines.push(Line::from(vec![
+                Span::styled(" 🤖 ", Style::default().fg(Color::Cyan)),
+                Span::styled("Rupoo", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+            ]));
+            let bubble_w = (max_w * 3 / 4).max(20);
+            // Top border
+            all_lines.push(Line::from(Span::styled(
+                format!("┌{}┐", "─".repeat(bubble_w.saturating_sub(2))),
+                Style::default().fg(Color::Cyan).add_modifier(Modifier::DIM),
+            )));
+            // Content
+            let content = &msg.content;
+            let mut in_code = false;
+            let mut code_buffer: Vec<String> = Vec::new();
+            for line in content.lines() {
+                if line.starts_with("```") {
+                    if in_code {
+                        flush_code_block_left(&mut all_lines, &code_buffer, bubble_w, Color::Cyan);
+                        code_buffer.clear();
+                        in_code = false;
+                    } else {
+                        in_code = true;
+                    }
+                    continue;
+                }
+                if in_code {
+                    code_buffer.push(line.to_string());
+                    continue;
+                }
+                for wrapped in wrap_to(line, bubble_w.saturating_sub(4)) {
+                    all_lines.push(Line::from(Span::styled(
+                        format!("│ {} │", wrapped),
+                        Style::default().fg(Color::White),
+                    )));
+                }
+            }
+            if in_code && !code_buffer.is_empty() {
+                flush_code_block_left(&mut all_lines, &code_buffer, bubble_w, Color::Cyan);
+            }
+            // Bottom border
+            all_lines.push(Line::from(Span::styled(
+                format!("└{}┘", "─".repeat(bubble_w.saturating_sub(2))),
+                Style::default().fg(Color::Cyan).add_modifier(Modifier::DIM),
             )));
         }
-
-        all_lines.push(Line::from(""));
     }
 
     all_lines
 }
 
-/// Split a line into multiple sub‑lines each no longer than max_w.
-/// Uses floor_char_boundary to avoid splitting multi‑byte UTF‑8 chars.
-fn wrap_to(line: &str, max_w: usize) -> Vec<&str> {
-    if max_w == 0 || line.len() <= max_w {
-        return vec![line];
+/// Right-align a label within max_w columns.
+fn right_align_label(label: &str, max_w: usize) -> String {
+    let w = unicode_width::UnicodeWidthStr::width(label);
+    if w >= max_w {
+        label.to_string()
+    } else {
+        format!("{}{}", " ".repeat(max_w - w), label)
     }
-    let mut result = Vec::new();
-    let mut start = 0;
-    let bytes = line.len();
-    while start < bytes {
-        let mut end = (start + max_w).min(bytes);
-        end = line.floor_char_boundary(end);
-        if end <= start {
-            break;
-        }
-        result.push(&line[start..end]);
-        start = end;
-    }
-    if result.is_empty() {
-        result.push(line);
-    }
-    result
 }
 
-// ── Input area ──────────────────────────────────────────────────────────────
+/// Right-align a string within max_w columns (using unicode display width).
+fn right_align_str(s: &str, max_w: usize) -> String {
+    let w = unicode_width::UnicodeWidthStr::width(s);
+    if w >= max_w {
+        s.to_string()
+    } else {
+        format!("{}{}", " ".repeat(max_w - w), s)
+    }
+}
+
+/// Flush code block inside a right-aligned bubble.
+fn flush_code_block_left(lines: &mut Vec<Line<'static>>, code: &[String], bubble_w: usize, _border_color: Color) {
+    let inner_w = bubble_w.saturating_sub(4);
+    lines.push(Line::from(Span::styled(
+        format!("│ ┌─{}─┐", "─".repeat(inner_w.saturating_sub(2).min(200))),
+        Style::default().fg(Color::Magenta).add_modifier(Modifier::DIM),
+    )));
+    for cb_line in code {
+        for wrapped in wrap_to(cb_line, inner_w.saturating_sub(2)) {
+            lines.push(Line::from(Span::styled(
+                format!("│ │ {} │", wrapped),
+                Style::default().fg(Color::Yellow),
+            )));
+        }
+    }
+    lines.push(Line::from(Span::styled(
+        format!("│ └─{}─┘", "─".repeat(inner_w.saturating_sub(2).min(200))),
+        Style::default().fg(Color::Magenta).add_modifier(Modifier::DIM),
+    )));
+}
+
+/// Flush code block inside a right-aligned bubble.
+fn flush_code_block_right(lines: &mut Vec<Line<'static>>, code: &[String], bubble_w: usize, border_color: Color) {
+    // Simplify: use left-style code blocks inside right bubbles too
+    flush_code_block_left(lines, code, bubble_w, border_color);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Input area — with proper cursor tracking (unicode-width aware)
+// ═══════════════════════════════════════════════════════════════════════════
 
 fn render_input_area(frame: &mut Frame, area: Rect, app: &RupooApp) {
     let disabled = app.input_mode == InputMode::Approval || app.input_mode == InputMode::Rename;
@@ -451,51 +495,64 @@ fn render_input_area(frame: &mut Frame, area: Rect, app: &RupooApp) {
                 inner,
             );
         } else {
-            // Custom rendering: wrap input text to fit the inner width
             let max_w = inner.width as usize;
-            let mut display_lines: Vec<Line> = Vec::new();
+            let view_h = inner.height as usize;
+
+            // Build display lines with unicode-width-aware wrapping
             let raw_lines = app.input.lines();
+            let mut display_lines: Vec<Line> = Vec::new();
+            // Track (display_row, display_col) for each raw (row, col)
+            // We'll compute cursor display position separately
             for line in raw_lines.iter() {
-                if max_w > 0 && line.len() > max_w {
-                    for wrapped in wrap_to(line, max_w) {
+                if line.is_empty() {
+                    display_lines.push(Line::from(Span::styled(
+                        String::new(),
+                        Style::default().fg(Color::White),
+                    )));
+                } else {
+                    for wrapped in wrap_to_unicode(line, max_w) {
                         display_lines.push(Line::from(Span::styled(
-                            wrapped.to_string(),
+                            wrapped,
                             Style::default().fg(Color::White),
                         )));
                     }
-                } else {
-                    display_lines.push(Line::from(Span::styled(
-                        line.clone(),
-                        Style::default().fg(Color::White),
-                    )));
                 }
             }
 
-            // Calculate scroll to keep cursor visible
-            // TextArea cursor position: (row, col)
-            let cursor_row = app.input.cursor().0;
-            // Count display rows up to cursor (accounting for wrapping)
-            let mut display_row = 0;
+            // ── Compute cursor display position (unicode-width aware) ───
+            let (cursor_row, cursor_col) = app.input.cursor();
+            let mut cursor_display_row: usize = 0;
             for (i, line) in raw_lines.iter().enumerate() {
                 if i == cursor_row {
                     break;
                 }
-                if max_w > 0 && line.len() > max_w {
-                    display_row += (line.len() + max_w - 1) / max_w;
+                // Count how many display rows this logical line occupies
+                let line_w = unicode_width::UnicodeWidthStr::width(line.as_str());
+                cursor_display_row += if max_w > 0 && line_w > max_w {
+                    (line_w + max_w - 1) / max_w
                 } else {
-                    display_row += 1;
-                }
+                    1
+                };
             }
-            // Add wrapped rows for the cursor line up to the cursor column
-            let cursor_col = app.input.cursor().1;
+            // Within the cursor's logical line, count display rows up to cursor column
+            let cursor_line = raw_lines.get(cursor_row).map(|s| s.as_str()).unwrap_or("");
+            let prefix = if cursor_col <= cursor_line.len() {
+                &cursor_line[..cursor_line.floor_char_boundary(cursor_col)]
+            } else {
+                cursor_line
+            };
+            let prefix_w = unicode_width::UnicodeWidthStr::width(prefix);
             if max_w > 0 {
-                display_row += cursor_col / max_w.max(1);
+                cursor_display_row += prefix_w / max_w;
             }
 
-            let view_h = inner.height as usize;
+            // Cursor x: the column within the wrapped segment
+            let cursor_x = if max_w > 0 { prefix_w % max_w } else { prefix_w };
+
+            // ── Scroll to keep cursor visible ──────────────────────────
             let max_scroll = display_lines.len().saturating_sub(view_h);
-            let scroll = if display_row >= view_h {
-                (display_row - view_h + 1).min(max_scroll)
+            let scroll = if cursor_display_row >= view_h {
+                (cursor_display_row - view_h + 1).min(max_scroll)
             } else {
                 0
             };
@@ -504,15 +561,19 @@ fn render_input_area(frame: &mut Frame, area: Rect, app: &RupooApp) {
                 .scroll((scroll as u16, 0));
             frame.render_widget(para, inner);
 
-            // Position cursor within the inner area
-            let cursor_display_row = display_row.saturating_sub(scroll);
+            // Position cursor — unicode-width corrected
+            let cursor_display_row = cursor_display_row.saturating_sub(scroll);
             frame.set_cursor_position(ratatui::layout::Position {
-                x: inner.x + (cursor_col % max_w.max(1)) as u16,
+                x: inner.x + cursor_x as u16,
                 y: inner.y + cursor_display_row.min(view_h - 1) as u16,
             });
         }
     }
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Center status bar
+// ═══════════════════════════════════════════════════════════════════════════
 
 fn render_center_status(frame: &mut Frame, area: Rect, app: &RupooApp) {
     let (mode_str, fg) = if app.thinking {
@@ -544,7 +605,9 @@ fn render_center_status(frame: &mut Frame, area: Rect, app: &RupooApp) {
     );
 }
 
-// ── Right sidebar — tokens / model / safety / plan progress ────────────────
+// ═══════════════════════════════════════════════════════════════════════════
+// Right sidebar — tokens / model / safety / plan progress
+// ═══════════════════════════════════════════════════════════════════════════
 
 fn render_right(frame: &mut Frame, area: Rect, app: &RupooApp) {
     let has_tokens = app.token_in > 0 || app.token_out > 0;
@@ -687,7 +750,9 @@ fn render_right(frame: &mut Frame, area: Rect, app: &RupooApp) {
     }
 }
 
-// ── Approval dialog overlay ─────────────────────────────────────────────────
+// ═══════════════════════════════════════════════════════════════════════════
+// Approval dialog overlay
+// ═══════════════════════════════════════════════════════════════════════════
 
 fn render_approval_dialog(frame: &mut Frame, area: Rect, app: &RupooApp) {
     let dialog_w = 60u16;
@@ -741,4 +806,64 @@ fn render_approval_dialog(frame: &mut Frame, area: Rect, app: &RupooApp) {
         Paragraph::new(Text::from(lines)).wrap(Wrap { trim: false }),
         inner,
     );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Text wrapping utilities — unicode-width aware
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Split a line into multiple sub-lines each no wider than max_w display columns.
+/// Uses unicode display width (CJK=2, emoji=2) for accurate wrapping.
+fn wrap_to_unicode(line: &str, max_w: usize) -> Vec<String> {
+    if max_w == 0 || line.is_empty() {
+        return vec![line.to_string()];
+    }
+
+    let mut result = Vec::new();
+    let mut current = String::new();
+    let mut current_w = 0;
+
+    for ch in line.chars() {
+        let ch_w = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
+        if current_w + ch_w > max_w && !current.is_empty() {
+            result.push(current);
+            current = String::new();
+            current_w = 0;
+        }
+        current.push(ch);
+        current_w += ch_w;
+    }
+
+    if !current.is_empty() {
+        result.push(current);
+    }
+
+    if result.is_empty() {
+        result.push(line.to_string());
+    }
+    result
+}
+
+/// Legacy byte-based wrap (used for message content where we pre-wrap by char count).
+/// Kept for backward compatibility with code blocks and system messages.
+fn wrap_to(line: &str, max_w: usize) -> Vec<&str> {
+    if max_w == 0 || line.len() <= max_w {
+        return vec![line];
+    }
+    let mut result = Vec::new();
+    let mut start = 0;
+    let bytes = line.len();
+    while start < bytes {
+        let mut end = (start + max_w).min(bytes);
+        end = line.floor_char_boundary(end);
+        if end <= start {
+            break;
+        }
+        result.push(&line[start..end]);
+        start = end;
+    }
+    if result.is_empty() {
+        result.push(line);
+    }
+    result
 }

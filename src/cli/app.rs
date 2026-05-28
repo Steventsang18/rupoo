@@ -161,8 +161,6 @@ pub struct RupooApp {
     pub stream_buffer: String,
     /// Current tool call status for progress display (tool_name, phase)
     pub current_tool_status: Option<(String, String)>,
-    /// Cached chat lines — rebuilt only when change_counter changes
-    pub cached_lines: std::cell::Cell<Option<(u64, usize, Vec<ratatui::text::Line<'static>>)>>,
     /// Ctrl+C press counter for double-press-to-quit behavior
     pub ctrl_c_count: u8,
     /// Shared cancel flag — set when user interrupts generation
@@ -280,7 +278,6 @@ impl RupooApp {
             chat_safe_mode: true,
             stream_buffer: String::new(),
             current_tool_status: None,
-            cached_lines: std::cell::Cell::new(None),
             ctrl_c_count: 0,
             cancel_flag: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
