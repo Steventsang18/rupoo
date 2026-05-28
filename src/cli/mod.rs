@@ -15,6 +15,7 @@ pub use app::{FocusTarget, InputMode, OverlayState, RupooApp, SessionTab};
 use std::io::{self, stdout, Write};
 
 use crossterm::{
+    cursor::SetCursorStyle,
     event::{
         Event, KeyCode, KeyEventKind,
     },
@@ -42,6 +43,8 @@ impl Drop for TerminalGuard {
         let _ = execute!(
             stdout(),
             LeaveAlternateScreen,
+            crossterm::cursor::Show,
+            SetCursorStyle::DefaultUserShape,
         );
         let _ = disable_raw_mode();
     }
@@ -84,6 +87,7 @@ impl TuiSession {
         if execute!(
             sout,
             EnterAlternateScreen,
+            SetCursorStyle::BlinkingBar,
         )
         .is_err()
         {

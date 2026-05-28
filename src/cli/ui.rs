@@ -487,6 +487,7 @@ fn render_input_area(frame: &mut Frame, area: Rect, app: &RupooApp) {
     } else {
         let input_text = app.input.lines().join("\n");
         if input_text.is_empty() && app.focus != FocusTarget::Input {
+            // Placeholder — show dim text, cursor at start
             frame.render_widget(
                 Paragraph::new(Span::styled(
                     " Type a message…",
@@ -494,39 +495,39 @@ fn render_input_area(frame: &mut Frame, area: Rect, app: &RupooApp) {
                 )),
                 inner,
             );
+            frame.set_cursor_position(ratatui::layout::Position {
+                x: inner.x + 1,
+                y: inner.y,
+            });
+        } else if input_text.is_empty() {
+            // Empty input with focus — show blinking green cursor
+            let blink_on = app.spinner_frame % 6 < 4; // ~66% on, ~33% off
+            let cursor_char = if blink_on { "▎" } else { " " };
+            frame.render_widget(
+                Paragraph::new(Span::styled(
+                    cursor_char.to_string(),
+                    Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
+                )),
+                inner,
+            );
+            frame.set_cursor_position(ratatui::layout::Position {
+                x: inner.x,
+                y: inner.y,
+            });
         } else {
             let max_w = inner.width as usize;
             let view_h = inner.height as usize;
 
-            // Build display lines with unicode-width-aware wrapping
-            let raw_lines = app.input.lines();
-            let mut display_lines: Vec<Line> = Vec::new();
-            // Track (display_row, display_col) for each raw (row, col)
-            // We'll compute cursor display position separately
-            for line in raw_lines.iter() {
-                if line.is_empty() {
-                    display_lines.push(Line::from(Span::styled(
-                        String::new(),
-                        Style::default().fg(Color::White),
-                    )));
-                } else {
-                    for wrapped in wrap_to_unicode(line, max_w) {
-                        display_lines.push(Line::from(Span::styled(
-                            wrapped,
-                            Style::default().fg(Color::White),
-                        )));
-                    }
-                }
-            }
-
-            // ── Compute cursor display position (unicode-width aware) ───
+            // ── Compute cursor display position FIRST ──────────────────
             let (cursor_row, cursor_col) = app.input.cursor();
+
+            // Count display rows before cursor's logical line
+            let raw_lines = app.input.lines();
             let mut cursor_display_row: usize = 0;
             for (i, line) in raw_lines.iter().enumerate() {
                 if i == cursor_row {
                     break;
                 }
-                // Count how many display rows this logical line occupies
                 let line_w = unicode_width::UnicodeWidthStr::width(line.as_str());
                 cursor_display_row += if max_w > 0 && line_w > max_w {
                     (line_w + max_w - 1) / max_w
@@ -534,20 +535,97 @@ fn render_input_area(frame: &mut Frame, area: Rect, app: &RupooApp) {
                     1
                 };
             }
-            // Within the cursor's logical line, count display rows up to cursor column
+
+            // Compute cursor's x offset within its wrapped line
             let cursor_line = raw_lines.get(cursor_row).map(|s| s.as_str()).unwrap_or("");
-            let prefix = if cursor_col <= cursor_line.len() {
-                &cursor_line[..cursor_line.floor_char_boundary(cursor_col)]
-            } else {
-                cursor_line
-            };
-            let prefix_w = unicode_width::UnicodeWidthStr::width(prefix);
+            let prefix: String = cursor_line.chars().take(cursor_col).collect();
+            let prefix_w = unicode_width::UnicodeWidthStr::width(prefix.as_str());
             if max_w > 0 {
                 cursor_display_row += prefix_w / max_w;
             }
-
-            // Cursor x: the column within the wrapped segment
             let cursor_x = if max_w > 0 { prefix_w % max_w } else { prefix_w };
+
+            // ── Build display lines with green cursor ──────────────
+            let blink_on = app.spinner_frame % 6 < 4;
+            let mut display_lines: Vec<Line> = Vec::new();
+            let mut abs_display_row: usize = 0;
+
+            for (line_idx, line) in raw_lines.iter().enumerate() {
+                if line.is_empty() {
+                    // Empty line — check if cursor is here
+                    if line_idx == cursor_row && abs_display_row == cursor_display_row {
+                        let cursor_char = if blink_on { "▎" } else { " " };
+                        display_lines.push(Line::from(Span::styled(
+                            cursor_char.to_string(),
+                            Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
+                        )));
+                    } else {
+                        display_lines.push(Line::from(Span::styled(
+                            String::new(),
+                            Style::default().fg(Color::White),
+                        )));
+                    }
+                    abs_display_row += 1;
+                } else {
+                    let wrapped = wrap_to_unicode(line, max_w);
+                    for (wrap_idx, segment) in wrapped.iter().enumerate() {
+                        let is_cursor_line = line_idx == cursor_row
+                            && abs_display_row == cursor_display_row;
+
+                        if is_cursor_line {
+                            // Build this segment with cursor highlight
+                            let mut spans: Vec<Span> = Vec::new();
+                            let mut char_w: usize = 0;
+                            let mut cursor_placed = false;
+
+                            for (_bi, ch) in segment.char_indices() {
+                                let cw = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
+
+                                if !cursor_placed && char_w == cursor_x {
+                                    // Cursor is right before this character
+                                    // Highlight this character with green bg
+                                    spans.push(Span::styled(
+                                        ch.to_string(),
+                                        Style::default().fg(Color::Black).bg(Color::Green),
+                                    ));
+                                    cursor_placed = true;
+                                } else if !cursor_placed && char_w + cw > cursor_x {
+                                    // Cursor falls in the middle of a wide char (CJK)
+                                    // Highlight the entire char with green bg
+                                    spans.push(Span::styled(
+                                        ch.to_string(),
+                                        Style::default().fg(Color::Black).bg(Color::Green),
+                                    ));
+                                    cursor_placed = true;
+                                } else {
+                                    spans.push(Span::styled(
+                                        ch.to_string(),
+                                        Style::default().fg(Color::White),
+                                    ));
+                                }
+                                char_w += cw;
+                            }
+
+                            // If cursor is at the end of this segment (past all chars)
+                            if cursor_x >= char_w && wrap_idx == wrapped.len() - 1 {
+                                let cursor_char = if blink_on { "▎" } else { " " };
+                                spans.push(Span::styled(
+                                    cursor_char.to_string(),
+                                    Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
+                                ));
+                            }
+
+                            display_lines.push(Line::from(spans));
+                        } else {
+                            display_lines.push(Line::from(Span::styled(
+                                segment.clone(),
+                                Style::default().fg(Color::White),
+                            )));
+                        }
+                        abs_display_row += 1;
+                    }
+                }
+            }
 
             // ── Scroll to keep cursor visible ──────────────────────────
             let max_scroll = display_lines.len().saturating_sub(view_h);
@@ -561,7 +639,8 @@ fn render_input_area(frame: &mut Frame, area: Rect, app: &RupooApp) {
                 .scroll((scroll as u16, 0));
             frame.render_widget(para, inner);
 
-            // Position cursor — unicode-width corrected
+            // System cursor is hidden — our green ▎ serves as the cursor.
+            // We still set cursor position for accessibility / screen readers.
             let cursor_display_row = cursor_display_row.saturating_sub(scroll);
             frame.set_cursor_position(ratatui::layout::Position {
                 x: inner.x + cursor_x as u16,
