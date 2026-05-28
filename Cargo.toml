@@ -34,6 +34,7 @@ rustyline = "15"
 owo-colors = "4"
 syntect = "5"
 indicatif = "0.17"
+ctrlc = "3"
 egui = { version = "0.27", optional = true }
 tray-icon = { version = "0.24", optional = true }
 git2 = { version = "0.19", features = ["vendored-libgit2"] }

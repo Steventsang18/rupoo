@@ -19,6 +19,7 @@ pub use rupoo::{AgentToTui, ChatMessage, PendingTool, ToolPhase, TuiToAgent};
 pub use app::RupooApp;
 
 use std::io::{self, Write};
+use std::sync::atomic::AtomicUsize;
 
 use owo_colors::OwoColorize;
 use crossbeam_channel::{Receiver, Sender};
@@ -26,6 +27,10 @@ use rupoo::db::TaskRepo;
 use rupoo::agent::Agent;
 use rupoo::llm::ConversationHistory;
 use rustyline::config::Configurer;
+
+/// Global SIGINT counter — incremented by Ctrl+C signal handler.
+/// Checked in both the readline loop and the drain_and_render loop.
+static SIGINT_COUNT: AtomicUsize = AtomicUsize::new(0);
 
 // ═══════════════════════════════════════════════════════════════════════════
 // REPL Session
@@ -115,6 +120,12 @@ impl ReplSession {
         // Set green blinking bar cursor
         output::set_cursor_style_bar();
 
+        // Register SIGINT handler — increments global counter on Ctrl+C
+        // This works even when rustyline is NOT reading input (e.g. during streaming)
+        let _ = ctrlc::set_handler(|| {
+            SIGINT_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        });
+
         // Print welcome
         output::welcome(env!("CARGO_PKG_VERSION"), &self.app.model_label);
 
@@ -136,6 +147,9 @@ impl ReplSession {
             if self.app.quit {
                 break Ok(());
             }
+
+            // Reset SIGINT counter for each loop iteration
+            let sigint_before = SIGINT_COUNT.load(std::sync::atomic::Ordering::Relaxed);
 
             // If thinking, drain events and show spinner
             if self.app.thinking {
@@ -166,11 +180,17 @@ impl ReplSession {
                     self.submit_message(&input);
                 }
                 Err(rustyline::error::ReadlineError::Interrupted) => {
-                    // Ctrl+C — interrupt current generation
-                    if self.app.thinking {
+                    // Ctrl+C — interrupt current generation or quit
+                    let sigint_now = SIGINT_COUNT.load(std::sync::atomic::Ordering::Relaxed);
+                    let presses = sigint_now.saturating_sub(sigint_before);
+                    if self.app.thinking || presses == 1 {
                         self.interrupt_generation();
+                    } else if presses >= 2 {
+                        // Double Ctrl+C — quit
+                        println!("\n  Bye! 👋");
+                        break Ok(());
                     } else {
-                        // Double Ctrl+C to quit
+                        // Single Ctrl+C while idle — prompt quit
                         self.app.ctrl_c_count += 1;
                         if self.app.ctrl_c_count >= 2 {
                             println!("\n  Bye! 👋");
@@ -203,10 +223,33 @@ impl ReplSession {
         let mut spinner_frame = 0;
         let mut tool_card_open = false;
 
+        // Snapshot SIGINT count at start — we only care about NEW presses
+        let sigint_base = SIGINT_COUNT.load(std::sync::atomic::Ordering::Relaxed);
+
         // Take the receiver to avoid borrow conflicts
         let rx = self.ui_rx.take();
         
         loop {
+            // Check for Ctrl+C during streaming — interrupt or quit
+            let sigint_now = SIGINT_COUNT.load(std::sync::atomic::Ordering::Relaxed);
+            let new_presses = sigint_now.saturating_sub(sigint_base);
+            if new_presses > 0 {
+                if new_presses >= 2 {
+                    // Double Ctrl+C — quit
+                    output::clear_spinner();
+                    markdown::flush_stream(&mut self.stream_state);
+                    self.stream_state = markdown::StreamState::new();
+                    println!("\n  Bye! 👋");
+                    self.app.quit = true;
+                    self.ui_rx = rx;
+                    return Ok(());
+                } else {
+                    // Single Ctrl+C — interrupt generation
+                    self.interrupt_generation();
+                    self.ui_rx = rx;
+                    return Ok(());
+                }
+            }
             // Drain all pending events
             if let Some(ref rx_ref) = rx {
                 while let Ok(msg) = rx_ref.try_recv() {
