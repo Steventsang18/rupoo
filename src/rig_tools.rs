@@ -552,12 +552,7 @@ impl rig::tool::Tool for ShellExecTool {
                     let child = cmd.spawn();
                     match child {
                         Ok(c) => c.wait_with_output().await,
-                        Err(e) => return Ok(ShellExecOutput {
-                            stdout: String::new(),
-                            exit_code: None,
-                            success: false,
-                            error: Some(format!("Failed to start: {e}")),
-                        }),
+                        Err(e) => Err(std::io::Error::new(std::io::ErrorKind::Other, e)),
                     }
                 }
             ).await;

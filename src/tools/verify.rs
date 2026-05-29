@@ -1,3 +1,5 @@
+#![allow(refining_impl_trait)]
+
 //! Verification tool belt for Rupoo.
 //!
 //! Tools that let the LLM **verify** its own work — run tests, check output,
