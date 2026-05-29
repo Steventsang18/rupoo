@@ -61,8 +61,15 @@ pub async fn build_engine(db_path: &str) -> anyhow::Result<(
     // ── LLM configuration: config.toml → credentials.toml → env → DB fallback ──
     let mut llm_configured = false;
 
-    // 1. Try active provider from config.toml
-    let active_provider = config.llm.active_provider.clone();
+    // 1. Determine active provider: DB override > config.toml > default("ollama")
+    //    DB override is important for existing users who configured via /model command
+    let db_active_provider: Option<String> = repo.get_setting("active_provider").await
+        .ok()
+        .flatten();
+    let active_provider = db_active_provider
+        .as_ref()
+        .cloned()
+        .unwrap_or_else(|| config.llm.active_provider.clone());
 
     // Build provider priority list: active first, then fallback, then remaining
     let mut provider_list = vec![active_provider.clone()];
@@ -152,10 +159,15 @@ pub async fn build_engine(db_path: &str) -> anyhow::Result<(
 
     // ── Build LlmRouter for intent-driven chat routing ──
     let llm_router = if llm_configured {
+        // Sync active_provider from DB override into config so router uses the same provider
+        let mut router_config = config;
+        if db_active_provider.is_some() {
+            router_config.llm.active_provider = active_provider.clone();
+        }
         let router = if let Some(ref root) = jail_root {
-            rupoo::llm::router::LlmRouter::with_jail(config, root.clone())
+            rupoo::llm::router::LlmRouter::with_jail(router_config, root.clone())
         } else {
-            rupoo::llm::router::LlmRouter::new(config)
+            rupoo::llm::router::LlmRouter::new(router_config)
         };
         Some(router)
     } else {
