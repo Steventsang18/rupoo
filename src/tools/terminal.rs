@@ -69,15 +69,7 @@ pub async fn execute_command(
                 format!("{stdout}\n{stderr}")
             };
 
-            let truncated = if combined.len() > MAX_OUTPUT_CHARS {
-                format!(
-                    "{}...\n[output truncated at {} characters]",
-                    &combined[..MAX_OUTPUT_CHARS],
-                    MAX_OUTPUT_CHARS
-                )
-            } else {
-                combined
-            };
+            let truncated = crate::signal::compress_output(&combined, Some(MAX_OUTPUT_CHARS));
 
             if output.status.success() {
                 Ok(truncated)

@@ -9,6 +9,7 @@ pub mod memory;
 pub mod rig_tools;
 pub mod safety;
 pub mod shared;
+pub mod signal;
 pub mod skill;
 pub mod task;
 pub mod tools;

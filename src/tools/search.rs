@@ -56,13 +56,8 @@ pub async fn web_search(query: &str, _safety: &SafetyContext) -> AgentResult<Str
     let results = parse_ddg_results(body);
     let output = format_search_results(&results, query);
 
-    // Truncate if needed
-    let output = if output.len() > MAX_OUTPUT_CHARS {
-        let end = output.floor_char_boundary(MAX_OUTPUT_CHARS);
-        format!("{}...(truncated)", &output[..end])
-    } else {
-        output
-    };
+    // Compress if needed
+    let output = crate::signal::compress_output(&output, Some(MAX_OUTPUT_CHARS));
 
     Ok(output)
 }

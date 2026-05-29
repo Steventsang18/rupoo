@@ -149,15 +149,11 @@ impl rig::tool::Tool for FileReadTool {
             };
             match tokio::fs::read_to_string(&safe_path).await {
                 Ok(content) => {
-                    let truncated = if content.len() > 4096 {
-                        // Use floor_char_boundary to avoid splitting a multi-byte UTF-8 char
-                        let end = content.floor_char_boundary(4096);
-                        format!("{}...(truncated {end} bytes)", &content[..end])
-                    } else {
-                        content
-                    };
+                    let compressed = crate::signal::compress_file_content(
+                        &content, &args.path, None,
+                    );
                     Ok(FileReadOutput {
-                        content: truncated,
+                        content: compressed,
                         success: true,
                         error: None,
                     })

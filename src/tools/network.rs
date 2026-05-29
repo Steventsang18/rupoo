@@ -118,15 +118,7 @@ pub async fn execute_http_request(
     }
 
     let text = String::from_utf8_lossy(&content);
-    let truncated = if text.len() > MAX_OUTPUT_CHARS {
-        format!(
-            "{}...\n[truncated at {} characters]",
-            &text[..MAX_OUTPUT_CHARS],
-            MAX_OUTPUT_CHARS
-        )
-    } else {
-        text.to_string()
-    };
+    let truncated = crate::signal::compress_output(&text, Some(MAX_OUTPUT_CHARS));
 
     Ok(format!("HTTP {status_code}\n{truncated}"))
 }

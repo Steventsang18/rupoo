@@ -413,6 +413,14 @@ impl LlmGateway {
             }
         }
 
+        // Inject environment signals (PWD, git, project type, etc.)
+        let env_signals = crate::signal::EnvironmentSignals::collect();
+        let env_block = env_signals.to_prompt_block();
+        if !env_block.is_empty() {
+            preamble.push_str("\n\n");
+            preamble.push_str(&env_block);
+        }
+
         // Build message history for rig-core
         let mut messages = history.to_rig_messages();
         use rig::message::{Message, UserContent, Text};
