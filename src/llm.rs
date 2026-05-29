@@ -855,7 +855,7 @@ fn build_anthropic_agent(
         .preamble(preamble)
         .temperature(config.temperature)
         .max_tokens(config.max_tokens as u64)
-        .default_max_turns(10)
+        .default_max_turns(25)
         .tool(crate::rig_tools::EchoTool::new());
 
     let builder = register_tools_legacy(builder, jail_root);
@@ -894,7 +894,7 @@ fn build_openai_agent(
         .preamble(preamble)
         .temperature(config.temperature)
         .max_tokens(config.max_tokens as u64)
-        .default_max_turns(10)
+        .default_max_turns(25)
         .tool(crate::rig_tools::EchoTool::new());
 
     let mut builder = register_tools_legacy(builder, jail_root);
@@ -927,7 +927,7 @@ fn build_ollama_agent(
         .preamble(preamble)
         .temperature(config.temperature)
         .max_tokens(config.max_tokens as u64)
-        .default_max_turns(10)
+        .default_max_turns(25)
         .tool(crate::rig_tools::EchoTool::new());
 
     let builder = register_tools_legacy(builder, jail_root);
@@ -947,7 +947,7 @@ fn finish_streaming_agent<M: rig::completion::CompletionModel>(
         .preamble(preamble)
         .temperature(config.temperature)
         .max_tokens(config.max_tokens as u64)
-        .default_max_turns(10)
+        .default_max_turns(25)
         .tool(crate::rig_tools::EchoTool::new());
 
     let builder = register_tools(builder, jail_root, safe_mode);

@@ -75,7 +75,7 @@ impl AgentUiBridge {
         match self.agent.agent_chat(
             user_message,
             &self.conversation_history,
-            10, // max_turns
+            25, // max_turns — tool call rounds per request (10 was too tight for complex tasks)
             safe_mode,
             on_event,
             Some(&self.intent_state),
