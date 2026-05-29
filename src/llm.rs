@@ -985,6 +985,9 @@ fn build_deepseek_agent(
     let model = client.completion_model(&config.model);
 
     let builder = AgentBuilder::new(model)
+        .additional_params(serde_json::json!({
+            "thinking": {"type": "disabled"}
+        }))
         .preamble(preamble)
         .temperature(config.temperature)
         .max_tokens(config.max_tokens as u64)
@@ -1113,7 +1116,17 @@ fn build_deepseek_agent_streaming(
         .map_err(|e| AgentError::Llm(format!("DeepSeek client init failed: {e}")))?;
     let model = client.completion_model(&config.model);
 
-    finish_streaming_agent(AgentBuilder::new(model), preamble, config, jail_root, safe_mode)
+    // Disable DeepSeek thinking mode — rig's DeepSeek provider has a bug in
+    // reasoning_content handling during multi-turn tool calls (it drops
+    // assistant messages that contain reasoning_content from chat history).
+    // By disabling thinking mode, the API won't return reasoning_content,
+    // avoiding the 400 error "reasoning_content must be passed back".
+    let builder = AgentBuilder::new(model)
+        .additional_params(serde_json::json!({
+            "thinking": {"type": "disabled"}
+        }));
+
+    finish_streaming_agent(builder, preamble, config, jail_root, safe_mode)
 }
 
 fn role_label(role: &LlmChatRole) -> &'static str {
