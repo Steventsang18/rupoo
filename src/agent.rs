@@ -160,8 +160,7 @@ impl Agent {
 
         let llm_provider = match provider {
             "anthropic" => crate::llm::LlmProvider::Anthropic,
-            "openai" => crate::llm::LlmProvider::OpenAI,
-            "deepseek" => crate::llm::LlmProvider::DeepSeek,
+            "openai" | "deepseek" => crate::llm::LlmProvider::OpenAI,
             "ollama" => crate::llm::LlmProvider::Ollama,
             _ => return Err(AgentError::Config(format!("Unknown provider: '{}'", provider))),
         };
@@ -172,7 +171,11 @@ impl Agent {
         } else if let Ok(Some(m)) = repo.get_setting(&format!("model.{}", provider)).await {
             cfg.model = m;
         }
-        // Load base_url if configured (e.g. for DeepSeek proxies)
+        // DeepSeek uses OpenAI-compatible API via base_url
+        if provider == "deepseek" && cfg.base_url.is_none() {
+            cfg.base_url = Some("https://api.deepseek.com".to_string());
+        }
+        // Load base_url if explicitly configured
         if let Ok(Some(base_url)) = repo.get_setting(&format!("base_url.{}", provider)).await {
             cfg.base_url = Some(base_url);
         }

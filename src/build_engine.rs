@@ -59,14 +59,17 @@ pub async fn build_engine(db_path: &str) -> anyhow::Result<(
         if let Some(api_key) = repo.get_setting(&format!("api_key.{}", provider)).await? {
             let llm_provider = match *provider {
                 "anthropic" => rupoo::llm::LlmProvider::Anthropic,
-                "openai" => rupoo::llm::LlmProvider::OpenAI,
-                "deepseek" => rupoo::llm::LlmProvider::DeepSeek,
+                "openai" | "deepseek" => rupoo::llm::LlmProvider::OpenAI,
                 "ollama" => rupoo::llm::LlmProvider::Ollama,
                 _ => continue,
             };
             let mut cfg = rupoo::llm::LlmConfig::new(llm_provider, Some(api_key));
             if let Some(model) = repo.get_setting(&format!("model.{}", provider)).await? {
                 cfg.model = model;
+            }
+            // DeepSeek uses OpenAI-compatible API with official base_url
+            if *provider == "deepseek" && cfg.base_url.is_none() {
+                cfg.base_url = Some("https://api.deepseek.com".to_string());
             }
             if let Some(base_url) = repo.get_setting(&format!("base_url.{}", provider)).await? {
                 cfg.base_url = Some(base_url);
