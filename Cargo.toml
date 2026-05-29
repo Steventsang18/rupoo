@@ -11,7 +11,6 @@ categories = ["command-line-utilities", "artificial-intelligence"]
 
 [features]
 default = []
-gui = ["egui", "eframe", "open", "tray-icon"]
 
 [dependencies]
 tokio = { version = "1", features = ["full"] }
@@ -35,17 +34,15 @@ owo-colors = "4"
 syntect = "5"
 indicatif = "0.17"
 ctrlc = "3"
-egui = { version = "0.27", optional = true }
-tray-icon = { version = "0.24", optional = true }
 git2 = { version = "0.19", features = ["vendored-libgit2"] }
-eframe = { version = "0.27", features = ["default"], optional = true }
-open = { version = "5", optional = true }
 console = "0.15"
 which = "8.0.2"
 reqwest = { version = "0.12", features = ["json", "rustls-tls"] }
 urlencoding = "2"
 toml = "0.8"
+serde_yaml = "0.9"
 path_jail = "0.3"
+dirs = "6"
 
 [package.metadata.bundle]
 name = "Rupoo"

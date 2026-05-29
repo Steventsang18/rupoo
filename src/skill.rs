@@ -427,19 +427,236 @@ impl SkillManager {
     ///
     /// Scans all loaded skills for any trigger keyword present in the message.
     /// Returns the first matching skill, or `None` if no trigger matches.
+    /// Supports both exact and fuzzy matching (Levenshtein distance ≤ 2).
     pub fn match_trigger(&self, message: &str) -> AgentResult<Option<SkillDef>> {
         let msg_lower = message.to_lowercase();
+        let msg_words: Vec<&str> = msg_lower.split_whitespace().collect();
         let skills = self.list_skills()?;
+
+        let mut best_match: Option<(SkillDef, usize)> = None;
+
         for name in &skills {
-            let skill = self.load_skill(name)?;
+            let skill = match self.load_skill(name) {
+                Ok(s) => s,
+                Err(_) => continue,
+            };
+
             for trigger in &skill.trigger {
-                if msg_lower.contains(&trigger.to_lowercase()) {
+                let trigger_lower = trigger.to_lowercase();
+
+                // Exact substring match (highest priority)
+                if msg_lower.contains(&trigger_lower) {
                     return Ok(Some(skill));
+                }
+
+                // Fuzzy match: check each word against trigger
+                for word in &msg_words {
+                    let dist = levenshtein_distance(word, &trigger_lower);
+                    if dist <= 2 && dist > 0 {
+                        match &best_match {
+                            None => best_match = Some((skill.clone(), dist)),
+                            Some((_, best_dist)) if dist < *best_dist => {
+                                best_match = Some((skill.clone(), dist));
+                            }
+                            _ => {}
+                        }
+                    }
                 }
             }
         }
-        Ok(None)
+
+        Ok(best_match.map(|(skill, _)| skill))
     }
+
+    /// Load a SKILL.md file (YAML frontmatter + Markdown body).
+    ///
+    /// SKILL.md format:
+    /// ```markdown
+    /// ---
+    /// name: my-skill
+    /// description: Does something useful
+    /// triggers:
+    ///   - "help me with X"
+    ///   - "do X"
+    /// ---
+    /// # Instructions
+    /// Step-by-step instructions for the skill...
+    /// ```
+    pub fn load_skill_md(&self, name: &str) -> AgentResult<SkillDef> {
+        let path = self.skills_dir.join(format!("{name}.md"));
+        if !path.exists() {
+            return Err(AgentError::Skill(format!(
+                "SKILL.md not found: '{name}' (looked at {})",
+                path.display()
+            )));
+        }
+
+        let content = std::fs::read_to_string(&path)?;
+        Self::parse_skill_md(&content, name)
+    }
+
+    /// Parse a SKILL.md file content into a SkillDef.
+    fn parse_skill_md(content: &str, fallback_name: &str) -> AgentResult<SkillDef> {
+        // Extract YAML frontmatter
+        let (frontmatter, body) = if content.starts_with("---") {
+            let end = content[3..].find("---").map(|i| i + 3);
+            match end {
+                Some(end_idx) => {
+                    let fm = &content[3..end_idx];
+                    let body = content[end_idx + 3..].trim();
+                    (fm.to_string(), body.to_string())
+                }
+                None => (String::new(), content.to_string()),
+            }
+        } else {
+            (String::new(), content.to_string())
+        };
+
+        // Parse frontmatter
+        let fm: SkillFrontmatter = if frontmatter.is_empty() {
+            SkillFrontmatter::default()
+        } else {
+            serde_yaml::from_str(&frontmatter).map_err(|e| {
+                AgentError::Skill(format!("parse SKILL.md frontmatter: {e}"))
+            })?
+        };
+
+        // Convert body to steps — each section heading becomes a Think step,
+        // code blocks become Exec steps, tool references become ToolCall steps.
+        let steps = Self::body_to_steps(&body);
+
+        Ok(SkillDef {
+            name: fm.name.unwrap_or_else(|| fallback_name.to_string()),
+            description: fm.description.unwrap_or_default(),
+            version: fm.version.unwrap_or_else(|| "1.0".to_string()),
+            schema_version: "2.0".to_string(),
+            trigger: fm.triggers.unwrap_or_default(),
+            steps,
+        })
+    }
+
+    /// Convert markdown body to skill steps.
+    fn body_to_steps(body: &str) -> Vec<SkillStep> {
+        let mut steps = Vec::new();
+
+        for line in body.lines() {
+            let trimmed = line.trim();
+
+            // Section headings → Think steps
+            if trimmed.starts_with("# ") {
+                let instruction = trimmed[2..].trim().to_string();
+                if !instruction.is_empty() {
+                    steps.push(SkillStep::Think { instruction });
+                }
+            }
+            // Tool references: `@tool_name(params)` → ToolCall steps
+            else if trimmed.starts_with("@") {
+                if let Some(tool_call) = Self::parse_tool_reference(trimmed) {
+                    steps.push(tool_call);
+                }
+            }
+            // Code blocks: ```bash ... ``` → Exec steps
+            else if trimmed.starts_with("```") {
+                // Simplified: just note it as a think step about running code
+                // Full implementation would need multi-line code block parsing
+                continue;
+            }
+            // Regular text → additional context for the last Think step
+            else if !trimmed.is_empty() {
+                if let Some(SkillStep::Think { ref mut instruction }) = steps.last_mut() {
+                    instruction.push_str(&format!("\n{}", trimmed));
+                } else {
+                    steps.push(SkillStep::Think {
+                        instruction: trimmed.to_string(),
+                    });
+                }
+            }
+        }
+
+        // Add a Finish step if not present
+        if !steps.iter().any(|s| matches!(s, SkillStep::Finish { .. })) {
+            steps.push(SkillStep::Finish {
+                summary: "Skill execution complete".to_string(),
+            });
+        }
+
+        steps
+    }
+
+    /// Parse a tool reference like `@file_read(path="Cargo.toml")`.
+    fn parse_tool_reference(line: &str) -> Option<SkillStep> {
+        let line = line.strip_prefix('@')?;
+        let paren_start = line.find('(')?;
+        let paren_end = line.rfind(')')?;
+
+        let tool_name = line[..paren_start].trim().to_string();
+        let params_str = &line[paren_start + 1..paren_end];
+
+        let params: serde_json::Value = if params_str.trim().is_empty() {
+            serde_json::json!({})
+        } else {
+            // Try to parse as JSON first
+            serde_json::from_str(params_str)
+                .ok()
+                .unwrap_or_else(|| {
+                    // Fallback: try key=value format
+                    let mut map = serde_json::Map::new();
+                    for pair in params_str.split(',') {
+                        if let Some((key, value)) = pair.split_once('=') {
+                            let key = key.trim().trim_matches('"');
+                            let value = value.trim().trim_matches('"');
+                            map.insert(key.to_string(), serde_json::Value::String(value.to_string()));
+                        }
+                    }
+                    serde_json::Value::Object(map)
+                })
+        };
+
+        Some(SkillStep::ToolCall { tool_name, params })
+    }
+}
+
+/// YAML frontmatter structure for SKILL.md files.
+#[derive(Debug, Default, serde::Deserialize)]
+struct SkillFrontmatter {
+    name: Option<String>,
+    description: Option<String>,
+    version: Option<String>,
+    triggers: Option<Vec<String>>,
+}
+
+// ---------------------------------------------------------------------------
+// Levenshtein distance (shared with commands.rs)
+// ---------------------------------------------------------------------------
+
+fn levenshtein_distance(a: &str, b: &str) -> usize {
+    let a_chars: Vec<char> = a.chars().collect();
+    let b_chars: Vec<char> = b.chars().collect();
+    let a_len = a_chars.len();
+    let b_len = b_chars.len();
+
+    if a_len == 0 { return b_len; }
+    if b_len == 0 { return a_len; }
+
+    let mut matrix = vec![vec![0; b_len + 1]; a_len + 1];
+
+    for (i, row) in matrix.iter_mut().enumerate() {
+        row[0] = i;
+    }
+    for j in 0..=b_len {
+        matrix[0][j] = j;
+    }
+
+    for i in 1..=a_len {
+        for j in 1..=b_len {
+            let cost = if a_chars[i - 1] == b_chars[j - 1] { 0 } else { 1 };
+            matrix[i][j] = (matrix[i - 1][j] + 1)
+                .min(matrix[i][j - 1] + 1)
+                .min(matrix[i - 1][j - 1] + cost);
+        }
+    }
+
+    matrix[a_len][b_len]
 }
 
 #[cfg(test)]

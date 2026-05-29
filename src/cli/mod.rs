@@ -5,6 +5,7 @@
 
 pub mod app;
 pub mod cmds;
+pub mod commands;
 pub mod handlers;
 pub mod output;
 pub mod markdown;
@@ -170,11 +171,10 @@ impl ReplSession {
                     let _ = self.rl.add_history_entry(&input);
 
                     // Handle slash commands
-                    if input.starts_with('/') {
-                        if self.handle_command(&input) {
+                    if input.starts_with('/')
+                        && self.handle_command(&input) {
                             continue;
                         }
-                    }
 
                     // Submit user message
                     self.submit_message(&input);
@@ -391,31 +391,27 @@ impl ReplSession {
         let cmd = parts[0];
         let arg = parts.get(1).copied().unwrap_or("");
 
-        match cmd {
-            "/help" | "/h" | "/?" => {
+        // Strip leading slash for registry lookup
+        let cmd_name = cmd.strip_prefix('/').unwrap_or(cmd);
+
+        // Try CommandRegistry for fuzzy matching on unknown commands
+        match cmd_name {
+            "help" | "h" | "?" => {
                 println!();
-                println!("  {}", "Commands:".cyan().bold());
-                println!("  {} /help        — show this help", "›".dimmed());
-                println!("  {} /new         — new session", "›".dimmed());
-                println!("  {} /sessions    — list sessions", "›".dimmed());
-                println!("  {} /switch <n>  — switch to session #n", "›".dimmed());
-                println!("  {} /model       — show current model", "›".dimmed());
-                println!("  {} /theme <name>— switch theme (dark/light/monokai)", "›".dimmed());
-                println!("  {} /plan <msg>  — plan mode", "›".dimmed());
-                println!("  {} /clear       — clear screen", "›".dimmed());
-                println!("  {} /quit        — exit rupoo", "›".dimmed());
+                let registry = commands::CommandRegistry::new();
+                print!("{}", registry.format_help());
                 println!();
                 true
             }
-            "/new" => {
+            "new" => {
                 self.create_new_session();
                 true
             }
-            "/sessions" | "/ls" => {
+            "sessions" | "ls" => {
                 self.list_sessions();
                 true
             }
-            "/switch" | "/s" => {
+            "switch" | "s" => {
                 if let Ok(idx) = arg.parse::<usize>() {
                     self.switch_to_session(idx);
                 } else {
@@ -423,13 +419,11 @@ impl ReplSession {
                 }
                 true
             }
-            "/model" | "/m" => {
+            "model" | "m" => {
                 if arg.is_empty() {
                     println!("  {} {}", "Model:".cyan(), self.app.model_label.cyan().bold());
                     true
                 } else {
-                    // /model <provider> [model] — forward to bridge for hot switch
-                    // Bridge handles the actual switch_llm call and sends back status
                     if let Some(ref tx) = self.app.agent_tx {
                         let _ = tx.send(TuiToAgent::SubmitMessage(format!("/model {}", arg)));
                         self.app.set_thinking();
@@ -441,9 +435,8 @@ impl ReplSession {
                     true
                 }
             }
-            "/theme" | "/t" => {
+            "theme" | "t" => {
                 if arg.is_empty() {
-                    // Show current theme and available options
                     let current = theme::current_name();
                     let names: Vec<String> = theme::Theme::all_names()
                         .iter()
@@ -460,12 +453,11 @@ impl ReplSession {
                     theme::set(t);
                     output::set_cursor_style_bar();
                     println!("  {} Switched to {} theme", "✓".green(), arg);
-                    // Persist theme preference
                     if let Some(ref repo) = self.app.repo {
                         if let Some(ref handle) = self.app.rt_handle {
                             let repo = std::sync::Arc::clone(repo);
                             let theme_name = arg.to_string();
-                            let _ = handle.spawn(async move {
+                            handle.spawn(async move {
                                 let _ = repo.set_setting("theme", &theme_name).await;
                             });
                         }
@@ -476,16 +468,48 @@ impl ReplSession {
                 }
                 true
             }
-            "/clear" | "/cls" => {
-                print!("\x1b[2J\x1b[H"); // Clear screen + cursor home
+            "clear" | "cls" => {
+                print!("\x1b[2J\x1b[H");
                 let _ = io::stdout().flush();
                 true
             }
-            "/quit" | "/q" | "/exit" => {
+            "compact" => {
+                let before = self.app.conversation_history.estimated_tokens();
+                let before_msgs = self.app.conversation_history.len();
+                self.app.conversation_history.compact(5);
+                let after = self.app.conversation_history.estimated_tokens();
+                let after_msgs = self.app.conversation_history.len();
+                let bar = self.app.conversation_history.budget_progress_bar();
+                println!("  {} Compacted {} → {} messages", "✓".green(), before_msgs, after_msgs);
+                println!("  {} {} → {} tokens", "│".dimmed(), before, after);
+                println!("  {} {}", "│".dimmed(), bar);
+                if let Some(ref repo) = self.app.repo {
+                    if let Some(ref handle) = self.app.rt_handle {
+                        let repo = std::sync::Arc::clone(repo);
+                        let sid = self.app.current_session_id();
+                        let ch = self.app.conversation_history.clone();
+                        handle.spawn(async move {
+                            let _ = repo.save_conversation_history(&sid, &ch).await;
+                        });
+                    }
+                }
+                true
+            }
+            "budget" => {
+                let bar = self.app.conversation_history.budget_progress_bar();
+                let near = if self.app.conversation_history.is_near_budget() {
+                    " ⚠ near limit!".yellow().to_string()
+                } else {
+                    String::new()
+                };
+                println!("  {} {}{}", "▸".cyan(), bar, near);
+                true
+            }
+            "quit" | "q" | "exit" => {
                 self.app.quit = true;
                 true
             }
-            "/plan" => {
+            "plan" => {
                 if !arg.is_empty() {
                     output::user_message(arg);
                     if let Some(ref tx) = self.app.agent_tx {
@@ -499,7 +523,17 @@ impl ReplSession {
                 }
                 true
             }
-            _ => false, // Not a recognized command, treat as regular input
+            _ => {
+                // Fuzzy match via CommandRegistry
+                let registry = commands::CommandRegistry::new();
+                if let Some(suggestion) = registry.find(cmd_name) {
+                    println!("  {} Unknown command '/{}'. Did you mean '/{}'?",
+                        "✗".red(), cmd_name, suggestion.name);
+                    true
+                } else {
+                    false // Not a recognized command, treat as regular input
+                }
+            }
         }
     }
 
@@ -644,14 +678,12 @@ impl ReplSession {
             if let Some(ref handle) = self.app.rt_handle {
                 let repo = std::sync::Arc::clone(repo);
                 let new_id_clone = new_id.clone();
-                if let Ok(ch) = handle.block_on(async {
+                if let Ok(Some(ch)) = handle.block_on(async {
                     repo.load_conversation_history(&new_id_clone).await
                 }) {
-                    if let Some(ch) = ch {
-                        self.app.conversation_history = ch;
-                        if self.app.conversation_history.token_budget() == 0 {
-                            self.app.conversation_history = self.app.conversation_history.clone().with_token_budget(60000);
-                        }
+                    self.app.conversation_history = ch;
+                    if self.app.conversation_history.token_budget() == 0 {
+                        self.app.conversation_history = self.app.conversation_history.clone().with_token_budget(60000);
                     }
                 }
             }
@@ -687,6 +719,7 @@ pub fn run_tui_with_agent(
     agent: Agent,
     tool_executor: std::sync::Arc<Box<dyn rupoo::agent::ToolExecutor>>,
     rt_handle: tokio::runtime::Handle,
+    llm_router: Option<rupoo::llm::router::LlmRouter>,
 ) -> Result<(), &'static str> {
     let (sessions_data, model_label, llm_configured, llm_provider, conversation_history, approve_all) = rt_handle.block_on(async {
         let sessions = repo.load_ui_sessions().await.unwrap_or_default();
@@ -766,6 +799,7 @@ pub fn run_tui_with_agent(
                     session_id: "default".to_string(),
                     intent_state: rupoo::signal::IntentState::new(),
                     cancelled: cancel_flag_bridge,
+                    llm_router,
                 };
                 agent_task.run().await;
             });

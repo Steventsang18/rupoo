@@ -123,7 +123,7 @@ impl RupooApp {
             let active_id = sessions.iter().find(|s| s.active).map(|s| s.id.clone()).unwrap_or_else(|| "default".to_string());
             let active_label = sessions.iter().find(|s| s.active).map(|s| s.label.clone()).unwrap_or_else(|| "default".to_string());
             std::thread::spawn(move || {
-                let _ = handle.block_on(async {
+                handle.block_on(async {
                     let _ = repo.save_ui_session(&active_id, &active_label, &messages_json, true).await;
                 });
             });

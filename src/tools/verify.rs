@@ -419,7 +419,7 @@ impl Tool for DiffCheckTool {
                 }),
             };
 
-            let has_changes = !stats.is_empty() && stats != "";
+            let has_changes = !stats.is_empty() && !stats.is_empty();
 
             Ok(DiffCheckOutput {
                 success: true,

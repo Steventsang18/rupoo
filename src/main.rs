@@ -57,12 +57,6 @@ enum Commands {
         action: main_cli::ConfigAction,
     },
     /// Launch the desktop GUI
-    #[cfg(feature = "gui")]
-    Gui {
-        /// Database path (default: ~/.rupoo/agent.db)
-        #[arg(long)]
-        db: Option<String>,
-    },
     /// Start MCP protocol server over stdio
     McpServer,
     /// Show system status overview
@@ -137,14 +131,14 @@ async fn main() -> anyhow::Result<()> {
             let data_dir = tracing_setup::data_dir();
             std::fs::create_dir_all(&data_dir).ok();
             let db_path = data_dir.join("agent.db");
-            let (repo, agent, tool_executor) =
+            let (repo, agent, tool_executor, llm_router) =
                 build_engine::build_engine(db_path.to_str().unwrap_or("agent.db")).await?;
 
             // Capture tokio handle on the main async thread (not inside spawn_blocking)
             let handle = tokio::runtime::Handle::current();
 
             let err_msg = tokio::task::spawn_blocking(move || {
-                crate::cli::run_tui_with_agent(repo, agent, tool_executor, handle)
+                crate::cli::run_tui_with_agent(repo, agent, tool_executor, handle, llm_router)
             })
             .await
             .map_err(|e| anyhow::anyhow!("TUI task failed: {e}"))?;

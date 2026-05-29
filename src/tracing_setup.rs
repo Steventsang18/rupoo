@@ -50,7 +50,7 @@ fn redact_sensitive_fields(fmt_fields: &mut String) {
         if let Some(start) = fmt_fields.find(&unquoted_pattern) {
             let val_start = start + unquoted_pattern.len();
             let val_end = fmt_fields[val_start..]
-                .find(|c: char| c == ' ' || c == ',' || c == '}')
+                .find([' ', ',', '}'])
                 .map(|i| val_start + i)
                 .unwrap_or(fmt_fields.len());
             fmt_fields.replace_range(val_start..val_end, "***REDACTED***");

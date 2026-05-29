@@ -9,6 +9,7 @@ use super::{AgentToTui, TuiToAgent};
 use super::approval::ApprovalExt;
 use super::ChatMessage;
 use rupoo::agent::ToolExecutor;
+use rupoo::llm::router::LlmRouter;
 
 // ═══════════════════════════════════════════════════════════════════════════
 // AgentUiBridge — bridges async agent to TUI
@@ -35,6 +36,9 @@ pub(super) struct AgentUiBridge {
     pub(super) intent_state: rupoo::signal::IntentState,
     /// Cancel flag — set by TUI when user interrupts generation.
     pub(super) cancelled: Arc<AtomicBool>,
+    /// LLM Router — intent-driven provider selection with circuit breaker.
+    /// When present, chat requests go through the router instead of agent.agent_chat().
+    pub(super) llm_router: Option<LlmRouter>,
 }
 
 impl AgentUiBridge {
@@ -128,6 +132,36 @@ impl AgentUiBridge {
                             ChatMessage::system("Conversation history cleared".to_string()),
                         ));
                         let _ = self.ui_tx.send(AgentToTui::Idle);
+                    } else if text == "/compact" {
+                        // Compact conversation history
+                        let before = self.conversation_history.estimated_tokens();
+                        let before_msgs = self.conversation_history.len();
+                        self.conversation_history.compact(5);
+                        let after = self.conversation_history.estimated_tokens();
+                        let after_msgs = self.conversation_history.len();
+                        let bar = self.conversation_history.budget_progress_bar();
+                        if let Err(e) = self.repo.save_conversation_history(&self.session_id, &self.conversation_history).await {
+                            tracing::warn!(error = %e, "failed to persist compacted history");
+                        }
+                        let _ = self.ui_tx.send(AgentToTui::Message(
+                            ChatMessage::system(format!(
+                                "Compacted {} → {} messages ({} → {} tokens)\n{}",
+                                before_msgs, after_msgs, before, after, bar
+                            )),
+                        ));
+                        let _ = self.ui_tx.send(AgentToTui::Idle);
+                    } else if text == "/budget" {
+                        // Show token budget status
+                        let bar = self.conversation_history.budget_progress_bar();
+                        let near = if self.conversation_history.is_near_budget() {
+                            "\n⚠ Approaching token budget limit — use /compact to compress"
+                        } else {
+                            ""
+                        };
+                        let _ = self.ui_tx.send(AgentToTui::Message(
+                            ChatMessage::system(format!("{}{}", bar, near)),
+                        ));
+                        let _ = self.ui_tx.send(AgentToTui::Idle);
                     } else if text == "/status" {
                         // Show session status
                         let llm_status = if self.agent.has_llm() { "configured" } else { "not configured" };
@@ -148,6 +182,8 @@ impl AgentUiBridge {
 Available commands:
   /plan <task>    — Generate and execute a step-by-step plan
   /model <prov> [model] — Switch LLM provider/model
+  /compact        — Compress conversation history
+  /budget         — Show token budget usage
   /clear          — Clear conversation history
   /status         — Show current session status
   /help           — Show this help message

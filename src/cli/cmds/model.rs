@@ -94,7 +94,7 @@ async fn cmd_set_string(repo: &TaskRepo, target: Option<&str>) -> Result<String>
             PROVIDER_KEYS.iter().map(|(n,_,_,_)| *n).collect::<Vec<_>>().join(", "));
     }
 
-    repo.set_setting("active_provider", &provider).await?;
+    repo.set_setting("active_provider", provider).await?;
 
     let mut out = String::new();
     match model {

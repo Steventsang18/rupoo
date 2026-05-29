@@ -79,6 +79,9 @@ pub struct Agent {
     pub tool_executor: Box<dyn ToolExecutor>,
     llm_gateway: Option<LlmGateway>,
     pub safety_ctx: SafetyContext,
+    /// Configurable approval policy — replaces hardcoded needs_approval().
+    /// Defaults to DangerousOnlyPolicy (only dangerous ops need approval).
+    approval_policy: Box<dyn crate::approval::ApprovalPolicy>,
     /// Token usage from the most recent chat() call.
     /// Uses Mutex for interior mutability (Cell is not Sync).
     last_usage: std::sync::Mutex<Option<TokenUsage>>,
@@ -93,6 +96,7 @@ impl Agent {
             tool_executor,
             llm_gateway: None,
             safety_ctx: SafetyContext::default(),
+            approval_policy: crate::approval::policy_from_name("dangerous_only"),
             last_usage: std::sync::Mutex::new(None),
             cancelled: std::sync::atomic::AtomicBool::new(false),
         }
@@ -130,6 +134,17 @@ impl Agent {
     pub fn with_llm(mut self, gateway: LlmGateway) -> Self {
         self.llm_gateway = Some(gateway);
         self
+    }
+
+    /// Set a custom approval policy.
+    pub fn with_approval_policy(mut self, policy: Box<dyn crate::approval::ApprovalPolicy>) -> Self {
+        self.approval_policy = policy;
+        self
+    }
+
+    /// Set approval policy by name (e.g. "always_ask", "dangerous_only", "allow_all").
+    pub fn with_approval_policy_name(self, name: &str) -> Self {
+        self.with_approval_policy(crate::approval::policy_from_name(name))
     }
 
     /// Get a reference to the LLM gateway if available.
@@ -254,7 +269,16 @@ impl Agent {
 
         // Run the agent loop
         gateway
-            .chat_agent_loop(user_message, history, max_turns, safe_mode, context_ref, on_event, custom_preamble.as_deref(), intent)
+            .chat_agent_loop(crate::llm::gateway::ChatLoopParams {
+                user_message,
+                history,
+                max_turns,
+                safe_mode,
+                memory_context: context_ref,
+                on_event,
+                custom_preamble: custom_preamble.as_deref(),
+                intent,
+            })
             .await
     }
 
@@ -537,7 +561,7 @@ fn build_system_prompt() -> String {
 
             let messages = vec![
                 LlmChatMessage::system(&system),
-                LlmChatMessage::user(&instruction.to_string()),
+                LlmChatMessage::user(instruction),
             ];
             match gateway.chat(&messages).await {
                 Ok((response, usage)) => {
@@ -583,7 +607,7 @@ fn build_system_prompt() -> String {
 
         // High-risk tools require user approval before execution.
         // Return RequiresApproval and let the bridge pause the run_plan loop.
-        if self.safety_ctx.needs_approval(tool_name) {
+        if self.approval_policy.needs_approval(tool_name, params) {
             return Ok(StepOutcome::RequiresApproval {
                 tool_name: tool_name.to_string(),
                 params: params.clone(),
@@ -717,7 +741,7 @@ fn build_system_prompt() -> String {
         timeout_secs: Option<u64>,
     ) -> AgentResult<StepOutcome> {
         // Exec steps also need approval for dangerous commands
-        if self.safety_ctx.needs_approval(command) {
+        if self.approval_policy.needs_approval(command, &serde_json::json!({"command": command, "args": args})) {
             return Ok(StepOutcome::RequiresApproval {
                 tool_name: command.to_string(),
                 params: serde_json::json!({"command": command, "args": args}),

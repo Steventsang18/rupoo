@@ -11,10 +11,6 @@ use serde::{Deserialize, Serialize};
 use tracing::{error, info};
 
 use crate::error::{AgentError, AgentResult};
-use crate::llm::ConversationHistory;
-use crate::task::{
-    Checkpoint, CheckpointStatus, Plan, PlanStatus, Step, StepStatus,
-};
 
 // ---------------------------------------------------------------------------
 // Submodules

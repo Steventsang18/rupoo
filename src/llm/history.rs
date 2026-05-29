@@ -194,6 +194,187 @@ impl ConversationHistory {
     pub fn estimated_tokens(&self) -> usize {
         self.messages.iter().map(|m| m.content.len()).sum::<usize>() / 2
     }
+
+    /// Enforce the token budget — if over limit, compress history.
+    ///
+    /// Strategy:
+    /// 1. If within 80% of budget → no action
+    /// 2. If between 80-100% → trim oldest non-system messages
+    /// 3. If over 100% → compress older messages into a summary
+    ///
+    /// Returns a `BudgetStatus` indicating what action was taken.
+    pub fn enforce_budget(&mut self) -> BudgetStatus {
+        if self.max_tokens == 0 {
+            return BudgetStatus::NoBudget;
+        }
+
+        let estimated = self.estimated_tokens();
+        let ratio = estimated as f64 / self.max_tokens as f64;
+
+        if ratio <= 0.8 {
+            BudgetStatus::WithinBudget { used: estimated, limit: self.max_tokens }
+        } else if ratio <= 1.0 {
+            // Trim oldest messages to get under 80%
+            self.trim_by_token_budget();
+            BudgetStatus::Trimmed { used: self.estimated_tokens(), limit: self.max_tokens }
+        } else {
+            // Over budget — aggressive trim
+            self.trim_by_token_budget();
+            let remaining = self.estimated_tokens();
+            if remaining > self.max_tokens {
+                BudgetStatus::OverBudget {
+                    used: remaining,
+                    limit: self.max_tokens,
+                    suggestion: "Use /compact to compress history or /new to start a fresh session".into(),
+                }
+            } else {
+                BudgetStatus::Trimmed { used: remaining, limit: self.max_tokens }
+            }
+        }
+    }
+
+    /// Check if history is approaching the budget limit.
+    /// Returns true when usage exceeds 80%.
+    pub fn is_near_budget(&self) -> bool {
+        if self.max_tokens == 0 {
+            return false;
+        }
+        self.estimated_tokens() as f64 / self.max_tokens as f64 > 0.8
+    }
+
+    /// Format a progress bar showing token budget usage.
+    /// Example: `[45k / 128k tokens] ████████░░░░ 35%`
+    pub fn budget_progress_bar(&self) -> String {
+        if self.max_tokens == 0 {
+            return "[no budget limit]".into();
+        }
+
+        let used = self.estimated_tokens();
+        let limit = self.max_tokens;
+        let ratio = (used as f64 / limit as f64).min(1.0);
+
+        let used_display = if used >= 1000 {
+            format!("{}k", used / 1000)
+        } else {
+            format!("{}", used)
+        };
+        let limit_display = if limit >= 1000 {
+            format!("{}k", limit / 1000)
+        } else {
+            format!("{}", limit)
+        };
+
+        let bar_width = 12;
+        let filled = (ratio * bar_width as f64).round() as usize;
+        let empty = bar_width - filled;
+        let bar: String = "█".repeat(filled) + &"░".repeat(empty);
+
+        format!("[{} / {} tokens] {} {:.0}%", used_display, limit_display, bar, ratio * 100.0)
+    }
+
+    /// Compact the history by keeping only the last N turns and a summary of earlier content.
+    /// Returns a new ConversationHistory with compressed older messages.
+    pub fn compact(&mut self, keep_recent_turns: usize) {
+        if self.messages.len() <= keep_recent_turns * 2 {
+            return; // Nothing to compact
+        }
+
+        // Split into system / old / recent
+        let systems: Vec<_> = self.messages.iter()
+            .filter(|m| m.role == LlmChatRole::System)
+            .cloned()
+            .collect();
+
+        let non_system: Vec<_> = self.messages.iter()
+            .filter(|m| m.role != LlmChatRole::System)
+            .cloned()
+            .collect();
+
+        let split_point = non_system.len().saturating_sub(keep_recent_turns * 2);
+        let (old, recent) = non_system.split_at(split_point);
+
+        // Create a summary of old messages
+        let old_summary = Self::summarize_old_messages(old);
+
+        self.messages.clear();
+        self.messages.extend(systems);
+
+        // Add compressed summary as a system message
+        if !old_summary.is_empty() {
+            self.messages.push(LlmChatMessage::system(&format!(
+                "[Earlier conversation summarized]\n{}", old_summary
+            )));
+        }
+
+        // Keep recent messages
+        self.messages.extend(recent.to_vec());
+    }
+
+    /// Create a brief summary of older messages for compression.
+    fn summarize_old_messages(messages: &[LlmChatMessage]) -> String {
+        if messages.is_empty() {
+            return String::new();
+        }
+
+        let mut user_topics = Vec::new();
+        let mut assistant_actions = Vec::new();
+
+        for msg in messages {
+            match msg.role {
+                LlmChatRole::User => {
+                    // Take first line as topic
+                    let topic = msg.content.lines().next().unwrap_or("");
+                    if !topic.is_empty() {
+                        user_topics.push(topic.to_string());
+                    }
+                }
+                LlmChatRole::Assistant => {
+                    // Note if tool calls or file operations were done
+                    let content = &msg.content;
+                    if content.contains("file_read") || content.contains("file_write") {
+                        assistant_actions.push("file operations".to_string());
+                    } else if content.contains("shell_exec") {
+                        assistant_actions.push("shell commands".to_string());
+                    } else if content.contains("web_search") {
+                        assistant_actions.push("web searches".to_string());
+                    }
+                }
+                LlmChatRole::System => {}
+            }
+        }
+
+        let mut parts = Vec::new();
+        if !user_topics.is_empty() {
+            let topics_str = user_topics.iter().take(5).cloned().collect::<Vec<_>>().join("; ");
+            parts.push(format!("Topics discussed: {}", topics_str));
+        }
+        if !assistant_actions.is_empty() {
+            // Deduplicate
+            let mut unique: Vec<String> = assistant_actions.into_iter().collect();
+            unique.sort();
+            unique.dedup();
+            parts.push(format!("Actions taken: {}", unique.join(", ")));
+        }
+
+        parts.join("\n")
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Budget status
+// ---------------------------------------------------------------------------
+
+/// Result of enforcing the token budget.
+#[derive(Debug, Clone, PartialEq)]
+pub enum BudgetStatus {
+    /// No budget limit configured.
+    NoBudget,
+    /// Within 80% of budget.
+    WithinBudget { used: usize, limit: usize },
+    /// Trimmed oldest messages to fit budget.
+    Trimmed { used: usize, limit: usize },
+    /// Over budget even after trimming.
+    OverBudget { used: usize, limit: usize, suggestion: String },
 }
 
 // ---------------------------------------------------------------------------

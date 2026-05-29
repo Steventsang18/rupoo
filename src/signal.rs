@@ -60,8 +60,8 @@ pub fn compress_output(raw: &str, budget: Option<usize>) -> String {
     }
 
     // Many lines — show head + tail + summary
-    let head_lines = (limit / 4).max(10).min(30);
-    let tail_lines = (limit / 4).max(5).min(15);
+    let head_lines = (limit / 4).clamp(10, 30);
+    let tail_lines = (limit / 4).clamp(5, 15);
 
     // Collect head lines within char budget
     let mut head_buf = String::new();
@@ -82,7 +82,7 @@ pub fn compress_output(raw: &str, budget: Option<usize>) -> String {
         if tail_buf.len() + line.len() + 1 > limit / 3 {
             break;
         }
-        tail_buf.insert_str(0, "\n");
+        tail_buf.insert(0, '\n');
         tail_buf.insert_str(0, line);
         tail_count += 1;
     }
@@ -160,9 +160,7 @@ pub fn compress_file_content(content: &str, path: &str, target: Option<&str>) ->
         out.push_str(&format_line_numbered(path, &lines, tail_start, total_lines, total_lines));
     }
 
-    out.push_str(&format!(
-        "\n[use file_read with offset/limit to read specific sections]"
-    ));
+    out.push_str("\n[use file_read with offset/limit to read specific sections]");
 
     if out.len() > budget * 2 {
         return compress_output(&out, Some(budget));
@@ -312,7 +310,7 @@ fn find_recent_files(dir: &Path, hours: u64) -> Vec<String> {
         - std::time::Duration::from_secs(hours * 3600);
 
     let mut recent = Vec::new();
-    let _ = collect_recent_recursive(dir, &cutoff, 0, 2, &mut recent);
+    collect_recent_recursive(dir, &cutoff, 0, 2, &mut recent);
     recent.truncate(8); // Cap at 8 files
     recent
 }
@@ -387,8 +385,10 @@ fn summarize_git_status(status: &str) -> String {
 /// How precisely we understand the user's intent.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
+#[derive(Default)]
 pub enum IntentPrecision {
     /// Barely any signal — the user mentioned something vague
+    #[default]
     Vague,
     /// We know the direction but not the specifics
     Directional,
@@ -398,11 +398,6 @@ pub enum IntentPrecision {
     Actionable,
 }
 
-impl Default for IntentPrecision {
-    fn default() -> Self {
-        Self::Vague
-    }
-}
 
 impl IntentPrecision {
     fn as_str(&self) -> &'static str {
@@ -448,6 +443,11 @@ impl IntentState {
     /// Whether the intent is clear enough to start executing.
     pub fn is_actionable(&self) -> bool {
         self.precision == IntentPrecision::Actionable
+    }
+
+    /// Get the current intent precision level.
+    pub fn precision(&self) -> &IntentPrecision {
+        &self.precision
     }
 
     /// Format as a compact prompt block (< 200 tokens typically).

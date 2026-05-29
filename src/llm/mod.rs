@@ -9,6 +9,7 @@
 pub mod gateway;
 pub mod history;
 pub mod providers;
+pub mod router;
 
 use serde::{Deserialize, Serialize};
 

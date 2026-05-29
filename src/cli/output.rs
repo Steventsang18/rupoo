@@ -97,7 +97,7 @@ pub fn replace_readline_with_user_message(text: &str) {
     let prompt_w = 3; // "❯ " (2 chars + space, but unicode width of ❯ is 2)
     let input_w = text.width();
     let total_w = prompt_w + input_w;
-    let lines_taken = (total_w.max(1) + width - 1) / width;
+    let lines_taken = total_w.max(1).div_ceil(width);
 
     // Erase readline lines: move up and clear each
     for _ in 0..lines_taken {
@@ -136,7 +136,7 @@ pub fn assistant_header() {
 pub fn assistant_footer(duration_s: f64, token_in: u64, token_out: u64, ctx_tokens: usize, ctx_budget: usize) {
     let t = theme::current();
     println!();
-    let ctx_pct = if ctx_budget > 0 { ctx_tokens * 100 / ctx_budget } else { 0 };
+    let ctx_pct = (ctx_tokens * 100).checked_div(ctx_budget).unwrap_or(0);
     let ctx_str = format!("{:.1}k/{}k", ctx_tokens as f64 / 1000.0, ctx_budget / 1000);
 
     let ctx_display = if ctx_pct > 80 {

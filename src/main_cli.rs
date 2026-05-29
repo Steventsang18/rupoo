@@ -154,50 +154,47 @@ pub async fn run_cmd(cmd: super::Commands) -> anyhow::Result<()> {
     match cmd {
         super::Commands::Run { task, db, input } => {
             let db = resolve_db(db);
-            let (repo, agent, _tool_executor) = crate::build_engine::build_engine(&db).await?;
+            let (repo, agent, _tool_executor, _llm_router) = crate::build_engine::build_engine(&db).await?;
             crate::executor::execute_plan(&repo, &agent, &task, input.as_deref()).await?;
         }
-        #[cfg(feature = "gui")]
-        super::Commands::Gui { db } => {
-            let db = resolve_db(db);
-            launch_gui(&db)?;
-        }
-        super::Commands::Git { action } => match action {
-            GitAction::Status => {
-                let repo = rupoo::git::GitRepo::open(".")?;
-                let branch = repo.current_branch()?;
-                let statuses = repo.status()?;
-                println!("Branch: {branch}");
-                println!("Status ({} files):", statuses.len());
-                for s in &statuses {
-                    println!("  [{:>15}] {}", s.status, s.path);
+        super::Commands::Git { action } => {
+            match action {
+                GitAction::Status => {
+                    let repo = rupoo::git::GitRepo::open(".")?;
+                    let branch = repo.current_branch()?;
+                    let statuses = repo.status()?;
+                    println!("Branch: {branch}");
+                    println!("Status ({} files):", statuses.len());
+                    for s in &statuses {
+                        println!("  [{:>15}] {}", s.status, s.path);
+                    }
+                }
+                GitAction::Commit { message, task } => {
+                    let repo = rupoo::git::GitRepo::open(".")?;
+                    let hash = if let Some(task_id) = task {
+                        repo.commit_with_task_ref(&message, &task_id)?
+                    } else {
+                        repo.commit_all(&message)?
+                    };
+                    println!("Committed {hash}: {message}");
+                }
+                GitAction::Pr { title, body } => {
+                    let url = rupoo::git::create_gh_pr(&title, &body)?;
+                    println!("PR created: {url}");
                 }
             }
-            GitAction::Commit { message, task } => {
-                let repo = rupoo::git::GitRepo::open(".")?;
-                let hash = if let Some(task_id) = task {
-                    repo.commit_with_task_ref(&message, &task_id)?
-                } else {
-                    repo.commit_all(&message)?
-                };
-                println!("Committed {hash}: {message}");
-            }
-            GitAction::Pr { title, body } => {
-                let url = rupoo::git::create_gh_pr(&title, &body)?;
-                println!("PR created: {url}");
-            }
-        },
+        }
         super::Commands::Config { action } => match action {
             ConfigAction::Set { key, value, db } => {
                 let db = resolve_db(db);
-                let (repo, _agent, _tool_executor) = crate::build_engine::build_engine(&db).await?;
+                let (repo, _agent, _tool_executor, _llm_router) = crate::build_engine::build_engine(&db).await?;
                 repo.set_setting(&key, &value).await?;
                 info!(key = %key, "configuration saved");
                 println!("Set {key} = {value}");
             }
             ConfigAction::Get { key, db } => {
                 let db = resolve_db(db);
-                let (repo, _agent, _tool_executor) = crate::build_engine::build_engine(&db).await?;
+                let (repo, _agent, _tool_executor, _llm_router) = crate::build_engine::build_engine(&db).await?;
                 match repo.get_setting(&key).await? {
                     Some(value) => println!("{key} = {value}"),
                     None => println!("{key} is not set"),
@@ -205,7 +202,7 @@ pub async fn run_cmd(cmd: super::Commands) -> anyhow::Result<()> {
             }
             ConfigAction::List { db } => {
                 let db = resolve_db(db);
-                let (repo, _agent, _tool_executor) = crate::build_engine::build_engine(&db).await?;
+                let (repo, _agent, _tool_executor, _llm_router) = crate::build_engine::build_engine(&db).await?;
                 let settings = repo.list_settings().await?;
                 if settings.is_empty() {
                     println!("No configuration set.");
@@ -248,7 +245,7 @@ pub async fn run_cmd(cmd: super::Commands) -> anyhow::Result<()> {
                 let manager = SkillManager::new(SkillManager::default_dir());
                 let skill = manager.load_skill(&name)?;
                 let plan = manager.skill_to_plan(&skill);
-                let (repo, agent, _tool_executor) = crate::build_engine::build_engine(&db).await?;
+                let (repo, agent, _tool_executor, _llm_router) = crate::build_engine::build_engine(&db).await?;
                 repo.save_plan(&plan).await?;
                 info!(plan_id = %plan.id, skill = %name, "skill plan saved");
                 print_plan_summary(&plan);
@@ -281,7 +278,7 @@ pub async fn run_cmd(cmd: super::Commands) -> anyhow::Result<()> {
         },
         super::Commands::Demo { db } => {
             let db = resolve_db(db);
-            let (repo, agent, _tool_executor) = crate::build_engine::build_engine(&db).await?;
+            let (repo, agent, _tool_executor, _llm_router) = crate::build_engine::build_engine(&db).await?;
 
             let plan = Plan::new(
                 "Demo Plan",
@@ -318,16 +315,7 @@ pub async fn run_cmd(cmd: super::Commands) -> anyhow::Result<()> {
         super::Commands::Serve { db: _, port } => {
             println!("  {} Server mode (port {port}) — development only. Not for production use.", console::style("⚠").yellow());
             println!("  {} Must bind to 127.0.0.1 and add auth before exposing.", console::style("→").dim());
-            #[cfg(feature = "gui")]
-            {
-                info!("system tray enabled");
-                rupoo::tray::run_service();
-            }
-            #[cfg(not(feature = "gui"))]
-            {
-                info!("compile with --features gui for system tray support");
-                tokio::signal::ctrl_c().await?;
-            }
+            tokio::signal::ctrl_c().await?;
         }
         super::Commands::Status { short, db } => {
             let db = resolve_db(db);
@@ -381,18 +369,4 @@ fn print_plan_summary(plan: &Plan) {
         println!("  [{i}] {label}");
     }
     println!("==========================\n");
-}
-
-#[cfg(feature = "gui")]
-fn launch_gui(db_path: &str) -> anyhow::Result<()> {
-    let state = rupoo::gui::AppState::new(db_path)?;
-    let handle = tokio::runtime::Handle::current();
-    let app = rupoo::gui::GuiApp::new(state, Some(handle));
-    let native_options = eframe::NativeOptions::default();
-    eframe::run_native(
-        "Rupoo",
-        native_options,
-        Box::new(move |_cc| Box::new(app)),
-    )
-    .map_err(|e| anyhow::anyhow!("GUI error: {e}"))
 }

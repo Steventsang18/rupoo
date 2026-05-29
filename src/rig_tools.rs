@@ -552,7 +552,7 @@ impl rig::tool::Tool for ShellExecTool {
                     let child = cmd.spawn();
                     match child {
                         Ok(c) => c.wait_with_output().await,
-                        Err(e) => Err(std::io::Error::new(std::io::ErrorKind::Other, e)),
+                        Err(e) => Err(std::io::Error::other(e)),
                     }
                 }
             ).await;

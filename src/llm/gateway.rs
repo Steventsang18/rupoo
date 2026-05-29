@@ -17,6 +17,18 @@ pub struct LlmGateway {
     jail_root: Option<PathBuf>,
 }
 
+/// Parameters for `chat_agent_loop`, grouped to avoid too-many-arguments.
+pub struct ChatLoopParams<'a, F: FnMut(AgentEvent) + Send> {
+    pub user_message: &'a str,
+    pub history: &'a ConversationHistory,
+    pub max_turns: usize,
+    pub safe_mode: bool,
+    pub memory_context: Option<&'a str>,
+    pub on_event: F,
+    pub custom_preamble: Option<&'a str>,
+    pub intent: Option<&'a crate::signal::IntentState>,
+}
+
 impl LlmGateway {
     pub fn new(config: LlmConfig) -> Self {
         Self { config, jail_root: None }
@@ -98,18 +110,12 @@ impl LlmGateway {
     /// Multi-turn agent chat loop with memory context and streaming.
     pub async fn chat_agent_loop<F>(
         &self,
-        user_message: &str,
-        history: &ConversationHistory,
-        max_turns: usize,
-        safe_mode: bool,
-        memory_context: Option<&str>,
-        mut on_event: F,
-        custom_preamble: Option<&str>,
-        intent: Option<&crate::signal::IntentState>,
+        params: ChatLoopParams<'_, F>,
     ) -> AgentResult<(String, TokenUsage)>
     where
         F: FnMut(AgentEvent) + Send,
     {
+        let ChatLoopParams { user_message, history, max_turns, safe_mode, memory_context, mut on_event, custom_preamble, intent } = params;
         // Build preamble — STATIC ONLY for prompt caching.
         // Dynamic context (env signals, intent state, memory) goes into
         // the message list so the preamble stays identical across turns,
