@@ -506,7 +506,10 @@ pub fn default_tool_set(jail_root: Option<PathBuf>) -> rig::tool::ToolSet {
 
     let mut builder = ToolSetBuilder::default()
         .static_tool(EchoTool)
-        .static_tool(WebSearchTool::new());
+        .static_tool(WebSearchTool::new())
+        .static_tool(crate::tools::verify::RunTestsTool)
+        .static_tool(crate::tools::verify::CheckOutputTool)
+        .static_tool(crate::tools::verify::DiffCheckTool);
     if let Some(ref root) = jail_root {
         builder = builder
             .static_tool(FileReadTool::with_jail(root.clone()))

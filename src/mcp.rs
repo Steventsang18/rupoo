@@ -37,6 +37,9 @@ pub(crate) enum ToolKind {
     FileWrite { jail_root: Option<std::path::PathBuf> },
     ListDir { jail_root: Option<std::path::PathBuf> },
     WebSearch,
+    RunTests,
+    CheckOutput,
+    DiffCheck,
 }
 
 impl ToolKind {
@@ -47,6 +50,9 @@ impl ToolKind {
             ToolKind::FileWrite { .. } => "file_write",
             ToolKind::ListDir { .. } => "list_directory",
             ToolKind::WebSearch => "web_search",
+            ToolKind::RunTests => "run_tests",
+            ToolKind::CheckOutput => "check_output",
+            ToolKind::DiffCheck => "diff_check",
         }
     }
 
@@ -57,6 +63,9 @@ impl ToolKind {
             ToolKind::FileWrite { .. } => "Write content to a file. Overwrites existing content.",
             ToolKind::ListDir { .. } => "List entries in a directory",
             ToolKind::WebSearch => "Search the web using DuckDuckGo",
+            ToolKind::RunTests => "Run the project's test suite (auto-detects Rust/Node/Go/Python)",
+            ToolKind::CheckOutput => "Run a command and capture its output for verification",
+            ToolKind::DiffCheck => "Check git diff to review code changes",
         }
     }
 
@@ -117,6 +126,52 @@ impl ToolKind {
                     }
                 },
                 "required": ["query"]
+            }),
+            ToolKind::RunTests => serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "Optional path to the project directory"
+                    }
+                },
+                "required": []
+            }),
+            ToolKind::CheckOutput => serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "command": {
+                        "type": "string",
+                        "description": "The command to run"
+                    },
+                    "args": {
+                        "type": "string",
+                        "description": "Command-line arguments"
+                    },
+                    "cwd": {
+                        "type": "string",
+                        "description": "Working directory"
+                    },
+                    "timeout": {
+                        "type": "integer",
+                        "description": "Timeout in seconds (default 30)"
+                    }
+                },
+                "required": ["command"]
+            }),
+            ToolKind::DiffCheck => serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "scope": {
+                        "type": "string",
+                        "description": "What to diff: staged, unstaged, or all"
+                    },
+                    "path": {
+                        "type": "string",
+                        "description": "Path to the project directory"
+                    }
+                },
+                "required": []
             }),
         }
     }
@@ -200,6 +255,39 @@ impl ToolKind {
                     }).map_err(|e| e.to_string()),
                 }
             }
+            ToolKind::RunTests => {
+                let args: crate::tools::verify::RunTestsArgs = serde_json::from_value(params)
+                    .map_err(|e| format!("bad args: {e}"))?;
+                let output = crate::tools::verify::RunTestsTool.call(args).await
+                    .map_err(|e| e.to_string())?;
+                serde_json::to_value(McpToolResult {
+                    success: output.success,
+                    content: format!("Runner: {}\n{}", output.test_runner, output.output),
+                    error: output.error,
+                }).map_err(|e| e.to_string())
+            }
+            ToolKind::CheckOutput => {
+                let args: crate::tools::verify::CheckOutputArgs = serde_json::from_value(params)
+                    .map_err(|e| format!("bad args: {e}"))?;
+                let output = crate::tools::verify::CheckOutputTool.call(args).await
+                    .map_err(|e| e.to_string())?;
+                serde_json::to_value(McpToolResult {
+                    success: output.success,
+                    content: output.stdout,
+                    error: output.error,
+                }).map_err(|e| e.to_string())
+            }
+            ToolKind::DiffCheck => {
+                let args: crate::tools::verify::DiffCheckArgs = serde_json::from_value(params)
+                    .map_err(|e| format!("bad args: {e}"))?;
+                let output = crate::tools::verify::DiffCheckTool.call(args).await
+                    .map_err(|e| e.to_string())?;
+                serde_json::to_value(McpToolResult {
+                    success: output.success,
+                    content: format!("{}\n\n{}", output.stats, output.diff),
+                    error: output.error,
+                }).map_err(|e| e.to_string())
+            }
         }
     }
 }
@@ -250,6 +338,9 @@ impl McpToolExecutor {
         tools.insert("file_write".into(), Arc::new(ToolKind::FileWrite { jail_root: jail_root.clone() }));
         tools.insert("list_directory".into(), Arc::new(ToolKind::ListDir { jail_root: jail_root.clone() }));
         tools.insert("web_search".into(), Arc::new(ToolKind::WebSearch));
+        tools.insert("run_tests".into(), Arc::new(ToolKind::RunTests));
+        tools.insert("check_output".into(), Arc::new(ToolKind::CheckOutput));
+        tools.insert("diff_check".into(), Arc::new(ToolKind::DiffCheck));
         tools
     }
 
@@ -414,9 +505,12 @@ mod tests {
     async fn test_list_tools() {
         let executor = McpToolExecutor::new();
         let tools = executor.list_tools().await;
-        assert_eq!(tools.len(), 5);
+        assert_eq!(tools.len(), 8);
         assert!(tools.contains(&"echo".into()));
         assert!(tools.contains(&"file_read".into()));
         assert!(tools.contains(&"web_search".into()));
+        assert!(tools.contains(&"run_tests".into()));
+        assert!(tools.contains(&"check_output".into()));
+        assert!(tools.contains(&"diff_check".into()));
     }
 }
