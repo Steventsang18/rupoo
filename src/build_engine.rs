@@ -71,6 +71,24 @@ pub async fn build_engine(db_path: &str) -> anyhow::Result<(
         };
         agent = agent.with_llm(gateway);
         info!("OpenAI-compatible LLM configured");
+    } else if let Some(api_key) = repo.get_setting("api_key.deepseek").await? {
+        let mut cfg = rupoo::llm::LlmConfig::new(
+            rupoo::llm::LlmProvider::DeepSeek,
+            Some(api_key),
+        );
+        if let Some(model) = repo.get_setting("model.deepseek").await? {
+            cfg.model = model;
+        }
+        if let Some(base_url) = repo.get_setting("base_url.deepseek").await? {
+            cfg.base_url = Some(base_url);
+        }
+        let gateway = if let Some(ref root) = jail_root {
+            rupoo::llm::LlmGateway::with_jail(cfg, root.clone())
+        } else {
+            rupoo::llm::LlmGateway::new(cfg)
+        };
+        agent = agent.with_llm(gateway);
+        info!("DeepSeek LLM configured");
     } else {
         info!("no LLM configured, using dummy think output");
     }

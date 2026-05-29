@@ -161,6 +161,7 @@ impl Agent {
         let llm_provider = match provider {
             "anthropic" => crate::llm::LlmProvider::Anthropic,
             "openai" => crate::llm::LlmProvider::OpenAI,
+            "deepseek" => crate::llm::LlmProvider::DeepSeek,
             "ollama" => crate::llm::LlmProvider::Ollama,
             _ => return Err(AgentError::Config(format!("Unknown provider: '{}'", provider))),
         };
@@ -190,7 +191,7 @@ impl Agent {
     /// Call this after `rupoo config set` to apply changes without restart.
     pub async fn reconfigure_from_db(&mut self, repo: &TaskRepo) -> AgentResult<String> {
         // Try providers in priority order
-        for provider in &["anthropic", "openai", "ollama"] {
+        for provider in &["anthropic", "openai", "deepseek", "ollama"] {
             if let Ok(Some(_api_key)) = repo.get_setting(&format!("api_key.{}", provider)).await {
                 return self.switch_llm(provider, None, repo).await;
             }

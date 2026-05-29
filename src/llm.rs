@@ -266,6 +266,7 @@ pub struct LlmConfig {
 pub enum LlmProvider {
     Anthropic,
     OpenAI,
+    DeepSeek,
     Ollama,
 }
 
@@ -274,6 +275,7 @@ impl std::fmt::Display for LlmProvider {
         match self {
             LlmProvider::Anthropic => write!(f, "anthropic"),
             LlmProvider::OpenAI => write!(f, "openai"),
+            LlmProvider::DeepSeek => write!(f, "deepseek"),
             LlmProvider::Ollama => write!(f, "ollama"),
         }
     }
@@ -285,6 +287,7 @@ impl LlmConfig {
         let (model, base_url) = match &provider {
             LlmProvider::Anthropic => ("claude-sonnet-4-20250514".into(), None),
             LlmProvider::OpenAI => ("gpt-4o".into(), None),
+            LlmProvider::DeepSeek => ("deepseek-chat".into(), None),
             LlmProvider::Ollama => {
                 ("llama3.2".into(), Some("http://localhost:11434".into()))
             }
@@ -354,6 +357,14 @@ impl LlmGateway {
             }
             LlmProvider::OpenAI => {
                 let agent = build_openai_agent(&self.config, preamble, jail_root.as_deref())?;
+                let response = agent.prompt(&prompt)
+                    .extended_details()
+                    .await
+                    .map_err(|e| AgentError::Llm(format!("LLM request failed: {e}")))?;
+                (response.output, response.total_usage.input_tokens, response.total_usage.output_tokens)
+            }
+            LlmProvider::DeepSeek => {
+                let agent = build_deepseek_agent(&self.config, preamble, jail_root.as_deref())?;
                 let response = agent.prompt(&prompt)
                     .extended_details()
                     .await
@@ -481,6 +492,10 @@ impl LlmGateway {
             LlmProvider::OpenAI => {
                 let agent = build_openai_agent_streaming(&self.config, &preamble, self.jail_root.as_deref(), safe_mode)?;
                 self.chat_stream_generic("OpenAI", agent, messages, max_turns, &mut on_event).await
+            }
+            LlmProvider::DeepSeek => {
+                let agent = build_deepseek_agent_streaming(&self.config, &preamble, self.jail_root.as_deref(), safe_mode)?;
+                self.chat_stream_generic("DeepSeek", agent, messages, max_turns, &mut on_event).await
             }
             LlmProvider::Ollama => {
                 let agent = build_ollama_agent_streaming(&self.config, &preamble, self.jail_root.as_deref(), safe_mode)?;
@@ -661,6 +676,14 @@ Respond with a JSON array of steps."#;
             }
             LlmProvider::OpenAI => {
                 let agent = build_openai_agent(&self.config, "", jail_root.as_deref())?;
+                let response = agent.prompt(&prompt_text)
+                    .extended_details()
+                    .await
+                    .map_err(|e| AgentError::Llm(format!("LLM request failed: {e}")))?;
+                (response.output, response.total_usage.input_tokens, response.total_usage.output_tokens)
+            }
+            LlmProvider::DeepSeek => {
+                let agent = build_deepseek_agent(&self.config, "", jail_root.as_deref())?;
                 let response = agent.prompt(&prompt_text)
                     .extended_details()
                     .await
@@ -935,6 +958,44 @@ fn build_ollama_agent(
     Ok(builder.build())
 }
 
+/// DeepSeek agent — native provider with reasoning_content support.
+/// Using the dedicated DeepSeek provider instead of the OpenAI-compatible
+/// path ensures that `reasoning_content` is correctly handled in multi-turn
+/// tool-call conversations (DeepSeek API requires reasoning_content to be
+/// passed back on subsequent turns).
+fn build_deepseek_agent(
+    config: &LlmConfig,
+    preamble: &str,
+    jail_root: Option<&std::path::Path>,
+) -> AgentResult<rig::agent::Agent<rig::providers::deepseek::CompletionModel>> {
+    use rig::agent::AgentBuilder;
+    use rig::client::CompletionClient;
+
+    let api_key = config.api_key.as_deref()
+        .ok_or_else(|| AgentError::Config("DeepSeek requires an API key. Set it via: rupoo config set api_key.deepseek <key>".into()))?;
+
+    let mut client_builder = rig::providers::deepseek::Client::builder();
+    if let Some(base_url) = &config.base_url {
+        client_builder = client_builder.base_url(base_url);
+    }
+    let client = client_builder
+        .api_key(api_key)
+        .build()
+        .map_err(|e| AgentError::Llm(format!("DeepSeek client init failed: {e}")))?;
+    let model = client.completion_model(&config.model);
+
+    let builder = AgentBuilder::new(model)
+        .preamble(preamble)
+        .temperature(config.temperature)
+        .max_tokens(config.max_tokens as u64)
+        .default_max_turns(25)
+        .tool(crate::rig_tools::EchoTool::new());
+
+    let builder = register_tools_legacy(builder, jail_root);
+
+    Ok(builder.build())
+}
+
 /// Helper to finish building a streaming agent: apply common settings, register tools, build.
 fn finish_streaming_agent<M: rig::completion::CompletionModel>(
     builder: rig::agent::AgentBuilder<M>,
@@ -1025,6 +1086,32 @@ fn build_ollama_agent_streaming(
         .build()
         .map_err(|e| AgentError::Llm(format!("Ollama client init failed: {e}")))?;
     let model = rig::providers::ollama::CompletionModel::new(client, &config.model);
+
+    finish_streaming_agent(AgentBuilder::new(model), preamble, config, jail_root, safe_mode)
+}
+
+/// Streaming DeepSeek agent with reasoning_content support.
+fn build_deepseek_agent_streaming(
+    config: &LlmConfig,
+    preamble: &str,
+    jail_root: Option<&std::path::Path>,
+    safe_mode: bool,
+) -> AgentResult<rig::agent::Agent<rig::providers::deepseek::CompletionModel>> {
+    use rig::agent::AgentBuilder;
+    use rig::client::CompletionClient;
+
+    let api_key = config.api_key.as_deref()
+        .ok_or_else(|| AgentError::Config("DeepSeek requires an API key. Set it via: rupoo config set api_key.deepseek <key>".into()))?;
+
+    let mut client_builder = rig::providers::deepseek::Client::builder();
+    if let Some(base_url) = &config.base_url {
+        client_builder = client_builder.base_url(base_url);
+    }
+    let client = client_builder
+        .api_key(api_key)
+        .build()
+        .map_err(|e| AgentError::Llm(format!("DeepSeek client init failed: {e}")))?;
+    let model = client.completion_model(&config.model);
 
     finish_streaming_agent(AgentBuilder::new(model), preamble, config, jail_root, safe_mode)
 }

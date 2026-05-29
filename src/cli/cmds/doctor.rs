@@ -102,7 +102,7 @@ async fn all_checks() -> Vec<CheckResult> {
     if let Ok(repo) = TaskRepo::new("agent.db") {
         let mut msgs = Vec::new();
         let mut all_ok = true;
-        for provider in &["anthropic", "openai"] {
+        for provider in &["anthropic", "openai", "deepseek"] {
             let key = format!("api_key.{provider}");
             match repo.get_setting(&key).await {
                 Ok(Some(val)) if val.len() > 4 => {
