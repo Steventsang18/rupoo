@@ -78,11 +78,18 @@ impl AgentUiBridge {
             10, // max_turns
             safe_mode,
             on_event,
+            Some(&self.intent_state),
         ).await {
             Ok((response, usage)) => {
+                // Parse intent update from LLM response
+                let (clean_response, new_intent) = rupoo::signal::IntentState::parse_from_response(
+                    &response, &self.intent_state,
+                );
+                self.intent_state = new_intent;
+
                 // Update conversation history
                 self.conversation_history.push_user(user_message);
-                self.conversation_history.push_assistant(&response);
+                self.conversation_history.push_assistant(&clean_response);
 
                 // Persist history to DB
                 if let Err(e) = self.repo.save_conversation_history(&self.session_id, &self.conversation_history).await {

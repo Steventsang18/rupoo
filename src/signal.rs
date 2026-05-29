@@ -1,17 +1,22 @@
 //! Signal pipeline & output compression for Rupoo.
 //!
-//! Two responsibilities:
+//! Three responsibilities:
 //! 1. **Output compression** — truncate tool results intelligently so LLM
 //!    gets the most informative bytes within a tight budget.
 //! 2. **Environment signals** — auto-inject PWD / git / project state into
 //!    the system prompt so the LLM can "see" the user's context without
 //!    asking.
+//! 3. **Intent state** — track the user's intent across turns so old
+//!    conversation history can be replaced by a compact summary.
 //!
 //! Design principle: signals are *compression*. Every environment signal
 //! replaces a round of "what's my project?" dialogue; every compressed
-//! output replaces raw bytes that the LLM would have to skim past.
+//! output replaces raw bytes that the LLM would have to skim past; every
+//! intent state update replaces the full replay of prior turns.
 
 use std::path::Path;
+
+use serde::{Serialize, Deserialize};
 
 // ---------------------------------------------------------------------------
 // Output compression
@@ -376,6 +381,242 @@ fn summarize_git_status(status: &str) -> String {
 }
 
 // ---------------------------------------------------------------------------
+// Intent state — track what the user wants across turns
+// ---------------------------------------------------------------------------
+
+/// How precisely we understand the user's intent.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum IntentPrecision {
+    /// Barely any signal — the user mentioned something vague
+    Vague,
+    /// We know the direction but not the specifics
+    Directional,
+    /// Key decisions are confirmed, some details pending
+    Structured,
+    /// Enough clarity to execute
+    Actionable,
+}
+
+impl Default for IntentPrecision {
+    fn default() -> Self {
+        Self::Vague
+    }
+}
+
+impl IntentPrecision {
+    fn as_str(&self) -> &'static str {
+        match self {
+            Self::Vague => "vague",
+            Self::Directional => "directional",
+            Self::Structured => "structured",
+            Self::Actionable => "actionable",
+        }
+    }
+}
+
+/// Compact representation of the user's intent, maintained across turns.
+///
+/// This is the "reins" — a lightweight structure that captures what the user
+/// wants, what's confirmed, what's still open, and what artifacts exist.
+/// It replaces the need to replay full conversation history.
+///
+/// The LLM updates this via a `[INTENT_UPDATE]` tag in its response.
+/// rupoo parses, persists, and re-injects it next turn.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct IntentState {
+    /// One-line summary of what the user wants
+    pub summary: String,
+    /// How precisely we understand the intent
+    pub precision: IntentPrecision,
+    /// Aspects that have been confirmed by the user
+    pub confirmed: Vec<String>,
+    /// Open questions or decisions pending
+    pub pending: Vec<String>,
+    /// Files or artifacts created so far
+    pub artifacts: Vec<String>,
+    /// Turn number (incremented each update)
+    pub turn: usize,
+}
+
+impl IntentState {
+    /// Create a new empty intent state.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Whether the intent is clear enough to start executing.
+    pub fn is_actionable(&self) -> bool {
+        self.precision == IntentPrecision::Actionable
+    }
+
+    /// Format as a compact prompt block (< 200 tokens typically).
+    pub fn to_prompt_block(&self) -> String {
+        if self.summary.is_empty() && self.turn == 0 {
+            return String::new();
+        }
+
+        let mut parts = vec![format!(
+            "## Intent (turn {}, precision: {})",
+            self.turn,
+            self.precision.as_str()
+        )];
+
+        if !self.summary.is_empty() {
+            parts.push(format!("Summary: {}", self.summary));
+        }
+
+        if !self.confirmed.is_empty() {
+            parts.push(format!("Confirmed: {}", self.confirmed.join(", ")));
+        }
+
+        if !self.pending.is_empty() {
+            parts.push(format!("Pending: {}", self.pending.join(", ")));
+        }
+
+        if !self.artifacts.is_empty() {
+            parts.push(format!("Artifacts: {}", self.artifacts.join(", ")));
+        }
+
+        parts.join("\n")
+    }
+
+    /// The instruction block to add to the system prompt so the LLM knows
+    /// how to update intent state.
+    pub fn system_instruction() -> String {
+        "\
+## Intent Tracking
+You are tracking the user's intent across turns. After your response, update the intent state:
+[INTENT_UPDATE]
+summary: <one-line summary of what the user wants>
+precision: <vague|directional|structured|actionable>
+confirmed: <comma-separated confirmed aspects, or none>
+pending: <comma-separated open questions, or none>
+artifacts: <comma-separated files/paths created, or none>
+[/INTENT_UPDATE]
+
+Rules:
+- precision=vague: barely any signal yet
+- precision=directional: we know the general direction
+- precision=structured: key decisions confirmed, some details open
+- precision=actionable: clear enough to execute
+- Only change precision when the user provides new confirming signal
+- Keep summary under 20 words".to_string()
+    }
+
+    /// Parse an INTENT_UPDATE block from an LLM response.
+    /// Returns the response with the block stripped, and the parsed state.
+    pub fn parse_from_response(response: &str, current: &IntentState) -> (String, IntentState) {
+        let start_tag = "[INTENT_UPDATE]";
+        let end_tag = "[/INTENT_UPDATE]";
+
+        let Some(start) = response.find(start_tag) else {
+            return (response.to_string(), current.clone());
+        };
+
+        let Some(end) = response.find(end_tag) else {
+            return (response.to_string(), current.clone());
+        };
+
+        let block = &response[start + start_tag.len()..end];
+        let cleaned_response = format!("{}{}", &response[..start], &response[end + end_tag.len()..]);
+
+        let mut new_state = current.clone();
+        new_state.turn += 1;
+
+        for line in block.lines() {
+            let line = line.trim();
+            if line.is_empty() {
+                continue;
+            }
+
+            if let Some(val) = line.strip_prefix("summary:") {
+                new_state.summary = val.trim().to_string();
+            } else if let Some(val) = line.strip_prefix("precision:") {
+                let p = val.trim();
+                new_state.precision = match p {
+                    "vague" => IntentPrecision::Vague,
+                    "directional" => IntentPrecision::Directional,
+                    "structured" => IntentPrecision::Structured,
+                    "actionable" => IntentPrecision::Actionable,
+                    _ => new_state.precision.clone(),
+                };
+            } else if let Some(val) = line.strip_prefix("confirmed:") {
+                let v = val.trim();
+                if v != "none" && !v.is_empty() {
+                    new_state.confirmed = v.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
+                }
+            } else if let Some(val) = line.strip_prefix("pending:") {
+                let v = val.trim();
+                if v != "none" && !v.is_empty() {
+                    new_state.pending = v.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
+                }
+            } else if let Some(val) = line.strip_prefix("artifacts:") {
+                let v = val.trim();
+                if v != "none" && !v.is_empty() {
+                    new_state.artifacts = v.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
+                }
+            }
+        }
+
+        (cleaned_response.trim().to_string(), new_state)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// History compression — replace old turns with intent summary
+// ---------------------------------------------------------------------------
+
+/// Number of recent turns to keep as full-text before compressing.
+const RECENT_TURNS_TO_KEEP: usize = 3;
+
+/// Compress conversation history: keep recent N turns as-is, replace
+/// everything before with the intent state summary.
+///
+/// This turns a linearly-growing history into a constant-size prefix
+/// + sliding window, drastically reducing token usage for long conversations.
+pub fn compress_history_with_intent(
+    messages: &[crate::llm::LlmChatMessage],
+    intent: &IntentState,
+) -> Vec<crate::llm::LlmChatMessage> {
+    if messages.is_empty() {
+        return Vec::new();
+    }
+
+    let intent_block = intent.to_prompt_block();
+
+    // Count user messages to identify turns
+    let user_indices: Vec<usize> = messages
+        .iter()
+        .enumerate()
+        .filter(|(_, m)| m.role == crate::llm::LlmChatRole::User)
+        .map(|(i, _)| i)
+        .collect();
+
+    // If few enough turns, no compression needed
+    if user_indices.len() <= RECENT_TURNS_TO_KEEP {
+        return messages.to_vec();
+    }
+
+    // Find the cutoff: keep the last RECENT_TURNS_TO_KEEP user turns
+    let cutoff_turn = user_indices.len() - RECENT_TURNS_TO_KEEP;
+    let cutoff_index = user_indices[cutoff_turn];
+
+    // Build compressed: intent summary as system message + recent turns
+    let mut result = Vec::new();
+
+    if !intent_block.is_empty() {
+        result.push(crate::llm::LlmChatMessage {
+            role: crate::llm::LlmChatRole::System,
+            content: intent_block,
+        });
+    }
+
+    result.extend(messages[cutoff_index..].to_vec());
+    result
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -467,3 +708,90 @@ mod tests {
         assert!(block.contains("branch=main"));
     }
 }
+
+    #[test]
+    fn test_intent_state_parse_from_response() {
+        let response = "I'll help you with that!\n[INTENT_UPDATE]\nsummary: Build a file organizer CLI tool\nprecision: structured\nconfirmed: CLI, Rust, by-type classification\npending: exact file types to handle\nartifacts: none\n[/INTENT_UPDATE]\nLet me start by creating the project structure.";
+        let current = IntentState::default();
+        let (cleaned, new_state) = IntentState::parse_from_response(response, &current);
+
+        assert!(!cleaned.contains("[INTENT_UPDATE]"));
+        assert!(!cleaned.contains("[/INTENT_UPDATE]"));
+        assert_eq!(new_state.summary, "Build a file organizer CLI tool");
+        assert_eq!(new_state.precision, IntentPrecision::Structured);
+        assert!(new_state.confirmed.contains(&"CLI".to_string()));
+        assert!(new_state.confirmed.contains(&"Rust".to_string()));
+        assert!(new_state.pending.contains(&"exact file types to handle".to_string()));
+        assert_eq!(new_state.turn, 1);
+    }
+
+    #[test]
+    fn test_intent_state_no_update_block() {
+        let response = "Just a normal response without any intent update.";
+        let current = IntentState::default();
+        let (cleaned, new_state) = IntentState::parse_from_response(response, &current);
+
+        assert_eq!(cleaned, response);
+        assert_eq!(new_state.turn, 0); // No increment without update
+    }
+
+    #[test]
+    fn test_intent_state_precision_progression() {
+        let mut state = IntentState::default();
+        assert_eq!(state.precision, IntentPrecision::Vague);
+
+        state.summary = "organize files".to_string();
+        state.precision = IntentPrecision::Directional;
+        assert!(!state.is_actionable());
+
+        state.precision = IntentPrecision::Actionable;
+        assert!(state.is_actionable());
+    }
+
+    #[test]
+    fn test_intent_state_prompt_block() {
+        let state = IntentState {
+            summary: "Build CLI tool".to_string(),
+            precision: IntentPrecision::Structured,
+            confirmed: vec!["Rust".to_string(), "CLI".to_string()],
+            pending: vec!["file types".to_string()],
+            artifacts: vec!["src/main.rs".to_string()],
+            turn: 3,
+        };
+        let block = state.to_prompt_block();
+        assert!(block.contains("turn 3"));
+        assert!(block.contains("structured"));
+        assert!(block.contains("Rust, CLI"));
+    }
+
+    #[test]
+    fn test_compress_history_few_turns() {
+        let messages = vec![
+            crate::llm::LlmChatMessage::user("hello"),
+            crate::llm::LlmChatMessage::assistant("hi"),
+        ];
+        let intent = IntentState::default();
+        let compressed = compress_history_with_intent(&messages, &intent);
+        assert_eq!(compressed.len(), 2); // No compression for few turns
+    }
+
+    #[test]
+    fn test_compress_history_many_turns() {
+        let mut messages = Vec::new();
+        for i in 0..10 {
+            messages.push(crate::llm::LlmChatMessage::user(&format!("msg {}", i)));
+            messages.push(crate::llm::LlmChatMessage::assistant(&format!("reply {}", i)));
+        }
+        let intent = IntentState {
+            summary: "Building a tool".to_string(),
+            precision: IntentPrecision::Actionable,
+            confirmed: vec!["Rust".to_string()],
+            pending: vec![],
+            artifacts: vec![],
+            turn: 10,
+        };
+        let compressed = compress_history_with_intent(&messages, &intent);
+        // Should be: 1 system (intent) + last 3 turns (6 messages) = 7
+        assert!(compressed.len() < messages.len());
+        assert!(compressed[0].content.contains("Building a tool"));
+    }

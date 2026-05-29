@@ -213,6 +213,7 @@ impl Agent {
         max_turns: usize,
         safe_mode: bool,
         on_event: F,
+        intent: Option<&crate::signal::IntentState>,
     ) -> AgentResult<(String, TokenUsage)>
     where
         F: FnMut(AgentEvent) + Send,
@@ -245,7 +246,7 @@ impl Agent {
 
         // Run the agent loop
         gateway
-            .chat_agent_loop(user_message, history, max_turns, safe_mode, context_ref, on_event, custom_preamble.as_deref())
+            .chat_agent_loop(user_message, history, max_turns, safe_mode, context_ref, on_event, custom_preamble.as_deref(), intent)
             .await
     }
 

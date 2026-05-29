@@ -31,6 +31,8 @@ pub(super) struct AgentUiBridge {
     pub(super) conversation_history: rupoo::llm::ConversationHistory,
     /// Session ID for persisting conversation history.
     pub(super) session_id: String,
+    /// Intent state for token-efficient history compression.
+    pub(super) intent_state: rupoo::signal::IntentState,
     /// Cancel flag — set by TUI when user interrupts generation.
     pub(super) cancelled: Arc<AtomicBool>,
 }
@@ -115,8 +117,9 @@ impl AgentUiBridge {
                         }
                         let _ = self.ui_tx.send(AgentToTui::Idle);
                     } else if text == "/clear" {
-                        // Clear conversation history
+                        // Clear conversation history and intent state
                         self.conversation_history.clear();
+                        self.intent_state = rupoo::signal::IntentState::new();
                         if let Err(e) = self.repo.save_conversation_history(&self.session_id, &self.conversation_history).await {
                             tracing::warn!(error = %e, "failed to clear history in DB");
                         }

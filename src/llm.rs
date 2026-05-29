@@ -204,6 +204,11 @@ impl ConversationHistory {
         self.messages.is_empty()
     }
 
+    /// Access the raw message list (for history compression).
+    pub fn messages(&self) -> &[LlmChatMessage] {
+        &self.messages
+    }
+
     pub fn len(&self) -> usize {
         self.messages.len()
     }
@@ -391,6 +396,7 @@ impl LlmGateway {
         memory_context: Option<&str>,
         mut on_event: F,
         custom_preamble: Option<&str>,
+        intent: Option<&crate::signal::IntentState>,
     ) -> AgentResult<(String, TokenUsage)>
     where
         F: FnMut(AgentEvent) + Send,
@@ -421,10 +427,50 @@ impl LlmGateway {
             preamble.push_str(&env_block);
         }
 
-        // Build message history for rig-core
-        let mut messages = history.to_rig_messages();
+        // Inject intent tracking instruction + current intent state
+        preamble.push_str("\n\n");
+        preamble.push_str(&crate::signal::IntentState::system_instruction());
+
+        if let Some(intent_state) = intent {
+            let intent_block = intent_state.to_prompt_block();
+            if !intent_block.is_empty() {
+                preamble.push_str("\n\n");
+                preamble.push_str(&intent_block);
+            }
+        }
+
+        // Build message history — compress old turns with intent if available
+        let raw_messages = history.to_rig_messages();
+        let messages = if let Some(intent_state) = intent {
+            // Convert rig messages back to LlmChatMessage for compression,
+            // then back to rig messages. This is a bridge step — ideally
+            // compress_history_with_intent works on rig::Message directly,
+            // but for now we use the LlmChatMessage path.
+            let llm_messages = history.messages();
+            let compressed = crate::signal::compress_history_with_intent(llm_messages, intent_state);
+            compressed.iter().map(|m| {
+                use rig::message::{Message, UserContent, AssistantContent, Text};
+                use rig::OneOrMany;
+                match m.role {
+                    crate::llm::LlmChatRole::System | crate::llm::LlmChatRole::User => {
+                        Message::User {
+                            content: OneOrMany::one(UserContent::Text(Text { text: m.content.clone() }))
+                        }
+                    }
+                    crate::llm::LlmChatRole::Assistant => {
+                        Message::Assistant {
+                            id: None,
+                            content: OneOrMany::one(AssistantContent::Text(Text { text: m.content.clone() }))
+                        }
+                    }
+                }
+            }).collect::<Vec<_>>()
+        } else {
+            raw_messages
+        };
         use rig::message::{Message, UserContent, Text};
         use rig::OneOrMany;
+        let mut messages = messages;
         messages.push(Message::User {
             content: OneOrMany::one(UserContent::Text(Text { text: user_message.to_string() }))
         });

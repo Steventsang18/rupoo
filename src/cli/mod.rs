@@ -582,6 +582,7 @@ impl ReplSession {
         self.app.sessions.push(tab);
         self.app.messages = Vec::new();
         self.app.conversation_history = ConversationHistory::new(10).with_token_budget(60000);
+        self.app.intent_state = rupoo::signal::IntentState::new();
         self.app.persist_sessions();
 
         println!("  {} New session started", "✓".green());
@@ -748,6 +749,7 @@ pub fn run_tui_with_agent(
                     approve_all,
                     conversation_history,
                     session_id: "default".to_string(),
+                    intent_state: rupoo::signal::IntentState::new(),
                     cancelled: cancel_flag_bridge,
                 };
                 agent_task.run().await;
