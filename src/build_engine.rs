@@ -38,58 +38,51 @@ pub async fn build_engine(db_path: &str) -> anyhow::Result<(
     let mut agent = Agent::new(Arc::clone(&repo), tool_executor);
     agent.safety_ctx = safety_ctx;
 
-    if let Some(api_key) = repo.get_setting("api_key.anthropic").await? {
-        let mut cfg = rupoo::llm::LlmConfig::new(
-            rupoo::llm::LlmProvider::Anthropic,
-            Some(api_key),
-        );
-        if let Some(model) = repo.get_setting("model.anthropic").await? {
-            cfg.model = model;
+    // Check active_provider first (set by /model switch), then fall back to priority order
+    let active_provider: Option<String> = repo.get_setting("active_provider").await?;
+
+    let provider_list = if let Some(ref ap) = active_provider {
+        // Try active provider first, then fall back to others as backup
+        let mut list = vec![ap.as_str()];
+        for p in &["anthropic", "openai", "deepseek", "ollama"] {
+            if *p != ap.as_str() {
+                list.push(p);
+            }
         }
-        let gateway = if let Some(ref root) = jail_root {
-            rupoo::llm::LlmGateway::with_jail(cfg, root.clone())
-        } else {
-            rupoo::llm::LlmGateway::new(cfg)
-        };
-        agent = agent.with_llm(gateway);
-        info!("Anthropic LLM configured");
-    } else if let Some(api_key) = repo.get_setting("api_key.openai").await? {
-        let mut cfg = rupoo::llm::LlmConfig::new(
-            rupoo::llm::LlmProvider::OpenAI,
-            Some(api_key),
-        );
-        if let Some(model) = repo.get_setting("model.openai").await? {
-            cfg.model = model;
-        }
-        if let Some(base_url) = repo.get_setting("base_url.openai").await? {
-            cfg.base_url = Some(base_url);
-        }
-        let gateway = if let Some(ref root) = jail_root {
-            rupoo::llm::LlmGateway::with_jail(cfg, root.clone())
-        } else {
-            rupoo::llm::LlmGateway::new(cfg)
-        };
-        agent = agent.with_llm(gateway);
-        info!("OpenAI-compatible LLM configured");
-    } else if let Some(api_key) = repo.get_setting("api_key.deepseek").await? {
-        let mut cfg = rupoo::llm::LlmConfig::new(
-            rupoo::llm::LlmProvider::DeepSeek,
-            Some(api_key),
-        );
-        if let Some(model) = repo.get_setting("model.deepseek").await? {
-            cfg.model = model;
-        }
-        if let Some(base_url) = repo.get_setting("base_url.deepseek").await? {
-            cfg.base_url = Some(base_url);
-        }
-        let gateway = if let Some(ref root) = jail_root {
-            rupoo::llm::LlmGateway::with_jail(cfg, root.clone())
-        } else {
-            rupoo::llm::LlmGateway::new(cfg)
-        };
-        agent = agent.with_llm(gateway);
-        info!("DeepSeek LLM configured");
+        list
     } else {
+        vec!["anthropic", "openai", "deepseek", "ollama"]
+    };
+
+    let mut llm_configured = false;
+    for provider in &provider_list {
+        if let Some(api_key) = repo.get_setting(&format!("api_key.{}", provider)).await? {
+            let llm_provider = match *provider {
+                "anthropic" => rupoo::llm::LlmProvider::Anthropic,
+                "openai" => rupoo::llm::LlmProvider::OpenAI,
+                "deepseek" => rupoo::llm::LlmProvider::DeepSeek,
+                "ollama" => rupoo::llm::LlmProvider::Ollama,
+                _ => continue,
+            };
+            let mut cfg = rupoo::llm::LlmConfig::new(llm_provider, Some(api_key));
+            if let Some(model) = repo.get_setting(&format!("model.{}", provider)).await? {
+                cfg.model = model;
+            }
+            if let Some(base_url) = repo.get_setting(&format!("base_url.{}", provider)).await? {
+                cfg.base_url = Some(base_url);
+            }
+            let gateway = if let Some(ref root) = jail_root {
+                rupoo::llm::LlmGateway::with_jail(cfg, root.clone())
+            } else {
+                rupoo::llm::LlmGateway::new(cfg)
+            };
+            agent = agent.with_llm(gateway);
+            info!("{} LLM configured", provider);
+            llm_configured = true;
+            break;
+        }
+    }
+    if !llm_configured {
         info!("no LLM configured, using dummy think output");
     }
 
