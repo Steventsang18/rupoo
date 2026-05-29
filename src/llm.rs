@@ -792,6 +792,9 @@ fn register_tools<M: rig::completion::CompletionModel>(
     // Web search is read-only and safe — always register
     builder = builder.tool(crate::rig_tools::WebSearchTool::new());
 
+    // Shell execution with safety validation (sudo/rm/etc. blocked)
+    builder = builder.tool(crate::rig_tools::ShellExecTool::new());
+
     // FileReadTool is safe
     if let Some(root) = jail_root {
         builder = builder.tool(crate::rig_tools::FileReadTool::with_jail(root.to_path_buf()));
@@ -823,7 +826,8 @@ fn register_tools_legacy<M: rig::completion::CompletionModel>(
     builder: rig::agent::AgentBuilderSimple<M>,
     jail_root: Option<&std::path::Path>,
 ) -> rig::agent::AgentBuilderSimple<M> {
-    let builder = builder.tool(crate::rig_tools::WebSearchTool::new());
+    let builder = builder.tool(crate::rig_tools::WebSearchTool::new())
+        .tool(crate::rig_tools::ShellExecTool::new());
     if let Some(root) = jail_root {
         builder
             .tool(crate::rig_tools::FileReadTool::with_jail(root.to_path_buf()))

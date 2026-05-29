@@ -441,6 +441,172 @@ impl rig::tool::Tool for WebSearchTool {
 }
 
 // ---------------------------------------------------------------------------
+// Shell execution tool
+// ---------------------------------------------------------------------------
+
+#[derive(Deserialize)]
+pub struct ShellExecArgs {
+    pub command: String,
+    #[serde(default)]
+    pub timeout: Option<u64>,
+}
+
+#[derive(Serialize)]
+pub struct ShellExecOutput {
+    pub stdout: String,
+    pub exit_code: Option<i32>,
+    pub success: bool,
+    pub error: Option<String>,
+}
+
+pub struct ShellExecTool;
+
+impl Default for ShellExecTool {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl ShellExecTool {
+    pub fn new() -> Self { Self }
+}
+
+#[allow(clippy::manual_async_fn)]
+impl rig::tool::Tool for ShellExecTool {
+    const NAME: &'static str = "shell_exec";
+    type Error = ToolCallError;
+    type Args = ShellExecArgs;
+    type Output = ShellExecOutput;
+
+    fn name(&self) -> String {
+        "shell_exec".into()
+    }
+
+    fn definition(
+        &self,
+        _prompt: String,
+    ) -> impl std::future::Future<Output = rig::completion::ToolDefinition>
+           + rig::wasm_compat::WasmCompatSend
+           + rig::wasm_compat::WasmCompatSync {
+        async move {
+            rig::completion::ToolDefinition {
+                name: "shell_exec".into(),
+                description: "Execute a shell command and return its output. Commands run in the current working directory with safety validation (sudo/rm/etc. are blocked). Use for: running code, installing packages, git operations, file manipulation, building projects, etc.".into(),
+                parameters: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "command": {
+                            "type": "string",
+                            "description": "The shell command to execute (e.g. 'ls -la', 'cargo build', 'python script.py')"
+                        },
+                        "timeout": {
+                            "type": "integer",
+                            "description": "Optional timeout in seconds (default: 30)"
+                        }
+                    },
+                    "required": ["command"]
+                }),
+            }
+        }
+    }
+
+    fn call(
+        &self,
+        args: ShellExecArgs,
+    ) -> impl std::future::Future<Output = Result<ShellExecOutput, Self::Error>>
+           + rig::wasm_compat::WasmCompatSend {
+        async move {
+            let safety = crate::safety::SafetyContext::default();
+
+            // Parse command: extract the base command for safety validation
+            let base_cmd = args.command.split_whitespace().next().unwrap_or("");
+            if let Err(e) = safety.validate_command(base_cmd) {
+                return Ok(ShellExecOutput {
+                    stdout: String::new(),
+                    exit_code: None,
+                    success: false,
+                    error: Some(format!("Command blocked: {e}")),
+                });
+            }
+
+            // Execute via shell for full pipeline/glob support
+            let timeout = args.timeout.unwrap_or(30);
+            let result = tokio::time::timeout(
+                std::time::Duration::from_secs(timeout),
+                async {
+                    let mut cmd = tokio::process::Command::new("sh");
+                    cmd.args(["-c", &args.command])
+                        .stdout(std::process::Stdio::piped())
+                        .stderr(std::process::Stdio::piped())
+                        .kill_on_drop(true);
+
+                    // Strip sensitive env vars
+                    cmd.env_clear();
+                    cmd.env("PATH", std::env::var("PATH").unwrap_or_default());
+                    cmd.env("HOME", std::env::var("HOME").unwrap_or_default());
+                    cmd.env("USER", std::env::var("USER").unwrap_or_default());
+                    cmd.env("SHELL", std::env::var("SHELL").unwrap_or_default());
+                    cmd.env("LANG", std::env::var("LANG").unwrap_or_default());
+                    cmd.env("TERM", std::env::var("TERM").unwrap_or_default());
+
+                    let child = cmd.spawn();
+                    match child {
+                        Ok(c) => c.wait_with_output().await,
+                        Err(e) => return Ok(ShellExecOutput {
+                            stdout: String::new(),
+                            exit_code: None,
+                            success: false,
+                            error: Some(format!("Failed to start: {e}")),
+                        }),
+                    }
+                }
+            ).await;
+
+            match result {
+                Ok(Ok(output)) => {
+                    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+                    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+                    let combined = if stderr.is_empty() {
+                        stdout
+                    } else {
+                        format!("{stdout}\n{stderr}")
+                    };
+
+                    // Truncate if too long
+                    let truncated = if combined.len() > 10_000 {
+                        format!("{}...[truncated, {} chars total]", &combined[..10_000], combined.len())
+                    } else {
+                        combined
+                    };
+
+                    let exit_code = output.status.code();
+                    let success = output.status.success();
+
+                    Ok(ShellExecOutput {
+                        stdout: truncated,
+                        exit_code,
+                        success,
+                        error: if !success { Some(format!("Exit code: {}", exit_code.unwrap_or(-1))) } else { None },
+                    })
+                }
+                Ok(Err(e)) => Ok(ShellExecOutput {
+                    stdout: String::new(),
+                    exit_code: None,
+                    success: false,
+                    error: Some(format!("Execution failed: {e}")),
+                }),
+                Err(_) => Ok(ShellExecOutput {
+                    stdout: String::new(),
+                    exit_code: None,
+                    success: false,
+                    error: Some(format!("Command timed out after {}s", timeout)),
+                }),
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Shared error type for all tools
 // ---------------------------------------------------------------------------
 
@@ -507,6 +673,7 @@ pub fn default_tool_set(jail_root: Option<PathBuf>) -> rig::tool::ToolSet {
     let mut builder = ToolSetBuilder::default()
         .static_tool(EchoTool)
         .static_tool(WebSearchTool::new())
+        .static_tool(ShellExecTool::new())
         .static_tool(crate::tools::verify::RunTestsTool)
         .static_tool(crate::tools::verify::CheckOutputTool)
         .static_tool(crate::tools::verify::DiffCheckTool);
@@ -561,5 +728,27 @@ mod tests {
         let output = tool.call(ListDirArgs { path: ".".into() }).await.unwrap();
         assert!(output.success);
         assert!(!output.entries.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_shell_exec_echo() {
+        let tool = ShellExecTool::new();
+        let output = tool.call(ShellExecArgs {
+            command: "echo hello rupoo".into(),
+            timeout: None,
+        }).await.unwrap();
+        assert!(output.success);
+        assert!(output.stdout.contains("hello rupoo"));
+    }
+
+    #[tokio::test]
+    async fn test_shell_exec_blocked() {
+        let tool = ShellExecTool::new();
+        let output = tool.call(ShellExecArgs {
+            command: "sudo echo test".into(),
+            timeout: None,
+        }).await.unwrap();
+        assert!(!output.success);
+        assert!(output.error.unwrap().contains("blocked"));
     }
 }
