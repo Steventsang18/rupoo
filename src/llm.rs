@@ -890,12 +890,19 @@ fn build_openai_agent(
         &config.model,
     );
 
-    let builder = AgentBuilder::new(model)
+    let mut builder = AgentBuilder::new(model)
         .preamble(preamble)
         .temperature(config.temperature)
         .max_tokens(config.max_tokens as u64)
         .default_max_turns(25)
         .tool(crate::rig_tools::EchoTool::new());
+
+    // Disable thinking mode for custom base_url (e.g. DeepSeek)
+    if config.base_url.is_some() {
+        builder = builder.additional_params(serde_json::json!({
+            "thinking": {"type": "disabled"}
+        }));
+    }
 
     let builder = register_tools_legacy(builder, jail_root);
 
@@ -1000,7 +1007,21 @@ fn build_openai_agent_streaming(
         &config.model,
     );
 
-    finish_streaming_agent(AgentBuilder::new(model), preamble, config, jail_root, safe_mode)
+    // When using a custom base_url (e.g. DeepSeek), disable thinking mode
+    // to prevent reasoning_content from being returned. DeepSeek V4 Flash
+    // defaults to Think mode, which returns reasoning_content that must be
+    // passed back on subsequent turns — but rig's OpenAI handler drops it,
+    // causing API 400 errors.
+    let builder = if config.base_url.is_some() {
+        AgentBuilder::new(model)
+            .additional_params(serde_json::json!({
+                "thinking": {"type": "disabled"}
+            }))
+    } else {
+        AgentBuilder::new(model)
+    };
+
+    finish_streaming_agent(builder, preamble, config, jail_root, safe_mode)
 }
 
 /// Streaming agent for Ollama with safe_mode.
