@@ -72,10 +72,16 @@ impl AgentUiBridge {
         let safe_mode = true; // Default to safe mode in Chat Mode
 
         // Run the agent chat
+        // max_turns: tool call rounds per request. Configurable via `rupoo config set max_turns <N>`
+        let max_turns: usize = self.repo.get_setting("max_turns").await
+            .ok()
+            .flatten()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(50);
         match self.agent.agent_chat(
             user_message,
             &self.conversation_history,
-            25, // max_turns — tool call rounds per request (10 was too tight for complex tasks)
+            max_turns,
             safe_mode,
             on_event,
             Some(&self.intent_state),
