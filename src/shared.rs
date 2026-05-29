@@ -98,7 +98,7 @@ pub enum AgentToTui {
     /// Streaming text chunk for incremental display.
     StreamChunk { text: String },
     /// LLM configuration status update.
-    LlmStatus { configured: bool, provider: String },
+    LlmStatus { configured: bool, provider: String, model_label: String },
     /// Step progress update for Plan Mode.
     StepProgress { step_index: usize, total: usize, step_name: String },
     /// Tool call status update for Chat Mode progress display.

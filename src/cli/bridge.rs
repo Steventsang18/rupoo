@@ -106,6 +106,7 @@ impl AgentUiBridge {
                                     let _ = self.ui_tx.send(AgentToTui::LlmStatus {
                                         configured: true,
                                         provider: provider.clone(),
+                                        model_label: label.clone(),
                                     });
                                 }
                                 Err(e) => {

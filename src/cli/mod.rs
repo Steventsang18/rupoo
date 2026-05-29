@@ -335,9 +335,10 @@ impl ReplSession {
                             output::clear_spinner();
                             self.handle_approval(t);
                         }
-                        AgentToTui::LlmStatus { configured, provider } => {
+                        AgentToTui::LlmStatus { configured, provider, model_label } => {
                             self.app.llm_configured = configured;
                             self.app.llm_provider = provider.clone();
+                            self.app.model_label = model_label;
                         }
                         AgentToTui::StepProgress { step_index, total, step_name } => {
                             output::clear_spinner();
@@ -423,8 +424,22 @@ impl ReplSession {
                 true
             }
             "/model" | "/m" => {
-                println!("  {} {}", "Model:".cyan(), self.app.model_label.cyan().bold());
-                true
+                if arg.is_empty() {
+                    println!("  {} {}", "Model:".cyan(), self.app.model_label.cyan().bold());
+                    true
+                } else {
+                    // /model <provider> [model] — forward to bridge for hot switch
+                    // Bridge handles the actual switch_llm call and sends back status
+                    if let Some(ref tx) = self.app.agent_tx {
+                        let _ = tx.send(TuiToAgent::SubmitMessage(format!("/model {}", arg)));
+                        self.app.set_thinking();
+                        self.gen_start = Some(std::time::Instant::now());
+                        self.stream_state = markdown::StreamState::new();
+                    } else {
+                        println!("  {} Agent not available", "✗".red());
+                    }
+                    true
+                }
             }
             "/theme" | "/t" => {
                 if arg.is_empty() {

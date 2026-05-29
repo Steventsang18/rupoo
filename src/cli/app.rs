@@ -267,11 +267,12 @@ impl RupooApp {
                 self.stream_buffer.push_str(&text);
                 self.scroll_bottom = true;
             }
-            AgentToTui::LlmStatus { configured, provider } => {
+            AgentToTui::LlmStatus { configured, provider, model_label } => {
                 self.llm_configured = configured;
                 self.llm_provider = provider.clone();
+                self.model_label = model_label.clone();
                 self.status = if configured {
-                    format!("Connected: {}", provider)
+                    format!("Connected: {}", model_label)
                 } else {
                     "LLM not configured".to_string()
                 };
