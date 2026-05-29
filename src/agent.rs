@@ -172,6 +172,10 @@ impl Agent {
         } else if let Ok(Some(m)) = repo.get_setting(&format!("model.{}", provider)).await {
             cfg.model = m;
         }
+        // Load base_url if configured (e.g. for DeepSeek proxies)
+        if let Ok(Some(base_url)) = repo.get_setting(&format!("base_url.{}", provider)).await {
+            cfg.base_url = Some(base_url);
+        }
 
         let model_label = cfg.model.clone();
 
