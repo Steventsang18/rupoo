@@ -401,7 +401,10 @@ impl LlmGateway {
     where
         F: FnMut(AgentEvent) + Send,
     {
-        // Build preamble — use custom override if provided, otherwise default
+        // Build preamble — STATIC ONLY for prompt caching.
+        // Dynamic context (env signals, intent state, memory) goes into
+        // the message list so the preamble stays identical across turns,
+        // allowing Anthropic/OpenAI prompt caching to hit.
         let mut preamble = if let Some(custom) = custom_preamble {
             if !custom.is_empty() {
                 custom.to_string()
@@ -412,32 +415,15 @@ impl LlmGateway {
             self.build_preamble()
         };
 
-        if let Some(context) = memory_context {
-            if !context.is_empty() {
-                preamble.push_str("\n\nRelevant context from memory:\n");
-                preamble.push_str(context);
-            }
-        }
-
-        // Inject environment signals (PWD, git, project type, etc.)
-        let env_signals = crate::signal::EnvironmentSignals::collect();
-        let env_block = env_signals.to_prompt_block();
-        if !env_block.is_empty() {
-            preamble.push_str("\n\n");
-            preamble.push_str(&env_block);
-        }
-
-        // Inject intent tracking instruction + current intent state
+        // Intent tracking instruction is static — it never changes across turns.
+        // It belongs in the preamble so it gets cached.
         preamble.push_str("\n\n");
         preamble.push_str(&crate::signal::IntentState::system_instruction());
 
-        if let Some(intent_state) = intent {
-            let intent_block = intent_state.to_prompt_block();
-            if !intent_block.is_empty() {
-                preamble.push_str("\n\n");
-                preamble.push_str(&intent_block);
-            }
-        }
+        // Build dynamic context — env signals, intent state, memory.
+        // This goes into the message list, not the preamble, so the
+        // cached preamble prefix stays valid across turns.
+        let dynamic_context = Self::build_dynamic_context(memory_context, intent);
 
         // Build message history — compress old turns with intent if available
         let raw_messages = history.to_rig_messages();
@@ -471,6 +457,18 @@ impl LlmGateway {
         use rig::message::{Message, UserContent, Text};
         use rig::OneOrMany;
         let mut messages = messages;
+
+        // Inject dynamic context as the first system message in the message list.
+        // This keeps the preamble (static) separate from per-turn context (dynamic),
+        // enabling prompt caching on the static prefix.
+        if let Some(ctx) = dynamic_context {
+            messages.insert(0, Message::User {
+                content: OneOrMany::one(UserContent::Text(Text {
+                    text: format!("[System Context — updated this turn]\n{}", ctx),
+                })),
+            });
+        }
+
         messages.push(Message::User {
             content: OneOrMany::one(UserContent::Text(Text { text: user_message.to_string() }))
         });
@@ -687,6 +685,11 @@ Respond with a JSON array of steps."#;
         Ok((text, usage))
     }
 
+    /// Build the static preamble — content that never changes across turns.
+    /// This is the part that prompt caching can cache: identity, capabilities,
+    /// communication style, output format, and intent tracking instructions.
+    /// By keeping this pure static, Anthropic/OpenAI prompt caching can hit
+    /// on the prefix across every turn in a session.
     fn build_preamble(&self) -> String {
         r#"You are Rupoo, an AI-powered terminal assistant running inside the user's terminal.
 You help with software development, file operations, and system tasks.
@@ -728,6 +731,47 @@ Be specific about the problem and the fix.
 
 Keep responses tight. Use Markdown naturally for structure.
 "#.to_string()
+    }
+
+    /// Build the dynamic context block — content that changes every turn.
+    /// This is injected as a system message at the start of the message list,
+    /// keeping it separate from the static preamble so that the preamble
+    /// can be cached by the LLM provider's prompt caching mechanism.
+    ///
+    /// Contains: environment signals, intent state, memory context.
+    fn build_dynamic_context(
+        memory_context: Option<&str>,
+        intent: Option<&crate::signal::IntentState>,
+    ) -> Option<String> {
+        let mut parts = Vec::new();
+
+        // Environment signals (PWD, git, project type, etc.)
+        let env_signals = crate::signal::EnvironmentSignals::collect();
+        let env_block = env_signals.to_prompt_block();
+        if !env_block.is_empty() {
+            parts.push(env_block);
+        }
+
+        // Intent state
+        if let Some(intent_state) = intent {
+            let intent_block = intent_state.to_prompt_block();
+            if !intent_block.is_empty() {
+                parts.push(intent_block);
+            }
+        }
+
+        // Memory context
+        if let Some(context) = memory_context {
+            if !context.is_empty() {
+                parts.push(format!("## Relevant Memory\n{}", context));
+            }
+        }
+
+        if parts.is_empty() {
+            None
+        } else {
+            Some(parts.join("\n\n"))
+        }
     }
 }
 
@@ -804,7 +848,8 @@ fn build_anthropic_agent(
         .ok_or_else(|| AgentError::Config("Anthropic requires an API key. Set it via: rupoo config set api_key.anthropic <key>".into()))?;
     let client = rig::providers::anthropic::client::Client::new(api_key)
         .map_err(|e| AgentError::Llm(format!("Anthropic client init failed: {e}")))?;
-    let model = rig::providers::anthropic::completion::CompletionModel::new(client, &config.model);
+    let model = rig::providers::anthropic::completion::CompletionModel::new(client, &config.model)
+        .with_prompt_caching();
 
     let builder = AgentBuilder::new(model)
         .preamble(preamble)
@@ -910,7 +955,7 @@ fn finish_streaming_agent<M: rig::completion::CompletionModel>(
     Ok(builder.build())
 }
 
-/// Streaming agent for Anthropic with safe_mode.
+/// Streaming agent for Anthropic with safe_mode + prompt caching.
 fn build_anthropic_agent_streaming(
     config: &LlmConfig,
     preamble: &str,
@@ -923,7 +968,11 @@ fn build_anthropic_agent_streaming(
         .ok_or_else(|| AgentError::Config("Anthropic requires an API key. Set it via: rupoo config set api_key.anthropic <key>".into()))?;
     let client = rig::providers::anthropic::client::Client::new(api_key)
         .map_err(|e| AgentError::Llm(format!("Anthropic client init failed: {e}")))?;
-    let model = rig::providers::anthropic::completion::CompletionModel::new(client, &config.model);
+    // Enable prompt caching — Anthropic caches the system prompt prefix,
+    // saving ~90% on input tokens for cached turns. The preamble is kept
+    // pure static (no dynamic context) specifically to maximize cache hits.
+    let model = rig::providers::anthropic::completion::CompletionModel::new(client, &config.model)
+        .with_prompt_caching();
 
     finish_streaming_agent(AgentBuilder::new(model), preamble, config, jail_root, safe_mode)
 }
