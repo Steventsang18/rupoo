@@ -62,6 +62,9 @@ jobs:
       - name: Test (library)
         run: cargo test --lib
 
+      - name: Test (gui feature)
+        run: cargo test --lib --features gui
+
       - name: Test (integration)
         run: cargo test --tests
 

@@ -19,17 +19,7 @@ use super::theme;
 
 /// Get the current terminal width. Falls back to 80 if detection fails.
 fn terminal_width() -> usize {
-    std::process::Command::new("stty")
-        .arg("size")
-        .stdin(std::process::Stdio::inherit())
-        .output()
-        .ok()
-        .and_then(|o| {
-            let s = String::from_utf8_lossy(&o.stdout);
-            // "rows cols\n" format
-            s.split_whitespace().nth(1).and_then(|c| c.parse::<usize>().ok())
-        })
-        .unwrap_or(80)
+    console::Term::stdout().size().1 as usize
 }
 
 struct Highlighter {
@@ -232,7 +222,7 @@ fn render_line(line: &str, ctx: &mut RenderContext, stream_code_lines: &mut usiz
     // Table detection: line contains | and has at least 2 pipes
     if trimmed.contains('|') && trimmed.matches('|').count() >= 2 {
         // Is this a separator row? (|---|---|)
-        let cleaned = trimmed.replace(['|', '-', ' ', ':'], "");
+        let cleaned = trimmed.replace('|', "").replace('-', "").replace(' ', "").replace(':', "");
         if cleaned.is_empty() {
             // Separator — skip it, we'll compute column widths from data rows
             ctx.in_table = true;
@@ -364,7 +354,7 @@ fn flush_table(ctx: &mut RenderContext) {
             let cell_width = cell_visible.width();
             let padding = w.saturating_sub(cell_width);
             let rendered = render_inline(cell);
-            print!("{} {}{} ", "│".color(theme::current().border), rendered, " ".repeat(padding));
+            print!("{} {}{} {}", "│".color(theme::current().border), rendered, " ".repeat(padding), "");
         }
         println!("{}", "│".color(theme::current().border));
 
@@ -445,14 +435,18 @@ fn render_inline(text: &str) -> String {
     let mut in_bold = false;
 
     while i < bytes.len() {
-        let ch = text[i..].chars().next().unwrap_or(' ');
+        let Some(ch) = text[i..].chars().next() else {
+            break;
+        };
 
         // Inline code: `code`
         if ch == '`' {
             let mut code_content = String::new();
             i += 1; // skip opening `
             while i < bytes.len() {
-                let c = text[i..].chars().next().unwrap_or(' ');
+                let Some(c) = text[i..].chars().next() else {
+                    break;
+                };
                 if c == '`' {
                     i += c.len_utf8();
                     break;
@@ -481,8 +475,8 @@ fn render_inline(text: &str) -> String {
                         let url = &text[after_bracket + 1..after_bracket + end_paren];
                         result.push_str(&format!(
                             "{}{}",
-                            link_text.underline().color(theme::current().ai_accent),
-                            format!("({})", url).color(theme::current().dim),
+                            link_text.underline().color(theme::current().ai_accent).to_string(),
+                            format!("({})", url).color(theme::current().dim).to_string(),
                         ));
                         i = after_bracket + end_paren + 1;
                         continue;
@@ -514,7 +508,7 @@ fn render_inline(text: &str) -> String {
 fn flush_code_block(lines: &[String], lang: &str) {
     let hl = get_highlighter();
     let syntax = if lang.is_empty() {
-        hl.ss.find_syntax_by_first_line(lines.first().unwrap_or(&String::new()))
+        hl.ss.find_syntax_by_first_line(&lines.first().unwrap_or(&String::new()))
             .unwrap_or_else(|| hl.ss.find_syntax_plain_text())
     } else {
         hl.ss.find_syntax_by_token(lang)
@@ -526,9 +520,10 @@ fn flush_code_block(lines: &[String], lang: &str) {
 
     // Top border: ┌─ rust ─────
     println!(
-        "  {}{} {}",
+        "  {}{}{}{}",
         "┌─ ".color(theme::current().tool_accent),
         lang_label.color(theme::current().tool_accent).bold(),
+        " ",
         "─".repeat(width.saturating_sub(lang_label.len() + 4)).color(theme::current().border),
     );
 

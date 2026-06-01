@@ -186,11 +186,11 @@ pub fn tool_result(result: &str, truncated: bool) {
     let display_lines: Vec<&str> = lines.iter().take(max_lines).copied().collect();
 
     for line in &display_lines {
-        let display = if line.len() > 200 {
-            format!("{}…", &line[..197])
-        } else {
-            line.to_string()
-        };
+                let display = if line.len() > 200 {
+                    format!("{}…", line.chars().take(197).collect::<String>())
+                } else {
+                    line.to_string()
+                };
         println!("{} {}", "│".color(t.tool_dim), display.color(t.tool_dim));
     }
 
@@ -277,7 +277,16 @@ pub fn welcome(version: &str, model: &str) {
     let t = theme::current();
     println!();
     println!("  {} {}", "Rupoo".color(t.ai_header).bold(), format!("v{}", version).color(t.dim));
-    println!("  {} {}", "Model:".color(t.dim), model.color(t.ai_accent));
+    if model == "not configured" {
+        println!("  {} {} Run: {} or {}",
+            "⚠".to_string().yellow(),
+            "LLM not configured.".to_string().yellow(),
+            "rupoo config set api_key.anthropic <key>".color(t.ai_accent),
+            "rupoo doctor".color(t.ai_accent),
+        );
+    } else {
+        println!("  {} {}", "Model:".color(t.dim), model.color(t.ai_accent));
+    }
     println!("  {} Theme: {}", "│".color(t.dim), t.name.color(t.ai_accent));
     println!();
     println!("  {} /help for commands │ /new for new session │ /theme <name> to switch", "›".color(t.dim));

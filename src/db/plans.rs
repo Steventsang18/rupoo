@@ -230,6 +230,8 @@ impl TaskRepo {
     }
 
     /// Non-transactional step status update (used for intermediate progress).
+    /// Optimized: uses SQLite JSON1 json_replace to update only the step status,
+    /// avoiding full steps array deserialization/serialization.
     pub async fn update_step_progress(
         &self,
         plan_id: &str,
@@ -237,33 +239,24 @@ impl TaskRepo {
         step_status: StepStatus,
     ) -> AgentResult<()> {
         let pid = plan_id.to_string();
+        let status_str = match step_status {
+            StepStatus::Pending => "Pending",
+            StepStatus::Running => "Running",
+            StepStatus::Completed => "Completed",
+            StepStatus::Failed => "Failed",
+            StepStatus::WaitingForInput => "WaitingForInput",
+        };
+        let now = chrono::Utc::now().to_rfc3339();
+        let json_path = format!("$.steps[{}].status", step_index);
+
         self.with_conn(move |conn| {
-            let (steps_json,): (String,) = conn
-                .query_row(
-                    "SELECT steps_json FROM plans WHERE id = ?1",
-                    rusqlite::params![pid],
-                    |row| Ok((row.get(0)?,)),
-                )
-                .map_err(|e| match e {
-                    rusqlite::Error::QueryReturnedNoRows => {
-                        AgentError::PlanNotFound(pid.clone())
-                    }
-                    other => AgentError::Database(other),
-                })?;
-
-            let mut steps: Vec<Step> = serde_json::from_str(&steps_json)?;
-            if let Some(step) = steps.get_mut(step_index) {
-                step.set_status(step_status);
-            }
-
-            let new_steps_json = serde_json::to_string(&steps)?;
-            let now = chrono::Utc::now().to_rfc3339();
-
             conn.execute(
-                "UPDATE plans SET steps_json = ?1, updated_at = ?2 WHERE id = ?3",
-                rusqlite::params![new_steps_json, now, pid],
+                &format!(
+                    "UPDATE plans SET steps_json = json_replace(steps_json, '{}', '{}'), updated_at = ?1 WHERE id = ?2",
+                    json_path, status_str
+                ),
+                rusqlite::params![now, pid],
             )?;
-
             Ok(())
         })
         .await
@@ -339,13 +332,19 @@ impl TaskRepo {
             let mut plan_ids = Vec::new();
             for (plan_id, steps_json) in &rows {
                 let mut steps: Vec<Step> =
-                    serde_json::from_str(steps_json).unwrap_or_default();
+                    serde_json::from_str(steps_json).unwrap_or_else(|e| {
+                        tracing::warn!(plan_id = %plan_id, error = %e, "failed to deserialize steps, using empty vec");
+                        Vec::new()
+                    });
                 for step in &mut steps {
                     if *step.status() == StepStatus::Running {
                         step.set_status(StepStatus::Pending);
                     }
                 }
-                let new_json = serde_json::to_string(&steps).unwrap_or_default();
+                let new_json = serde_json::to_string(&steps).unwrap_or_else(|e| {
+                    tracing::warn!(plan_id = %plan_id, error = %e, "failed to serialize steps, using empty array");
+                    "[]".to_string()
+                });
                 let now = chrono::Utc::now().to_rfc3339();
                 conn.execute(
                     "UPDATE plans SET steps_json = ?1, status = 'Pending', updated_at = ?2 WHERE id = ?3",
@@ -497,8 +496,7 @@ impl TaskRepo {
 
 #[cfg(test)]
 mod tests {
-    use crate::db::tests::repo;
-    use crate::db::PlanSummary;
+    use super::super::tests::repo;
     use crate::task::{finish_step, think_step, Plan, PlanStatus, StepStatus};
 
     #[tokio::test]
@@ -548,7 +546,7 @@ mod tests {
 
     #[test]
     fn test_plan_summary_serde() {
-        let summary = PlanSummary {
+        let summary = super::super::PlanSummary {
             id: "test-123".into(),
             name: "Test Plan".into(),
             current_step_index: 2,
@@ -560,7 +558,7 @@ mod tests {
         let json = serde_json::to_string(&summary).unwrap();
         assert!(json.contains("test-123"));
         assert!(json.contains("Running"));
-        let back: PlanSummary = serde_json::from_str(&json).unwrap();
+        let back: super::super::PlanSummary = serde_json::from_str(&json).unwrap();
         assert_eq!(back.total_steps, 5);
     }
 }

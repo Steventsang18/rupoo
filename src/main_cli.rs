@@ -190,7 +190,12 @@ pub async fn run_cmd(cmd: super::Commands) -> anyhow::Result<()> {
                 let (repo, _agent, _tool_executor, _llm_router) = crate::build_engine::build_engine(&db).await?;
                 repo.set_setting(&key, &value).await?;
                 info!(key = %key, "configuration saved");
-                println!("Set {key} = {value}");
+                if key.starts_with("api_key") {
+                    let display: String = value.chars().take(8).collect();
+                    println!("Set {key} = {display}...", );
+                } else {
+                    println!("Set {key} = {value}");
+                }
             }
             ConfigAction::Get { key, db } => {
                 let db = resolve_db(db);
@@ -209,7 +214,8 @@ pub async fn run_cmd(cmd: super::Commands) -> anyhow::Result<()> {
                 } else {
                     for (k, v) in &settings {
                         let display = if k.starts_with("api_key") {
-                            format!("{}...", &v[..v.len().min(8)])
+                            let prefix: String = v.chars().take(8).collect();
+                            format!("{prefix}...")
                         } else {
                             v.clone()
                         };
@@ -316,6 +322,21 @@ pub async fn run_cmd(cmd: super::Commands) -> anyhow::Result<()> {
             println!("  {} Server mode (port {port}) — development only. Not for production use.", console::style("⚠").yellow());
             println!("  {} Must bind to 127.0.0.1 and add auth before exposing.", console::style("→").dim());
             tokio::signal::ctrl_c().await?;
+        }
+        super::Commands::Completions { shell } => {
+            use clap::CommandFactory;
+            let shell_name = shell.to_lowercase();
+            let shell_type = match shell_name.as_str() {
+                "bash" => clap_complete::Shell::Bash,
+                "zsh" => clap_complete::Shell::Zsh,
+                "fish" => clap_complete::Shell::Fish,
+                "elvish" => clap_complete::Shell::Elvish,
+                "powershell" => clap_complete::Shell::PowerShell,
+                _ => {
+                    anyhow::bail!("unsupported shell '{}'. Supported: bash, zsh, fish, elvish, powershell", shell);
+                }
+            };
+            clap_complete::generate(shell_type, &mut super::Cli::command(), "rupoo", &mut std::io::stdout());
         }
         super::Commands::Status { short, db } => {
             let db = resolve_db(db);

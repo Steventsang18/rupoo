@@ -1,6 +1,7 @@
 //! LLM Gateway - unified interface for multiple LLM providers.
 
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use tracing::info;
 
@@ -14,28 +15,37 @@ use crate::llm::{AgentEvent, LlmConfig, LlmProvider, TokenUsage};
 
 pub struct LlmGateway {
     config: LlmConfig,
+    /// If set, file tools are restricted to this directory tree.
+    /// If None, defaults to CWD at the time the gateway was created.
     jail_root: Option<PathBuf>,
-}
-
-/// Parameters for `chat_agent_loop`, grouped to avoid too-many-arguments.
-pub struct ChatLoopParams<'a, F: FnMut(AgentEvent) + Send> {
-    pub user_message: &'a str,
-    pub history: &'a ConversationHistory,
-    pub max_turns: usize,
-    pub safe_mode: bool,
-    pub memory_context: Option<&'a str>,
-    pub on_event: F,
-    pub custom_preamble: Option<&'a str>,
-    pub intent: Option<&'a crate::signal::IntentState>,
+    /// Shared HTTP client for connection pooling and TLS session reuse.
+    /// Passed to all rig provider clients so a single connection pool
+    /// is shared across all LLM requests.
+    http_client: Arc<reqwest::Client>,
 }
 
 impl LlmGateway {
+    /// Create a gateway with jail_root set to the current working directory.
+    /// File writes are restricted to CWD and its subdirectories.
     pub fn new(config: LlmConfig) -> Self {
-        Self { config, jail_root: None }
+        Self {
+            jail_root: std::env::current_dir().ok(),
+            http_client: crate::http_client::HTTP_CLIENT.clone(),
+            config,
+        }
     }
 
     pub fn with_jail(config: LlmConfig, jail_root: PathBuf) -> Self {
-        Self { config, jail_root: Some(jail_root) }
+        Self {
+            config,
+            jail_root: Some(jail_root),
+            http_client: crate::http_client::HTTP_CLIENT.clone(),
+        }
+    }
+
+    /// Create a gateway with a pre-built shared HTTP client.
+    pub fn with_http_client(config: LlmConfig, jail_root: Option<PathBuf>, http_client: Arc<reqwest::Client>) -> Self {
+        Self { config, jail_root, http_client }
     }
 
     pub fn config(&self) -> &LlmConfig {
@@ -66,7 +76,7 @@ impl LlmGateway {
         let jail_root = self.jail_root.clone();
         let (text, prompt_tokens, completion_tokens): (String, u64, u64) = match &self.config.provider {
             LlmProvider::Anthropic => {
-                let agent = build_anthropic_agent(&self.config, preamble, jail_root.as_deref())?;
+                let agent = build_anthropic_agent(&self.config, preamble, jail_root.as_deref(), &self.http_client)?;
                 let response = agent.prompt(&prompt)
                     .extended_details()
                     .await
@@ -74,7 +84,7 @@ impl LlmGateway {
                 (response.output, response.total_usage.input_tokens, response.total_usage.output_tokens)
             }
             LlmProvider::OpenAI => {
-                let agent = build_openai_agent(&self.config, preamble, jail_root.as_deref())?;
+                let agent = build_openai_agent(&self.config, preamble, jail_root.as_deref(), &self.http_client)?;
                 let response = agent.prompt(&prompt)
                     .extended_details()
                     .await
@@ -82,7 +92,7 @@ impl LlmGateway {
                 (response.output, response.total_usage.input_tokens, response.total_usage.output_tokens)
             }
             LlmProvider::Ollama => {
-                let agent = build_ollama_agent(&self.config, preamble, jail_root.as_deref())?;
+                let agent = build_ollama_agent(&self.config, preamble, jail_root.as_deref(), &self.http_client)?;
                 let response = agent.prompt(&prompt)
                     .extended_details()
                     .await
@@ -110,12 +120,18 @@ impl LlmGateway {
     /// Multi-turn agent chat loop with memory context and streaming.
     pub async fn chat_agent_loop<F>(
         &self,
-        params: ChatLoopParams<'_, F>,
+        user_message: &str,
+        history: &ConversationHistory,
+        max_turns: usize,
+        safe_mode: bool,
+        memory_context: Option<&str>,
+        mut on_event: F,
+        custom_preamble: Option<&str>,
+        intent: Option<&crate::signal::IntentState>,
     ) -> AgentResult<(String, TokenUsage)>
     where
         F: FnMut(AgentEvent) + Send,
     {
-        let ChatLoopParams { user_message, history, max_turns, safe_mode, memory_context, mut on_event, custom_preamble, intent } = params;
         // Build preamble — STATIC ONLY for prompt caching.
         // Dynamic context (env signals, intent state, memory) goes into
         // the message list so the preamble stays identical across turns,
@@ -190,15 +206,15 @@ impl LlmGateway {
 
         match &self.config.provider {
             LlmProvider::Anthropic => {
-                let agent = build_anthropic_agent_streaming(&self.config, &preamble, self.jail_root.as_deref(), safe_mode)?;
+                let agent = build_anthropic_agent_streaming(&self.config, &preamble, self.jail_root.as_deref(), safe_mode, &self.http_client)?;
                 self.chat_stream_generic("Anthropic", agent, messages, max_turns, &mut on_event).await
             }
             LlmProvider::OpenAI => {
-                let agent = build_openai_agent_streaming(&self.config, &preamble, self.jail_root.as_deref(), safe_mode)?;
+                let agent = build_openai_agent_streaming(&self.config, &preamble, self.jail_root.as_deref(), safe_mode, &self.http_client)?;
                 self.chat_stream_generic("OpenAI", agent, messages, max_turns, &mut on_event).await
             }
             LlmProvider::Ollama => {
-                let agent = build_ollama_agent_streaming(&self.config, &preamble, self.jail_root.as_deref(), safe_mode)?;
+                let agent = build_ollama_agent_streaming(&self.config, &preamble, self.jail_root.as_deref(), safe_mode, &self.http_client)?;
                 self.chat_stream_generic("Ollama", agent, messages, max_turns, &mut on_event).await
             }
         }
@@ -370,7 +386,7 @@ Respond with a JSON array of steps."#;
 
         let (text, prompt_tokens, completion_tokens): (String, u64, u64) = match &self.config.provider {
             LlmProvider::Anthropic => {
-                let agent = build_anthropic_agent(&self.config, "", jail_root.as_deref())?;
+                let agent = build_anthropic_agent(&self.config, "", jail_root.as_deref(), &self.http_client)?;
                 let response = agent.prompt(&prompt_text)
                     .extended_details()
                     .await
@@ -378,7 +394,7 @@ Respond with a JSON array of steps."#;
                 (response.output, response.total_usage.input_tokens, response.total_usage.output_tokens)
             }
             LlmProvider::OpenAI => {
-                let agent = build_openai_agent(&self.config, "", jail_root.as_deref())?;
+                let agent = build_openai_agent(&self.config, "", jail_root.as_deref(), &self.http_client)?;
                 let response = agent.prompt(&prompt_text)
                     .extended_details()
                     .await
@@ -386,7 +402,7 @@ Respond with a JSON array of steps."#;
                 (response.output, response.total_usage.input_tokens, response.total_usage.output_tokens)
             }
             LlmProvider::Ollama => {
-                let agent = build_ollama_agent(&self.config, "", jail_root.as_deref())?;
+                let agent = build_ollama_agent(&self.config, "", jail_root.as_deref(), &self.http_client)?;
                 let response = agent.prompt(&prompt_text)
                     .extended_details()
                     .await

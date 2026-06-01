@@ -19,8 +19,8 @@ use crate::error::{AgentError, AgentResult};
 pub mod plans;
 pub mod settings;
 
-// PlanSummary is defined locally in this module (see below)
-// Re-export for public API surface — already in scope, no need for `pub use`
+// Re-export for convenience
+// PlanSummary is defined directly in this module — do not re-export from plans.rs
 
 // ---------------------------------------------------------------------------
 // TaskRepo - Core database repository
@@ -73,7 +73,20 @@ impl TaskRepo {
 
         let conn = rusqlite::Connection::open(db_path)?;
         // Enable WAL mode for better concurrent read performance
-        conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;")?;
+        // Additional PRAGMA optimizations for better performance:
+        // - synchronous=NORMAL: balances safety and performance
+        // - cache_size=10000: increase page cache (each page is ~4KB)
+        // - temp_store=MEMORY: use memory for temporary tables
+        // - journal_size_limit=104857600: limit WAL file size to 100MB
+        conn.execute_batch(
+            "PRAGMA journal_mode=WAL;
+             PRAGMA busy_timeout=5000;
+             PRAGMA synchronous=NORMAL;
+             PRAGMA cache_size=-10000;
+             PRAGMA temp_store=MEMORY;
+             PRAGMA journal_size_limit=104857600;
+             PRAGMA foreign_keys=ON;",
+        )?;
         conn.execute_batch(
             "
             CREATE TABLE IF NOT EXISTS plans (
@@ -220,7 +233,7 @@ mod tests {
     use super::*;
 
     /// Create an in-memory TaskRepo for testing.
-    pub(crate) fn repo() -> TaskRepo {
+    pub(super) fn repo() -> TaskRepo {
         TaskRepo::new(":memory:").unwrap()
     }
 }

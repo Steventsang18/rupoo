@@ -1,5 +1,7 @@
 //! Per-provider agent builders for LLM Gateway.
 
+use std::sync::Arc;
+
 use crate::error::{AgentError, AgentResult};
 use crate::llm::history::LlmChatRole;
 use crate::llm::LlmConfig;
@@ -9,9 +11,10 @@ use crate::llm::LlmConfig;
 pub fn register_tools<M: rig::completion::CompletionModel>(
     builder: rig::agent::AgentBuilderSimple<M>,
     jail_root: Option<&std::path::Path>,
-    safe_mode: bool,
+    _safe_mode: bool,
 ) -> rig::agent::AgentBuilderSimple<M> {
-    // Already have EchoTool from the initial builder
+    // _safe_mode is retained for API compatibility but no longer gates FileWriteTool.
+    // File writes are always available; path jail enforces project-boundary safety.
     let mut builder = builder;
 
     // Web search is read-only and safe — always register
@@ -34,13 +37,12 @@ pub fn register_tools<M: rig::completion::CompletionModel>(
         builder = builder.tool(crate::rig_tools::ListDirTool::new());
     }
 
-    // FileWriteTool is write operations - only register in unsafe mode
-    if !safe_mode {
-        if let Some(root) = jail_root {
-            builder = builder.tool(crate::rig_tools::FileWriteTool::with_jail(root.to_path_buf()));
-        } else {
-            builder = builder.tool(crate::rig_tools::FileWriteTool::new());
-        }
+    // FileWriteTool — always register so the LLM knows it can write files.
+    // The jail_root still enforces that writes stay inside the project directory.
+    if let Some(root) = jail_root {
+        builder = builder.tool(crate::rig_tools::FileWriteTool::with_jail(root.to_path_buf()));
+    } else {
+        builder = builder.tool(crate::rig_tools::FileWriteTool::new());
     }
 
     builder
@@ -70,12 +72,16 @@ pub fn build_anthropic_agent(
     config: &LlmConfig,
     preamble: &str,
     jail_root: Option<&std::path::Path>,
+    http_client: &Arc<reqwest::Client>,
 ) -> AgentResult<rig::agent::Agent<rig::providers::anthropic::completion::CompletionModel>> {
     use rig::agent::AgentBuilder;
 
     let api_key = config.api_key.as_deref()
         .ok_or_else(|| AgentError::Config("Anthropic requires an API key. Set it via: rupoo config set api_key.anthropic <key>".into()))?;
-    let client = rig::providers::anthropic::client::Client::new(api_key)
+    let client = <rig::providers::anthropic::client::Client<reqwest::Client>>::builder()
+        .api_key(api_key)
+        .http_client((**http_client).clone())
+        .build()
         .map_err(|e| AgentError::Llm(format!("Anthropic client init failed: {e}")))?;
     let model = rig::providers::anthropic::completion::CompletionModel::new(client, &config.model)
         .with_prompt_caching();
@@ -96,21 +102,26 @@ pub fn build_openai_agent(
     config: &LlmConfig,
     preamble: &str,
     jail_root: Option<&std::path::Path>,
+    http_client: &Arc<reqwest::Client>,
 ) -> AgentResult<rig::agent::Agent<rig::providers::openai::completion::CompletionModel>> {
     use rig::agent::AgentBuilder;
 
     let api_key = config.api_key.as_deref()
         .ok_or_else(|| AgentError::Config("OpenAI requires an API key. Set it via: rupoo config set api_key.openai <key>".into()))?;
-    let client = match &config.base_url {
+    let client: rig::providers::openai::client::Client = match &config.base_url {
         Some(custom_url) => {
-            rig::providers::openai::client::Client::builder()
+            <rig::providers::openai::client::Client<reqwest::Client>>::builder()
                 .api_key(api_key)
                 .base_url(custom_url)
+                .http_client((**http_client).clone())
                 .build()
                 .map_err(|e| AgentError::Llm(format!("OpenAI client init failed: {e}")))?
         }
         None => {
-            rig::providers::openai::client::Client::new(api_key)
+            <rig::providers::openai::client::Client<reqwest::Client>>::builder()
+                .api_key(api_key)
+                .http_client((**http_client).clone())
+                .build()
                 .map_err(|e| AgentError::Llm(format!("OpenAI client init failed: {e}")))?
         }
     };
@@ -142,13 +153,15 @@ pub fn build_ollama_agent(
     config: &LlmConfig,
     preamble: &str,
     jail_root: Option<&std::path::Path>,
+    http_client: &Arc<reqwest::Client>,
 ) -> AgentResult<rig::agent::Agent<rig::providers::ollama::CompletionModel>> {
     use rig::agent::AgentBuilder;
 
     let base_url = config.base_url.as_deref().unwrap_or("http://localhost:11434");
-    let client = rig::providers::ollama::Client::builder()
+    let client = <rig::providers::ollama::Client<reqwest::Client>>::builder()
         .api_key(rig::client::Nothing)
         .base_url(base_url)
+        .http_client((**http_client).clone())
         .build()
         .map_err(|e| AgentError::Llm(format!("Ollama client init failed: {e}")))?;
     let model = rig::providers::ollama::CompletionModel::new(client, &config.model);
@@ -191,12 +204,16 @@ pub fn build_anthropic_agent_streaming(
     preamble: &str,
     jail_root: Option<&std::path::Path>,
     safe_mode: bool,
+    http_client: &Arc<reqwest::Client>,
 ) -> AgentResult<rig::agent::Agent<rig::providers::anthropic::completion::CompletionModel>> {
     use rig::agent::AgentBuilder;
 
     let api_key = config.api_key.as_deref()
         .ok_or_else(|| AgentError::Config("Anthropic requires an API key. Set it via: rupoo config set api_key.anthropic <key>".into()))?;
-    let client = rig::providers::anthropic::client::Client::new(api_key)
+    let client = <rig::providers::anthropic::client::Client<reqwest::Client>>::builder()
+        .api_key(api_key)
+        .http_client((**http_client).clone())
+        .build()
         .map_err(|e| AgentError::Llm(format!("Anthropic client init failed: {e}")))?;
     // Enable prompt caching — Anthropic caches the system prompt prefix,
     // saving ~90% on input tokens for cached turns. The preamble is kept
@@ -213,21 +230,26 @@ pub fn build_openai_agent_streaming(
     preamble: &str,
     jail_root: Option<&std::path::Path>,
     safe_mode: bool,
+    http_client: &Arc<reqwest::Client>,
 ) -> AgentResult<rig::agent::Agent<rig::providers::openai::completion::CompletionModel>> {
     use rig::agent::AgentBuilder;
 
     let api_key = config.api_key.as_deref()
         .ok_or_else(|| AgentError::Config("OpenAI requires an API key. Set it via: rupoo config set api_key.openai <key>".into()))?;
-    let client = match &config.base_url {
+    let client: rig::providers::openai::client::Client = match &config.base_url {
         Some(custom_url) => {
-            rig::providers::openai::client::Client::builder()
+            <rig::providers::openai::client::Client<reqwest::Client>>::builder()
                 .api_key(api_key)
                 .base_url(custom_url)
+                .http_client((**http_client).clone())
                 .build()
                 .map_err(|e| AgentError::Llm(format!("OpenAI client init failed: {e}")))?
         }
         None => {
-            rig::providers::openai::client::Client::new(api_key)
+            <rig::providers::openai::client::Client<reqwest::Client>>::builder()
+                .api_key(api_key)
+                .http_client((**http_client).clone())
+                .build()
                 .map_err(|e| AgentError::Llm(format!("OpenAI client init failed: {e}")))?
         }
     };
@@ -259,13 +281,15 @@ pub fn build_ollama_agent_streaming(
     preamble: &str,
     jail_root: Option<&std::path::Path>,
     safe_mode: bool,
+    http_client: &Arc<reqwest::Client>,
 ) -> AgentResult<rig::agent::Agent<rig::providers::ollama::CompletionModel>> {
     use rig::agent::AgentBuilder;
 
     let base_url = config.base_url.as_deref().unwrap_or("http://localhost:11434");
-    let client = rig::providers::ollama::Client::builder()
+    let client = <rig::providers::ollama::Client<reqwest::Client>>::builder()
         .api_key(rig::client::Nothing)
         .base_url(base_url)
+        .http_client((**http_client).clone())
         .build()
         .map_err(|e| AgentError::Llm(format!("Ollama client init failed: {e}")))?;
     let model = rig::providers::ollama::CompletionModel::new(client, &config.model);

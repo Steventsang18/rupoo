@@ -4,6 +4,7 @@
 //! the results using simple string-based extraction.
 
 use crate::error::AgentResult;
+use crate::http_client::HTTP_CLIENT;
 use crate::safety::SafetyContext;
 
 /// Maximum number of characters in the output (truncated if exceeded).
@@ -13,7 +14,7 @@ const MAX_OUTPUT_CHARS: usize = 5000;
 ///
 /// # Arguments
 /// * `query` - The search query string
-/// * `safety` - SafetyContext for SSRF protection (not needed for GET, but available)
+/// * `safety` - SafetyContext for SSRF protection
 ///
 /// # Returns
 /// Formatted string with up to 10 search results (title, snippet, URL).
@@ -21,10 +22,14 @@ pub async fn web_search(query: &str, _safety: &SafetyContext) -> AgentResult<Str
     let query_encoded = urlencoding::encode(query).to_string();
     let url = format!("https://html.duckduckgo.com/html/?q={}", query_encoded);
 
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(30))
-        .build()
-        .map_err(|e| crate::error::AgentError::Tool(format!("reqwest build failed: {e}")))?;
+    // SSRF protection: block requests to localhost/private networks
+    if SafetyContext::is_localhost_url(&url) {
+        return Err(crate::error::AgentError::Safety(
+            "web search URL resolves to localhost — blocked by SSRF protection".into(),
+        ));
+    }
+
+    let client = HTTP_CLIENT.as_ref();
 
     let response = client
         .get(&url)
@@ -136,7 +141,7 @@ fn extract_ddg_field(block: &str, class_name: &str) -> Option<String> {
     let raw = &block[content_start..content_start + content_end];
 
     // Strip any remaining HTML tags
-    Some(strip_html_tags(raw).trim().to_string())
+    Some(super::strip_html_tags(raw).trim().to_string())
 }
 
 /// Extract URL from the href attribute of an anchor with the given class.
@@ -156,36 +161,6 @@ fn extract_ddg_url(block: &str, class_name: &str) -> Option<String> {
     } else {
         Some(url.to_string())
     }
-}
-
-/// Strip HTML tags from a string — handles nested and adjacent tags.
-fn strip_html_tags(s: &str) -> String {
-    let mut result = String::with_capacity(s.len());
-    let bytes = s.as_bytes();
-    let mut i = 0;
-
-    while i < bytes.len() {
-        if bytes[i] == b'<' {
-            // Skip to the next '>'
-            let mut j = i + 1;
-            while j < bytes.len() && bytes[j] != b'>' {
-                j += 1;
-            }
-            i = j.saturating_add(1);
-        } else {
-            result.push(bytes[i] as char);
-            i += 1;
-        }
-    }
-
-    // Decode common HTML entities
-    result
-        .replace("&amp;", "&")
-        .replace("&lt;", "<")
-        .replace("&gt;", ">")
-        .replace("&quot;", "\"")
-        .replace("&#39;", "'")
-        .replace("&nbsp;", " ")
 }
 
 /// Format search results as a readable string.
@@ -213,6 +188,7 @@ mod tests {
 
     #[test]
     fn test_strip_html_tags() {
+        use super::super::strip_html_tags;
         assert_eq!(strip_html_tags("hello world"), "hello world");
         assert_eq!(strip_html_tags("hello <b>world</b>"), "hello world");
         assert_eq!(strip_html_tags("a &amp; b"), "a & b");
