@@ -5,8 +5,7 @@
 
 pub mod app;
 pub mod cmds;
-pub mod commands;
-pub mod handlers;
+
 pub mod output;
 pub mod markdown;
 pub mod theme;
@@ -171,10 +170,11 @@ impl ReplSession {
                     let _ = self.rl.add_history_entry(&input);
 
                     // Handle slash commands
-                    if input.starts_with('/')
-                        && self.handle_command(&input) {
+                    if input.starts_with('/') {
+                        if self.handle_command(&input) {
                             continue;
                         }
+                    }
 
                     // Submit user message
                     self.submit_message(&input);
@@ -205,7 +205,7 @@ impl ReplSession {
                     break Ok(());
                 }
                 Err(_) => {
-                    break Err("readline_error");
+                    break Err("terminal input error — please restart rupoo");
                 }
             }
 
@@ -250,100 +250,30 @@ impl ReplSession {
                     return Ok(());
                 }
             }
-            // Drain all pending events
+            // Wait for the next event with a timeout.
+            // recv_timeout returns immediately when a message arrives (zero latency)
+            // and blocks at most 50ms before waking to drive the spinner animation.
             if let Some(ref rx_ref) = rx {
-                while let Ok(msg) = rx_ref.try_recv() {
-                    match msg {
-                        AgentToTui::StreamChunk { text } => {
-                            output::clear_spinner();
-                            markdown::render_stream_chunk(&text, &mut self.stream_state);
-                        }
-                        AgentToTui::Thinking => {
-                            // Show spinner
-                            output::thinking_spinner(spinner_frame, None);
-                        }
-                        AgentToTui::Message(m) => {
-                            output::clear_spinner();
-                            if m.role == rupoo::MessageRole::User {
-                                // User messages are already printed by submit_message
-                            } else if m.role == rupoo::MessageRole::System {
-                                if m.content.starts_with("🔧") {
-                                    // Tool call start
-                                    output::clear_spinner();
-                                    let (tool_name, args) = parse_tool_call(&m.content);
-                                    output::tool_call_start(&tool_name, &args);
-                                    tool_card_open = true;
-                                } else if m.content.starts_with("✅") && tool_card_open {
-                                    // Tool result — close the card
-                                    let result = m.content.strip_prefix("✅ ").unwrap_or(&m.content);
-                                    output::tool_result(result, result.lines().count() > 8);
-                                    output::tool_call_end(true, None);
-                                    tool_card_open = false;
-                                } else {
-                                    // Other system messages
-                                    if !m.content.is_empty() {
-                                        output::system(&m.content);
-                                    }
-                                }
-                            } else if m.role == rupoo::MessageRole::Assistant {
-                                // Final assistant message — flush any remaining stream
-                                markdown::flush_stream(&mut self.stream_state);
-                                self.stream_state = markdown::StreamState::new();
-                            } else if m.content.contains("Error") {
-                                output::error(&m.content);
-                            }
-                            self.app.push_message(m);
-                            self.app.persist_sessions();
-                        }
-                        AgentToTui::Idle => {
-                            output::clear_spinner();
-                            // Flush any remaining stream
-                            markdown::flush_stream(&mut self.stream_state);
-                            self.stream_state = markdown::StreamState::new();
-                            
-                            // Print footer
-                            if let Some(start) = self.gen_start.take() {
-                                let duration = start.elapsed().as_secs_f64();
-                                let ctx_tokens = self.app.conversation_history.estimated_tokens();
-                                let ctx_budget = self.app.conversation_history.token_budget();
-                                output::assistant_footer(
-                                    duration,
-                                    self.app.token_in,
-                                    self.app.token_out,
-                                    ctx_tokens,
-                                    ctx_budget,
-                                );
-                            }
-                            
-                            self.app.set_idle();
-                            // Put the receiver back
-                            self.ui_rx = rx;
+                match rx_ref.recv_timeout(std::time::Duration::from_millis(50)) {
+                    Ok(msg) => {
+                        // Process this event, then drain any remaining queued events
+                        if !self.handle_agent_event(msg, &mut spinner_frame, &mut tool_card_open, &rx) {
+                            // Idle received — already put rx back and returned
                             return Ok(());
                         }
-                        AgentToTui::TokenUpdate { in_count, out_count } => {
-                            self.app.token_in = self.app.token_in.saturating_add(in_count);
-                            self.app.token_out = self.app.token_out.saturating_add(out_count);
+                        // Drain all immediately available events without blocking
+                        while let Ok(msg) = rx_ref.try_recv() {
+                            if !self.handle_agent_event(msg, &mut spinner_frame, &mut tool_card_open, &rx) {
+                                return Ok(());
+                            }
                         }
-                        AgentToTui::ToolStatus { tool_name, phase } => {
-                            let phase_str = match phase {
-                                ToolPhase::Calling => "calling",
-                                ToolPhase::Completed => "completed",
-                            };
-                            self.app.current_tool_status = Some((tool_name.clone(), phase_str.to_string()));
-                        }
-                        AgentToTui::RequestApproval(t) => {
-                            output::clear_spinner();
-                            self.handle_approval(t);
-                        }
-                        AgentToTui::LlmStatus { configured, provider, model_label } => {
-                            self.app.llm_configured = configured;
-                            self.app.llm_provider = provider.clone();
-                            self.app.model_label = model_label;
-                        }
-                        AgentToTui::StepProgress { step_index, total, step_name } => {
-                            output::clear_spinner();
-                            println!("  {} {}/{}: {}", "▸".yellow().bold(), step_index + 1, total, step_name.dimmed());
-                        }
+                    }
+                    Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
+                        // No events — update spinner animation
+                    }
+                    Err(crossbeam_channel::RecvTimeoutError::Disconnected) => {
+                        self.ui_rx = rx;
+                        return Err("agent channel disconnected");
                     }
                 }
             }
@@ -354,9 +284,6 @@ impl ReplSession {
                 output::thinking_spinner(spinner_frame, tool_name.as_deref());
                 spinner_frame += 1;
             }
-
-            // Brief sleep to avoid busy-wait
-            std::thread::sleep(std::time::Duration::from_millis(50));
         }
     }
 
@@ -385,33 +312,133 @@ impl ReplSession {
         self.stream_state = markdown::StreamState::new();
     }
 
+    /// Handle a single agent event. Returns false when Idle is received
+    /// (meaning the receiver has been put back and the caller should return).
+    fn handle_agent_event(
+        &mut self,
+        msg: AgentToTui,
+        spinner_frame: &mut usize,
+        tool_card_open: &mut bool,
+        rx: &Option<crossbeam_channel::Receiver<AgentToTui>>,
+    ) -> bool {
+        match msg {
+            AgentToTui::StreamChunk { text } => {
+                output::clear_spinner();
+                markdown::render_stream_chunk(&text, &mut self.stream_state);
+            }
+            AgentToTui::Thinking => {
+                output::thinking_spinner(*spinner_frame, None);
+            }
+            AgentToTui::Message(m) => {
+                output::clear_spinner();
+                if m.role == rupoo::MessageRole::User {
+                    // User messages are already printed by submit_message
+                } else if m.role == rupoo::MessageRole::System {
+                    if m.content.starts_with("🔧") {
+                        output::clear_spinner();
+                        let (tool_name, args) = parse_tool_call(&m.content);
+                        output::tool_call_start(&tool_name, &args);
+                        *tool_card_open = true;
+                    } else if m.content.starts_with("✅") && *tool_card_open {
+                        let result = m.content.strip_prefix("✅ ").unwrap_or(&m.content);
+                        output::tool_result(result, result.lines().count() > 8);
+                        output::tool_call_end(true, None);
+                        *tool_card_open = false;
+                    } else {
+                        if !m.content.is_empty() {
+                            output::system(&m.content);
+                        }
+                    }
+                } else if m.role == rupoo::MessageRole::Assistant {
+                    markdown::flush_stream(&mut self.stream_state);
+                    self.stream_state = markdown::StreamState::new();
+                } else if m.content.contains("Error") {
+                    output::error(&m.content);
+                }
+                self.app.push_message(m);
+                self.app.persist_sessions();
+            }
+            AgentToTui::Idle => {
+                output::clear_spinner();
+                markdown::flush_stream(&mut self.stream_state);
+                self.stream_state = markdown::StreamState::new();
+
+                if let Some(start) = self.gen_start.take() {
+                    let duration = start.elapsed().as_secs_f64();
+                    let ctx_tokens = self.app.conversation_history.estimated_tokens();
+                    let ctx_budget = self.app.conversation_history.token_budget();
+                    output::assistant_footer(
+                        duration,
+                        self.app.token_in,
+                        self.app.token_out,
+                        ctx_tokens,
+                        ctx_budget,
+                    );
+                }
+
+                self.app.set_idle();
+                self.ui_rx = rx.clone();
+                return false;
+            }
+            AgentToTui::TokenUpdate { in_count, out_count } => {
+                self.app.token_in = self.app.token_in.saturating_add(in_count);
+                self.app.token_out = self.app.token_out.saturating_add(out_count);
+            }
+            AgentToTui::ToolStatus { tool_name, phase } => {
+                let phase_str = match phase {
+                    ToolPhase::Calling => "calling",
+                    ToolPhase::Completed => "completed",
+                };
+                self.app.current_tool_status = Some((tool_name.clone(), phase_str.to_string()));
+            }
+            AgentToTui::RequestApproval(t) => {
+                output::clear_spinner();
+                self.handle_approval(t);
+            }
+            AgentToTui::LlmStatus { configured, provider, model_label } => {
+                self.app.llm_configured = configured;
+                self.app.llm_provider = provider.clone();
+                self.app.model_label = model_label;
+            }
+            AgentToTui::StepProgress { step_index, total, step_name } => {
+                output::clear_spinner();
+                println!("  {} {}/{}: {}", "▸".yellow().bold(), step_index + 1, total, step_name.dimmed());
+            }
+        }
+        true
+    }
+
     /// Handle slash commands.
     fn handle_command(&mut self, input: &str) -> bool {
         let parts: Vec<&str> = input.splitn(2, ' ').collect();
         let cmd = parts[0];
         let arg = parts.get(1).copied().unwrap_or("");
 
-        // Strip leading slash for registry lookup
-        let cmd_name = cmd.strip_prefix('/').unwrap_or(cmd);
-
-        // Try CommandRegistry for fuzzy matching on unknown commands
-        match cmd_name {
-            "help" | "h" | "?" => {
+        match cmd {
+            "/help" | "/h" | "/?" => {
                 println!();
-                let registry = commands::CommandRegistry::new();
-                print!("{}", registry.format_help());
+                println!("  {}", "Commands:".cyan().bold());
+                println!("  {} /help        — show this help", "›".dimmed());
+                println!("  {} /new         — new session", "›".dimmed());
+                println!("  {} /sessions    — list sessions", "›".dimmed());
+                println!("  {} /switch <n>  — switch to session #n", "›".dimmed());
+                println!("  {} /model       — show current model", "›".dimmed());
+                println!("  {} /theme <name>— switch theme (dark/light/monokai)", "›".dimmed());
+                println!("  {} /plan <msg>  — plan mode", "›".dimmed());
+                println!("  {} /clear       — clear screen", "›".dimmed());
+                println!("  {} /quit        — exit rupoo", "›".dimmed());
                 println!();
                 true
             }
-            "new" => {
+            "/new" => {
                 self.create_new_session();
                 true
             }
-            "sessions" | "ls" => {
+            "/sessions" | "/ls" => {
                 self.list_sessions();
                 true
             }
-            "switch" | "s" => {
+            "/switch" | "/s" => {
                 if let Ok(idx) = arg.parse::<usize>() {
                     self.switch_to_session(idx);
                 } else {
@@ -419,11 +446,13 @@ impl ReplSession {
                 }
                 true
             }
-            "model" | "m" => {
+            "/model" | "/m" => {
                 if arg.is_empty() {
                     println!("  {} {}", "Model:".cyan(), self.app.model_label.cyan().bold());
                     true
                 } else {
+                    // /model <provider> [model] — forward to bridge for hot switch
+                    // Bridge handles the actual switch_llm call and sends back status
                     if let Some(ref tx) = self.app.agent_tx {
                         let _ = tx.send(TuiToAgent::SubmitMessage(format!("/model {}", arg)));
                         self.app.set_thinking();
@@ -435,8 +464,9 @@ impl ReplSession {
                     true
                 }
             }
-            "theme" | "t" => {
+            "/theme" | "/t" => {
                 if arg.is_empty() {
+                    // Show current theme and available options
                     let current = theme::current_name();
                     let names: Vec<String> = theme::Theme::all_names()
                         .iter()
@@ -453,11 +483,12 @@ impl ReplSession {
                     theme::set(t);
                     output::set_cursor_style_bar();
                     println!("  {} Switched to {} theme", "✓".green(), arg);
+                    // Persist theme preference
                     if let Some(ref repo) = self.app.repo {
                         if let Some(ref handle) = self.app.rt_handle {
                             let repo = std::sync::Arc::clone(repo);
                             let theme_name = arg.to_string();
-                            handle.spawn(async move {
+                            let _ = handle.spawn(async move {
                                 let _ = repo.set_setting("theme", &theme_name).await;
                             });
                         }
@@ -468,48 +499,16 @@ impl ReplSession {
                 }
                 true
             }
-            "clear" | "cls" => {
-                print!("\x1b[2J\x1b[H");
+            "/clear" | "/cls" => {
+                print!("\x1b[2J\x1b[H"); // Clear screen + cursor home
                 let _ = io::stdout().flush();
                 true
             }
-            "compact" => {
-                let before = self.app.conversation_history.estimated_tokens();
-                let before_msgs = self.app.conversation_history.len();
-                self.app.conversation_history.compact(5);
-                let after = self.app.conversation_history.estimated_tokens();
-                let after_msgs = self.app.conversation_history.len();
-                let bar = self.app.conversation_history.budget_progress_bar();
-                println!("  {} Compacted {} → {} messages", "✓".green(), before_msgs, after_msgs);
-                println!("  {} {} → {} tokens", "│".dimmed(), before, after);
-                println!("  {} {}", "│".dimmed(), bar);
-                if let Some(ref repo) = self.app.repo {
-                    if let Some(ref handle) = self.app.rt_handle {
-                        let repo = std::sync::Arc::clone(repo);
-                        let sid = self.app.current_session_id();
-                        let ch = self.app.conversation_history.clone();
-                        handle.spawn(async move {
-                            let _ = repo.save_conversation_history(&sid, &ch).await;
-                        });
-                    }
-                }
-                true
-            }
-            "budget" => {
-                let bar = self.app.conversation_history.budget_progress_bar();
-                let near = if self.app.conversation_history.is_near_budget() {
-                    " ⚠ near limit!".yellow().to_string()
-                } else {
-                    String::new()
-                };
-                println!("  {} {}{}", "▸".cyan(), bar, near);
-                true
-            }
-            "quit" | "q" | "exit" => {
+            "/quit" | "/q" | "/exit" => {
                 self.app.quit = true;
                 true
             }
-            "plan" => {
+            "/plan" => {
                 if !arg.is_empty() {
                     output::user_message(arg);
                     if let Some(ref tx) = self.app.agent_tx {
@@ -523,17 +522,7 @@ impl ReplSession {
                 }
                 true
             }
-            _ => {
-                // Fuzzy match via CommandRegistry
-                let registry = commands::CommandRegistry::new();
-                if let Some(suggestion) = registry.find(cmd_name) {
-                    println!("  {} Unknown command '/{}'. Did you mean '/{}'?",
-                        "✗".red(), cmd_name, suggestion.name);
-                    true
-                } else {
-                    false // Not a recognized command, treat as regular input
-                }
-            }
+            _ => false, // Not a recognized command, treat as regular input
         }
     }
 
@@ -678,12 +667,14 @@ impl ReplSession {
             if let Some(ref handle) = self.app.rt_handle {
                 let repo = std::sync::Arc::clone(repo);
                 let new_id_clone = new_id.clone();
-                if let Ok(Some(ch)) = handle.block_on(async {
+                if let Ok(ch) = handle.block_on(async {
                     repo.load_conversation_history(&new_id_clone).await
                 }) {
-                    self.app.conversation_history = ch;
-                    if self.app.conversation_history.token_budget() == 0 {
-                        self.app.conversation_history = self.app.conversation_history.clone().with_token_budget(60000);
+                    if let Some(ch) = ch {
+                        self.app.conversation_history = ch;
+                        if self.app.conversation_history.token_budget() == 0 {
+                            self.app.conversation_history = self.app.conversation_history.clone().with_token_budget(60000);
+                        }
                     }
                 }
             }
@@ -719,7 +710,6 @@ pub fn run_tui_with_agent(
     agent: Agent,
     tool_executor: std::sync::Arc<Box<dyn rupoo::agent::ToolExecutor>>,
     rt_handle: tokio::runtime::Handle,
-    llm_router: Option<rupoo::llm::router::LlmRouter>,
 ) -> Result<(), &'static str> {
     let (sessions_data, model_label, llm_configured, llm_provider, conversation_history, approve_all) = rt_handle.block_on(async {
         let sessions = repo.load_ui_sessions().await.unwrap_or_default();
@@ -799,7 +789,6 @@ pub fn run_tui_with_agent(
                     session_id: "default".to_string(),
                     intent_state: rupoo::signal::IntentState::new(),
                     cancelled: cancel_flag_bridge,
-                    llm_router,
                 };
                 agent_task.run().await;
             });

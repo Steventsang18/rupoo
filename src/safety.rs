@@ -37,18 +37,15 @@ impl Default for SafetyContext {
     fn default() -> Self {
         Self {
             forbidden_commands: [
-                "sudo", "su", "passwd", "chown", "chmod", "chattr",
-                "rm", "mkfs", "fdisk", "dd", "format",
+                "sudo", "su", "passwd",
+                "mkfs", "fdisk", "dd", "format",
                 "shutdown", "reboot", "halt", "poweroff",
-                "kill", "killall", "pkill",
                 "iptables", "ufw",
                 "mount", "umount",
-                // Direct binary execution paths for truly dangerous shells
-                // (interactive shells are approval-required, not forbidden — see needs_approval)
-            ]
-            .iter()
-            .map(|s| s.to_string())
-            .collect(),
+                // File-modifying commands (rm/chmod/kill/chown) moved to
+                // needs_approval() so they require user confirmation but can
+                // still be used when explicitly approved.
+            ].iter().map(|s| s.to_string()).collect(),
             allowed_paths: vec![
                 std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
             ],
@@ -245,6 +242,31 @@ impl SafetyContext {
         self.allowed_paths.first().map(|p| p.as_path())
     }
 
+    /// Forward safe environment variables to a child process after clearing.
+    /// Only essential, non-sensitive vars are preserved.
+    // NOTE: The following are explicitly NOT forwarded:
+    // AWS_*, GITHUB_*, TOKEN, SECRET, PASSWORD, KEY, DOCKER_AUTH
+    pub fn forward_safe_env(cmd: &mut std::process::Command) {
+        cmd.env_clear();
+        cmd.env("PATH", std::env::var("PATH").unwrap_or_default());
+        cmd.env("HOME", std::env::var("HOME").unwrap_or_default());
+        cmd.env("USER", std::env::var("USER").unwrap_or_default());
+        cmd.env("SHELL", std::env::var("SHELL").unwrap_or_default());
+        cmd.env("LANG", std::env::var("LANG").unwrap_or_default());
+        cmd.env("TERM", std::env::var("TERM").unwrap_or_default());
+    }
+
+    /// Forward safe environment variables to a tokio child process after clearing.
+    pub fn forward_safe_env_async(cmd: &mut tokio::process::Command) {
+        cmd.env_clear();
+        cmd.env("PATH", std::env::var("PATH").unwrap_or_default());
+        cmd.env("HOME", std::env::var("HOME").unwrap_or_default());
+        cmd.env("USER", std::env::var("USER").unwrap_or_default());
+        cmd.env("SHELL", std::env::var("SHELL").unwrap_or_default());
+        cmd.env("LANG", std::env::var("LANG").unwrap_or_default());
+        cmd.env("TERM", std::env::var("TERM").unwrap_or_default());
+    }
+
     /// Check if a tool call requires user approval before execution.
     ///
     /// Returns `true` for high-risk operations (file deletion, network calls
@@ -312,8 +334,11 @@ mod tests {
     #[test]
     fn test_forbidden_command() {
         let ctx = SafetyContext::default();
+        // sudo is explicitly forbidden
         assert!(ctx.validate_command("sudo rm -rf /").is_err());
-        assert!(ctx.validate_command("rm -rf /").is_err());
+        // rm is no longer forbidden — it requires approval instead
+        assert!(ctx.validate_command("rm -rf /").is_ok());
+        assert!(ctx.needs_approval("rm -rf /"));
         assert!(ctx.validate_command("echo hello").is_ok());
         // sh/bash are no longer forbidden — they require approval instead
         assert!(ctx.validate_command("bash -c 'echo hello'").is_ok());

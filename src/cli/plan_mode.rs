@@ -176,8 +176,8 @@ impl AgentUiBridge {
                         } else {
                             // ToolCall step: run via MCP executor
                             self.tool_executor.execute_tool(&tn, p).await
-                                .map(|mcp| mcp.content)
-                                .map_err(|e| e.to_string())
+                                .map(|mcp| mcp.content().to_string())
+                                .map_err(|e: rupoo::error::AgentError| e.to_string())
                         };
 
                         match result {

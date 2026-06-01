@@ -5,8 +5,76 @@
 use crate::error::{AgentError, AgentResult};
 use crate::llm::ConversationHistory;
 use crate::task::MemoryEntry;
+use tracing::warn;
 
 use super::TaskRepo;
+
+/// Valid configuration keys for `set_setting`.
+const VALID_CONFIG_KEYS: &[&str] = &[
+    "api_key.anthropic",
+    "api_key.openai",
+    "api_key.deepseek",
+    "model.anthropic",
+    "model.openai",
+    "model.deepseek",
+    "model.ollama",
+    "base_url.openai",
+    "base_url.deepseek",
+    "ollama.base_url",
+    "active_provider",
+    "approve_all",
+    "default_timeout_secs",
+    "browser_path",
+    "max_turns",
+    "theme",
+];
+
+/// Check if a config key is valid, returning a suggestion for close matches.
+fn validate_config_key(key: &str) -> AgentResult<()> {
+    if VALID_CONFIG_KEYS.contains(&key) {
+        return Ok(());
+    }
+    // Find the closest match using simple edit distance
+    let best = VALID_CONFIG_KEYS.iter()
+        .filter_map(|valid| {
+            let dist = levenshtein_distance(key, valid);
+            if dist <= 3 { Some((dist, *valid)) } else { None }
+        })
+        .min_by_key(|(d, _)| *d);
+
+    match best {
+        Some((_, suggestion)) => Err(AgentError::Config(format!(
+            "unknown config key '{}'. Did you mean '{}'?", key, suggestion
+        ))),
+        None => Err(AgentError::Config(format!(
+            "unknown config key '{}'. Valid keys: {}", key, VALID_CONFIG_KEYS.join(", ")
+        ))),
+    }
+}
+
+/// Simple Levenshtein distance for config key suggestions.
+fn levenshtein_distance(a: &str, b: &str) -> usize {
+    let a_len = a.chars().count();
+    let b_len = b.chars().count();
+    if a_len == 0 { return b_len; }
+    if b_len == 0 { return a_len; }
+
+    let mut prev: Vec<usize> = (0..=b_len).collect();
+    let mut curr: Vec<usize> = vec![0; b_len + 1];
+
+    for (i, ac) in a.chars().enumerate() {
+        curr[0] = i + 1;
+        for (j, bc) in b.chars().enumerate() {
+            curr[j + 1] = if ac == bc {
+                prev[j]
+            } else {
+                1 + prev[j].min(curr[j]).min(prev[j + 1])
+            };
+        }
+        std::mem::swap(&mut prev, &mut curr);
+    }
+    prev[b_len]
+}
 
 // ---------------------------------------------------------------------------
 // Conversation History impl
@@ -113,6 +181,7 @@ impl TaskRepo {
 
     /// Set a configuration value.
     pub async fn set_setting(&self, key: &str, value: &str) -> AgentResult<()> {
+        validate_config_key(key)?;
         let key = key.to_string();
         let value = value.to_string();
         self.with_conn(move |conn| {
@@ -283,7 +352,10 @@ impl TaskRepo {
 
             let rows = stmt.query_map(rusqlite::params![query, limit as i64], |row| {
                 let tags_str: String = row.get(2)?;
-                let tags: Vec<String> = serde_json::from_str(&tags_str).unwrap_or_default();
+                let tags: Vec<String> = serde_json::from_str(&tags_str).unwrap_or_else(|e| {
+                    warn!(tags_str = %tags_str, error = %e, "failed to deserialize tags, using empty vec");
+                    Vec::new()
+                });
                 Ok(MemoryEntry {
                     id: row.get::<_, String>(0)?,
                     content: row.get(1)?,
@@ -315,7 +387,10 @@ impl TaskRepo {
 
             let rows = stmt.query_map([limit as i64], |row| {
                 let tags_str: String = row.get(2)?;
-                let tags: Vec<String> = serde_json::from_str(&tags_str).unwrap_or_default();
+                let tags: Vec<String> = serde_json::from_str(&tags_str).unwrap_or_else(|e| {
+                    warn!(tags_str = %tags_str, error = %e, "failed to deserialize tags, using empty vec");
+                    Vec::new()
+                });
                 Ok(MemoryEntry {
                     id: row.get::<_, String>(0)?,
                     content: row.get(1)?,
@@ -355,7 +430,7 @@ impl TaskRepo {
 
 #[cfg(test)]
 mod tests {
-    use crate::db::tests::repo;
+    use super::super::tests::repo;
     use crate::error::AgentError;
     use crate::llm::ConversationHistory;
 

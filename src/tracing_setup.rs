@@ -9,9 +9,11 @@
 //! in log files.
 
 use std::fs::OpenOptions;
+use std::io::{self, Write};
 use std::path::PathBuf;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
+use tracing::warn;
 use tracing_subscriber::EnvFilter;
 
 /// Field names that should be redacted in all log output.
@@ -26,11 +28,8 @@ const SENSITIVE_FIELDS: &[&str] = &[
 
 /// Redact sensitive field values: replace the value with "***REDACTED***".
 ///
-/// Ready for integration with a custom tracing Layer/Writer that filters
-/// log output before writing. Currently not wired into the subscriber
-/// pipeline because existing log calls don't emit sensitive fields.
-/// Will be activated when sensitive field logging is added.
-#[allow(dead_code)]
+/// Integrated into the subscriber pipeline via `RedactingWriter` to ensure
+/// no credentials leak into log files.
 fn redact_sensitive_fields(fmt_fields: &mut String) {
     for field in SENSITIVE_FIELDS {
         // Try quoted value first: field="value"
@@ -58,6 +57,45 @@ fn redact_sensitive_fields(fmt_fields: &mut String) {
     }
 }
 
+/// A writer wrapper that redacts sensitive fields before writing to the underlying writer.
+struct RedactingWriter<W> {
+    inner: Arc<Mutex<W>>,
+}
+
+impl<W: Write + 'static> RedactingWriter<W> {
+    fn new(inner: Arc<Mutex<W>>) -> Self {
+        Self { inner }
+    }
+}
+
+impl<W: Write + 'static> Write for RedactingWriter<W> {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        let mut line = String::from_utf8_lossy(buf).into_owned();
+        redact_sensitive_fields(&mut line);
+        let mut guard = self.inner.lock().unwrap_or_else(|poisoned| {
+            eprintln!("[rupoo] log writer mutex poisoned, recovering");
+            poisoned.into_inner()
+        });
+        guard.write(line.as_bytes())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        let mut guard = self.inner.lock().unwrap_or_else(|poisoned| {
+            eprintln!("[rupoo] log writer mutex poisoned, recovering");
+            poisoned.into_inner()
+        });
+        guard.flush()
+    }
+}
+
+impl<W: Write + 'static> tracing_subscriber::fmt::MakeWriter<'_> for RedactingWriter<W> {
+    type Writer = Self;
+
+    fn make_writer(&self) -> Self::Writer {
+        Self { inner: Arc::clone(&self.inner) }
+    }
+}
+
 /// Initialise the tracing subscriber.
 ///
 /// When `verbose` is false (default) logs go to a file only.
@@ -74,11 +112,15 @@ pub fn init_logging(verbose: bool) {
         if rotated.exists() {
             if let Ok(meta) = rotated.metadata() {
                 if meta.len() > 10 * 1024 * 1024 {
-                    let _ = std::fs::remove_file(&rotated);
+                    if let Err(e) = std::fs::remove_file(&rotated) {
+                        warn!(error = %e, path = %rotated.display(), "failed to remove oversized log file");
+                    }
                 }
             }
         }
-        let _ = std::fs::rename(&log_path, &rotated);
+        if let Err(e) = std::fs::rename(&log_path, &rotated) {
+            warn!(error = %e, from = %log_path.display(), to = %rotated.display(), "failed to rotate log file");
+        }
     }
 
     let log_to_stderr = |verbose: bool| {
@@ -106,9 +148,10 @@ pub fn init_logging(verbose: bool) {
         .open(&log_path)
     {
         Ok(file) => {
-            let file_writer = Mutex::new(file);
+            let file_writer = Arc::new(Mutex::new(file));
+            let redacting = RedactingWriter::new(file_writer);
             let builder = tracing_subscriber::fmt()
-                .with_writer(file_writer)
+                .with_writer(redacting)
                 .with_ansi(false)
                 .with_target(true)
                 .with_thread_ids(true);
@@ -133,12 +176,21 @@ pub fn init_logging(verbose: bool) {
     }
 }
 
-/// Return the data directory `~/.rupoo`.
+/// Return the data directory `~/.rupoo` (or `%APPDATA%\rupoo` on Windows).
 pub fn data_dir() -> PathBuf {
-    if let Ok(home) = std::env::var("HOME") {
-        PathBuf::from(home).join(".rupoo")
-    } else {
-        PathBuf::from(".rupoo")
+    #[cfg(target_os = "windows")]
+    {
+        std::env::var("APPDATA")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| PathBuf::from("."))
+            .join("rupoo")
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        std::env::var("HOME")
+            .map(|h| PathBuf::from(h).join(".rupoo"))
+            .unwrap_or_else(|_| PathBuf::from(".rupoo"))
     }
 }
 

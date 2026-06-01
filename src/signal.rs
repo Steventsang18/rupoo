@@ -106,7 +106,11 @@ pub fn compress_file_content(content: &str, path: &str, target: Option<&str>) ->
     let total_lines = lines.len();
 
     // Small file → return fully line-numbered
+    // Truly tiny file (1-2 lines, <100 chars) → skip line number overhead
     if total_lines <= 80 && content.len() <= MAX_FILE_CHARS_DEFAULT {
+        if total_lines <= 2 && content.len() <= 100 {
+            return format!("[file_read: {}]\n{}", path, content);
+        }
         return format_line_numbered(path, &lines, 0, total_lines, total_lines);
     }
 

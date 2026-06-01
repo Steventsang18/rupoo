@@ -44,8 +44,8 @@ impl ApprovalExt for AgentUiBridge {
                     step.set_status(rupoo::task::StepStatus::Completed);
                     if let rupoo::task::Step::ToolCall { ref mut result, .. } = step {
                         *result = Some(serde_json::json!({
-                            "success": mcp.success,
-                            "content": mcp.content,
+                            "success": mcp.is_success(),
+                            "content": mcp.content(),
                         }));
                     }
                 }
@@ -55,7 +55,7 @@ impl ApprovalExt for AgentUiBridge {
                         &pid,
                         step_index,
                         rupoo::task::StepStatus::Completed,
-                        Some(mcp.content.clone()),
+                        Some(mcp.content().to_string()),
                     )
                     .await;
                 plan.current_step_index = step_index + 1;

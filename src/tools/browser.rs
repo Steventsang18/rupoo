@@ -168,7 +168,7 @@ pub async fn execute_browser_action(
             .await?;
 
             // Strip HTML tags to get plain text
-            let plain_text = strip_html_tags(&output);
+            let plain_text = super::strip_html_tags(&output);
             
             // Clean up extra whitespace and limit output
             let cleaned: String = plain_text
@@ -312,7 +312,7 @@ fn extract_links_from_html(html: &str) -> Vec<(String, String)> {
                 
                 // Extract link text (between </a> and start of next tag)
                 if let Some(close_pos) = html[after_open_tag..].find("</a>") {
-                    let link_text = strip_html_tags(&html[after_open_tag..after_open_tag + close_pos])
+                    let link_text = super::strip_html_tags(&html[after_open_tag..after_open_tag + close_pos])
                         .trim()
                         .to_string();
                     
@@ -334,37 +334,6 @@ fn extract_links_from_html(html: &str) -> Vec<(String, String)> {
     }
 
     links
-}
-
-/// Strip HTML tags from a string — handles nested and adjacent tags.
-/// Also decodes common HTML entities.
-pub fn strip_html_tags(s: &str) -> String {
-    let mut result = String::with_capacity(s.len());
-    let bytes = s.as_bytes();
-    let mut i = 0;
-
-    while i < bytes.len() {
-        if bytes[i] == b'<' {
-            // Skip to the next '>'
-            let mut j = i + 1;
-            while j < bytes.len() && bytes[j] != b'>' {
-                j += 1;
-            }
-            i = j.saturating_add(1);
-        } else {
-            result.push(bytes[i] as char);
-            i += 1;
-        }
-    }
-
-    // Decode common HTML entities
-    result
-        .replace("&amp;", "&")
-        .replace("&lt;", "<")
-        .replace("&gt;", ">")
-        .replace("&quot;", "\"")
-        .replace("&#39;", "'")
-        .replace("&nbsp;", " ")
 }
 
 /// Run a browser command with timeout protection.
@@ -426,6 +395,7 @@ mod tests {
 
     #[test]
     fn test_strip_html_tags() {
+        use super::super::strip_html_tags;
         assert_eq!(strip_html_tags("hello world"), "hello world");
         assert_eq!(strip_html_tags("hello <b>world</b>"), "hello world");
         assert_eq!(strip_html_tags("a &amp; b"), "a & b");

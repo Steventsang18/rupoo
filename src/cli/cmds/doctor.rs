@@ -1,6 +1,5 @@
 use anyhow::Result;
 use console::style;
-use rupoo::config::RupooConfig;
 use rupoo::db::TaskRepo;
 use rupoo::skill::SkillManager;
 
@@ -88,10 +87,15 @@ async fn all_checks() -> Vec<CheckResult> {
     let mut results = Vec::new();
 
     // 1. Database
-    match TaskRepo::new("agent.db") {
+    let db_path = {
+        let home = std::env::var("HOME").unwrap_or_default();
+        std::path::Path::new(&home).join(".rupoo").join("agent.db")
+    };
+    let db_path_str = db_path.to_string_lossy().to_string();
+    match TaskRepo::new(&db_path_str) {
         Ok(_repo) => {
             let tables = ["plans", "checkpoints", "settings", "memories"];
-            let msg = format!("agent.db — connected, {} tables present", tables.len());
+            let msg = format!("{} — connected, {} tables present", db_path_str, tables.len());
             results.push(CheckResult::new("Database", true, Some(msg), false));
         }
         Err(e) => {
@@ -99,110 +103,38 @@ async fn all_checks() -> Vec<CheckResult> {
         }
     }
 
-    // 2. LLM keys — config.toml + credentials.toml + DB
+    // 2. LLM keys
     if let Ok(repo) = TaskRepo::new("agent.db") {
-        let config = RupooConfig::load().unwrap_or_default();
         let mut msgs = Vec::new();
         let mut all_ok = true;
         for provider in &["anthropic", "openai", "deepseek"] {
-            // Try config priority chain first, then DB
-            let key_resolved = config.resolve_api_key(provider).await;
-            match key_resolved {
-                Some(val) if val.len() > 4 => {
+            let key = format!("api_key.{provider}");
+            match repo.get_setting(&key).await {
+                Ok(Some(val)) if val.len() > 4 => {
                     let prefix: String = val.chars().take(8).collect();
-                    msgs.push(format!("{}: configured ({prefix}...) [config]", provider));
+                    msgs.push(format!("{}: configured ({prefix}...)", provider));
                 }
                 _ => {
-                    // Fallback to DB
-                    match repo.get_setting(&format!("api_key.{}", provider)).await {
-                        Ok(Some(val)) if val.len() > 4 => {
-                            let prefix: String = val.chars().take(8).collect();
-                            msgs.push(format!("{}: configured ({prefix}...) [DB]", provider));
-                        }
-                        _ => {
-                            msgs.push(format!("{}: {} — no API key set", provider, style("WARN").yellow()));
-                            all_ok = false;
-                        }
-                    }
+                    msgs.push(format!("{}: {} — no {} set", provider, style("WARN").yellow(), key));
+                    all_ok = false;
                 }
             }
         }
-
-        // Ollama health check — use router's check_ollama_health
-        match rupoo::llm::router::check_ollama_health("http://localhost:11434").await {
-            rupoo::llm::router::OllamaStatus::Available { models } => {
-                if models.is_empty() {
-                    msgs.push("ollama: reachable at localhost:11434 (no models pulled)".into());
-                } else {
-                    let model_list = if models.len() <= 5 {
-                        models.join(", ")
-                    } else {
-                        format!("{} (and {} more)", models[..5].join(", "), models.len() - 5)
-                    };
-                    msgs.push(format!("ollama: reachable — {}", model_list));
-                }
+        // Ollama check — use a shared client for connection reuse
+        let ollama_client = reqwest::Client::new();
+        match ollama_client.get("http://localhost:11434/api/tags").send().await {
+            Ok(resp) if resp.status().is_success() => {
+                msgs.push("ollama: reachable at localhost:11434".into());
             }
-            rupoo::llm::router::OllamaStatus::Unreachable(reason) => {
-                msgs.push(format!("ollama: {} — {} (optional)", style("WARN").yellow(), reason));
+            _ => {
+                msgs.push(format!("ollama: {} — connection refused (optional)", style("WARN").yellow()));
+                // Don't mark all_ok false for optional Ollama
             }
         }
         results.push(CheckResult::new("LLM Configuration", all_ok, Some(msgs.join("\n")), true));
     }
 
-    // 3. Config file — check config.toml and credentials.toml
-    {
-        let data_dir = rupoo::config::data_dir();
-        let config_path = data_dir.join("config.toml");
-        let creds_path = data_dir.join("credentials.toml");
-
-        let mut msgs = Vec::new();
-        let mut all_ok = true;
-
-        // config.toml
-        if config_path.exists() {
-            match RupooConfig::load() {
-                Ok(cfg) => {
-                    msgs.push(format!("config.toml: valid (provider: {})", cfg.llm.active_provider));
-                }
-                Err(e) => {
-                    msgs.push(format!("config.toml: {} — parse error: {}", style("FAIL").red(), e));
-                    all_ok = false;
-                }
-            }
-        } else {
-            msgs.push(format!("config.toml: {} — using defaults", style("MISSING").yellow()));
-        }
-
-        // credentials.toml
-        if creds_path.exists() {
-            // Check file permissions (should be 0600 on Unix)
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                if let Ok(meta) = std::fs::metadata(&creds_path) {
-                    let mode = meta.permissions().mode() & 0o777;
-                    if mode & 0o077 != 0 {
-                        msgs.push(format!(
-                            "credentials.toml: {} — permissions too open ({:#o}), should be 0600",
-                            style("WARN").yellow(), mode
-                        ));
-                    } else {
-                        msgs.push("credentials.toml: secure (0600)".into());
-                    }
-                }
-            }
-            #[cfg(not(unix))]
-            {
-                msgs.push("credentials.toml: present".into());
-            }
-        } else {
-            msgs.push(format!("credentials.toml: {} — API keys in config/DB only", style("MISSING").yellow()));
-        }
-
-        results.push(CheckResult::new("Config Files", all_ok, Some(msgs.join("\n")), true));
-    }
-
-    // 4. Skills
+    // 3. Skills
     let skill_dir = SkillManager::default_dir();
     if skill_dir.exists() {
         match SkillManager::new(skill_dir.clone()).list_skills() {
@@ -221,7 +153,7 @@ async fn all_checks() -> Vec<CheckResult> {
         results.push(CheckResult::new("Skills", false, Some(msg), true));
     }
 
-    // 5. Git
+    // 4. Git
     match rupoo::git::GitRepo::open(".") {
         Ok(git) => {
             let branch = git.current_branch().unwrap_or_default();
@@ -233,7 +165,7 @@ async fn all_checks() -> Vec<CheckResult> {
         }
     }
 
-    // 6. Data directory
+    // 5. Data directory
     let data_dir = crate::tracing_setup::data_dir();
     if data_dir.exists() {
         results.push(CheckResult::new("Data Directory", true,
@@ -243,7 +175,7 @@ async fn all_checks() -> Vec<CheckResult> {
             Some(format!("Not found: {}", data_dir.display())), true));
     }
 
-    // 7. Log file
+    // 6. Log file
     let log_path = data_dir.join("rupoo.log");
     match std::fs::metadata(&log_path) {
         Ok(meta) => {
@@ -268,19 +200,11 @@ async fn run_fixes() -> Result<()> {
     let dirs = [
         SkillManager::default_dir(),
         crate::tracing_setup::data_dir(),
-        rupoo::config::data_dir(),
     ];
     for d in &dirs {
         if !d.exists() {
             std::fs::create_dir_all(d)?;
             println!("  {} Created: {}", style("✓").green(), d.display());
-        }
-    }
-    // Create default config.toml if missing
-    let config_path = rupoo::config::data_dir().join("config.toml");
-    if !config_path.exists() {
-        if let Ok(path) = rupoo::config::init_config() {
-            println!("  {} Created default config: {}", style("✓").green(), path.display());
         }
     }
     Ok(())
