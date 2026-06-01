@@ -7,6 +7,7 @@ use tracing::{error, info, warn};
 use crate::db::TaskRepo;
 use crate::error::{AgentError, AgentResult};
 use crate::llm::{LlmGateway, TokenUsage, ConversationHistory, AgentEvent};
+use crate::memory_cache::MemoryCache;
 
 use crate::task::{
     Checkpoint, CheckpointStatus, McpToolResult, Plan, PlanStatus, Step, StepStatus,
@@ -45,6 +46,19 @@ pub trait ToolExecutor: Send + Sync {
         tool_name: &str,
         params: serde_json::Value,
     ) -> AgentResult<McpToolResult>;
+
+    /// Execute multiple tools in parallel.
+    /// Returns a vector of results in the same order as the input.
+    async fn execute_tools_parallel(
+        &self,
+        tool_calls: Vec<(String, serde_json::Value)>,
+    ) -> Vec<AgentResult<McpToolResult>> {
+        let mut results = Vec::with_capacity(tool_calls.len());
+        for (name, params) in tool_calls {
+            results.push(self.execute_tool(&name, params).await);
+        }
+        results
+    }
 }
 
 /// Dummy tool executor for testing — echoes back the params as result.
@@ -62,11 +76,7 @@ impl ToolExecutor for DummyToolExecutor {
             tool_name,
             serde_json::to_string_pretty(&params).unwrap_or_default()
         );
-        Ok(McpToolResult {
-            success: true,
-            content,
-            error: None,
-        })
+        Ok(McpToolResult::Success { content })
     }
 }
 
@@ -76,25 +86,34 @@ impl ToolExecutor for DummyToolExecutor {
 
 pub struct Agent {
     repo: Arc<TaskRepo>,
+    memory_cache: std::sync::Arc<MemoryCache>,
     pub tool_executor: Box<dyn ToolExecutor>,
     llm_gateway: Option<LlmGateway>,
     pub safety_ctx: SafetyContext,
+    /// Cached system prompt to avoid re-reading files on every Think step.
+    cached_system_prompt: std::cell::RefCell<Option<String>>,
     /// Token usage from the most recent chat() call.
     /// Uses Mutex for interior mutability (Cell is not Sync).
     last_usage: std::sync::Mutex<Option<TokenUsage>>,
     /// Cancellation flag. Set to true to abort the running plan at the next step.
     cancelled: std::sync::atomic::AtomicBool,
+    /// Shared HTTP client for connection pooling (reqwest, tools, LLM providers).
+    pub http_client: std::sync::Arc<reqwest::Client>,
 }
 
 impl Agent {
     pub fn new(repo: Arc<TaskRepo>, tool_executor: Box<dyn ToolExecutor>) -> Self {
+        let memory_cache = std::sync::Arc::new(MemoryCache::new(Arc::clone(&repo), 64));
         Self {
             repo,
+            memory_cache,
             tool_executor,
             llm_gateway: None,
             safety_ctx: SafetyContext::default(),
+            cached_system_prompt: std::cell::RefCell::new(None),
             last_usage: std::sync::Mutex::new(None),
             cancelled: std::sync::atomic::AtomicBool::new(false),
+            http_client: crate::http_client::HTTP_CLIENT.clone(),
         }
     }
 
@@ -183,13 +202,14 @@ impl Agent {
         let model_label = cfg.model.clone();
 
         let jail_root = self.safety_ctx.jail_root().map(|p| p.to_path_buf());
-        let gateway = if let Some(ref root) = jail_root {
-            crate::llm::LlmGateway::with_jail(cfg, root.clone())
-        } else {
-            crate::llm::LlmGateway::new(cfg)
-        };
+        let gateway = crate::llm::LlmGateway::with_http_client(
+            cfg,
+            jail_root,
+            self.http_client.clone(),
+        );
 
         self.llm_gateway = Some(gateway);
+        self.cached_system_prompt = std::cell::RefCell::new(None); // invalidate cache on model switch
         let label = format!("{}/{}", provider, model_label);
         Ok(label)
     }
@@ -232,8 +252,8 @@ impl Agent {
 
         // Search memories for context
         let memory_context = self
-            .repo
-            .search_memories(user_message, 5)
+            .memory_cache
+            .search(user_message, 5)
             .await
             .ok()
             .filter(|memories| !memories.is_empty())
@@ -517,14 +537,22 @@ fn build_system_prompt() -> String {
 
         // Retrieve relevant memories to inject as context
         let memory_context = self
-            .repo
-            .search_memories(instruction, 5)
+            .memory_cache
+            .search(instruction, 5)
             .await
             .unwrap_or_default();
 
         // Call LLM if configured, otherwise fall back to dummy output
         let think_result = if let Some(gateway) = &self.llm_gateway {
-            let mut system = Self::build_system_prompt();
+            let mut system = {
+                let mut cache = self.cached_system_prompt.borrow_mut();
+                if cache.is_none() {
+                    *cache = Some(Self::build_system_prompt());
+                }
+                cache.as_ref().cloned().ok_or_else(|| {
+                    AgentError::Other("failed to build system prompt".to_string())
+                })?
+            };
 
             if !memory_context.is_empty() {
                 system.push_str("\n\nRelevant context from memory:");
@@ -607,29 +635,29 @@ fn build_system_prompt() -> String {
                 // Record result in step
                 if let Some(Step::ToolCall { ref mut result, .. }) = plan.steps.get_mut(step_index) {
                     *result = Some(serde_json::json!({
-                        "success": mcp_result.success,
-                        "content": mcp_result.content,
+                        "success": mcp_result.is_success(),
+                        "content": mcp_result.content(),
                     }));
                 }
 
-                let output = if mcp_result.success {
-                    mcp_result.content
-                } else {
-                    let err = mcp_result.error.unwrap_or_else(|| "unknown error".into());
-                    error!(tool = tool_name, error = %err, "tool call failed");
+                let output = match &mcp_result {
+                    McpToolResult::Success { content } => content.clone(),
+                    McpToolResult::Error { message } => {
+                        error!(tool = tool_name, error = %message, "tool call failed");
 
-                    // Record failure checkpoint instead
-                    self.repo
-                        .record_step_completion(
-                            &pid,
-                            step_index,
-                            StepStatus::Failed,
-                            Some(format!("error: {err}")),
-                        )
-                        .await?;
+                        // Record failure checkpoint instead
+                        self.repo
+                            .record_step_completion(
+                                &pid,
+                                step_index,
+                                StepStatus::Failed,
+                                Some(format!("error: {message}")),
+                            )
+                            .await?;
 
-                    plan.updated_at = chrono::Utc::now();
-                    return Ok(StepOutcome::Failed(err));
+                        plan.updated_at = chrono::Utc::now();
+                        return Ok(StepOutcome::Failed(message.clone()));
+                    }
                 };
 
                 // Atomically commit checkpoint
@@ -871,29 +899,34 @@ fn build_system_prompt() -> String {
             let plan_clone = plan.clone();
             let pid = pid.clone();
             tokio::spawn(async move {
-                let manager = crate::skill::SkillManager::new(
-                    crate::skill::SkillManager::default_dir(),
-                );
-                let skill_name = format!("auto-{}", pid.split('-').next().unwrap_or("plan"));
-                let skill = crate::skill::SkillManager::plan_to_skill(
-                    &plan_clone,
-                    &skill_name,
-                    &format!("Auto-learned from plan '{}'", plan_clone.name),
-                );
-                if !skill.steps.is_empty() {
-                    match manager.save_skill(&skill) {
-                        Ok(()) => info!(
-                            skill = %skill_name,
-                            plan = %pid,
-                            steps = skill.steps.len(),
-                            "auto-learned skill from completed plan"
-                        ),
-                        Err(e) => warn!(
-                            error = %e,
-                            plan = %pid,
-                            "failed to auto-learn skill"
-                        ),
+                if let Err(e) = async {
+                    let manager = crate::skill::SkillManager::new(
+                        crate::skill::SkillManager::default_dir(),
+                    );
+                    let skill_name = format!("auto-{}", pid.split('-').next().unwrap_or("plan"));
+                    let skill = crate::skill::SkillManager::plan_to_skill(
+                        &plan_clone,
+                        &skill_name,
+                        &format!("Auto-learned from plan '{}'", plan_clone.name),
+                    );
+                    if !skill.steps.is_empty() {
+                        match manager.save_skill(&skill) {
+                            Ok(()) => info!(
+                                skill = %skill_name,
+                                plan = %pid,
+                                steps = skill.steps.len(),
+                                "auto-learned skill from completed plan"
+                            ),
+                            Err(e) => warn!(
+                                error = %e,
+                                plan = %pid,
+                                "failed to auto-learn skill"
+                            ),
+                        }
                     }
+                    Ok::<(), AgentError>(())
+                }.await {
+                    error!(error = %e, plan = %pid, "auto-learn skill task failed");
                 }
             });
         }

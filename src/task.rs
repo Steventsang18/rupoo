@@ -319,10 +319,32 @@ pub fn finish_step(summary: &str) -> Step {
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct McpToolResult {
-    pub success: bool,
-    pub content: String,
-    pub error: Option<String>,
+pub enum McpToolResult {
+    Success { content: String },
+    Error { message: String },
+}
+
+impl McpToolResult {
+    /// Returns true if this is a success result.
+    pub fn is_success(&self) -> bool {
+        matches!(self, McpToolResult::Success { .. })
+    }
+
+    /// Get the content string. Returns content for Success, error message for Error.
+    pub fn content(&self) -> &str {
+        match self {
+            McpToolResult::Success { content } => content,
+            McpToolResult::Error { message } => message,
+        }
+    }
+
+    /// Get the error message if this is an Error result.
+    pub fn error_message(&self) -> Option<&str> {
+        match self {
+            McpToolResult::Error { message } => Some(message),
+            McpToolResult::Success { .. } => None,
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

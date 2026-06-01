@@ -73,138 +73,29 @@ impl ToolKind {
     }
 
     /// Return the JSON Schema for this tool's parameters.
-    /// Single source of truth — kept in sync with rig_tools by convention.
+    /// Delegates to the single source of truth in `tools::schema`.
     fn parameters_schema(&self) -> serde_json::Value {
         match self {
-            ToolKind::Echo => serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "message": {
-                        "type": "string",
-                        "description": "The message to echo back"
-                    }
-                },
-                "required": ["message"]
-            }),
-            ToolKind::FileRead { .. } => serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "path": {
-                        "type": "string",
-                        "description": "Absolute or relative path to the file"
-                    }
-                },
-                "required": ["path"]
-            }),
-            ToolKind::FileWrite { .. } => serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "path": {
-                        "type": "string",
-                        "description": "Path to the file to write"
-                    },
-                    "content": {
-                        "type": "string",
-                        "description": "Content to write to the file"
-                    }
-                },
-                "required": ["path", "content"]
-            }),
-            ToolKind::ListDir { .. } => serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "path": {
-                        "type": "string",
-                        "description": "Path to the directory to list"
-                    }
-                },
-                "required": ["path"]
-            }),
-            ToolKind::WebSearch => serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "query": {
-                        "type": "string",
-                        "description": "The search query"
-                    }
-                },
-                "required": ["query"]
-            }),
-            ToolKind::ShellExec => serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "command": {
-                        "type": "string",
-                        "description": "The shell command to execute"
-                    },
-                    "timeout": {
-                        "type": "integer",
-                        "description": "Optional timeout in seconds (default: 30)"
-                    }
-                },
-                "required": ["command"]
-            }),
-            ToolKind::RunTests => serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "path": {
-                        "type": "string",
-                        "description": "Optional path to the project directory"
-                    }
-                },
-                "required": []
-            }),
-            ToolKind::CheckOutput => serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "command": {
-                        "type": "string",
-                        "description": "The command to run"
-                    },
-                    "args": {
-                        "type": "string",
-                        "description": "Command-line arguments"
-                    },
-                    "cwd": {
-                        "type": "string",
-                        "description": "Working directory"
-                    },
-                    "timeout": {
-                        "type": "integer",
-                        "description": "Timeout in seconds (default 30)"
-                    }
-                },
-                "required": ["command"]
-            }),
-            ToolKind::DiffCheck => serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "scope": {
-                        "type": "string",
-                        "description": "What to diff: staged, unstaged, or all"
-                    },
-                    "path": {
-                        "type": "string",
-                        "description": "Path to the project directory"
-                    }
-                },
-                "required": []
-            }),
+            ToolKind::Echo => crate::tools::schema::echo(),
+            ToolKind::FileRead { .. } => crate::tools::schema::file_read(),
+            ToolKind::FileWrite { .. } => crate::tools::schema::file_write(),
+            ToolKind::ListDir { .. } => crate::tools::schema::list_directory(),
+            ToolKind::WebSearch => crate::tools::schema::web_search(),
+            ToolKind::ShellExec => crate::tools::schema::shell_exec(),
+            ToolKind::RunTests => crate::tools::schema::run_tests(),
+            ToolKind::CheckOutput => crate::tools::schema::check_output(),
+            ToolKind::DiffCheck => crate::tools::schema::diff_check(),
         }
     }
 
     async fn execute(&self, params: serde_json::Value) -> Result<serde_json::Value, String> {
-        match self {
+        let result = match self {
             ToolKind::Echo => {
                 let args: EchoArgs = serde_json::from_value(params)
                     .map_err(|e| format!("bad args: {e}"))?;
                 let output = crate::rig_tools::EchoTool::new().call(args).await
                     .map_err(|e| e.to_string())?;
-                serde_json::to_value(McpToolResult {
-                    success: true,
-                    content: output.result,
-                    error: None,
-                }).map_err(|e| e.to_string())
+                McpToolResult::Success { content: output.result }
             }
             ToolKind::FileRead { jail_root } => {
                 let args: FileReadArgs = serde_json::from_value(params)
@@ -215,11 +106,11 @@ impl ToolKind {
                 };
                 let output = tool.call(args).await
                     .map_err(|e| e.to_string())?;
-                serde_json::to_value(McpToolResult {
-                    success: output.success,
-                    content: output.content,
-                    error: output.error,
-                }).map_err(|e| e.to_string())
+                if output.success {
+                    McpToolResult::Success { content: output.content }
+                } else {
+                    McpToolResult::Error { message: output.error.unwrap_or_else(|| "file read failed".into()) }
+                }
             }
             ToolKind::FileWrite { jail_root } => {
                 let args: FileWriteArgs = serde_json::from_value(params)
@@ -230,11 +121,11 @@ impl ToolKind {
                 };
                 let output = tool.call(args).await
                     .map_err(|e| e.to_string())?;
-                serde_json::to_value(McpToolResult {
-                    success: output.success,
-                    content: format!("{} bytes written", output.bytes_written),
-                    error: output.error,
-                }).map_err(|e| e.to_string())
+                if output.success {
+                    McpToolResult::Success { content: format!("{} bytes written", output.bytes_written) }
+                } else {
+                    McpToolResult::Error { message: output.error.unwrap_or_else(|| "file write failed".into()) }
+                }
             }
             ToolKind::ListDir { jail_root } => {
                 let args: ListDirArgs = serde_json::from_value(params)
@@ -249,27 +140,19 @@ impl ToolKind {
                     .map(|e| format!("{} ({})", e.name, e.kind))
                     .collect::<Vec<_>>()
                     .join("\n");
-                serde_json::to_value(McpToolResult {
-                    success: output.success,
-                    content,
-                    error: output.error,
-                }).map_err(|e| e.to_string())
+                if output.success {
+                    McpToolResult::Success { content }
+                } else {
+                    McpToolResult::Error { message: output.error.unwrap_or_else(|| "list directory failed".into()) }
+                }
             }
             ToolKind::WebSearch => {
                 let args: WebSearchArgs = serde_json::from_value(params)
                     .map_err(|e| format!("bad args: {e}"))?;
                 let safety = crate::safety::SafetyContext::default();
                 match crate::tools::search::web_search(&args.query, &safety).await {
-                    Ok(results) => serde_json::to_value(McpToolResult {
-                        success: true,
-                        content: results,
-                        error: None,
-                    }).map_err(|e| e.to_string()),
-                    Err(e) => serde_json::to_value(McpToolResult {
-                        success: false,
-                        content: String::new(),
-                        error: Some(e.to_string()),
-                    }).map_err(|e| e.to_string()),
+                    Ok(results) => McpToolResult::Success { content: results },
+                    Err(e) => McpToolResult::Error { message: e.to_string() },
                 }
             }
             ToolKind::ShellExec => {
@@ -278,46 +161,47 @@ impl ToolKind {
                 let tool = crate::rig_tools::ShellExecTool::new();
                 let output = tool.call(args).await
                     .map_err(|e| e.to_string())?;
-                serde_json::to_value(McpToolResult {
-                    success: output.success,
-                    content: output.stdout,
-                    error: output.error,
-                }).map_err(|e| e.to_string())
+                if output.success {
+                    McpToolResult::Success { content: output.stdout }
+                } else {
+                    McpToolResult::Error { message: output.error.unwrap_or_else(|| "shell exec failed".into()) }
+                }
             }
             ToolKind::RunTests => {
                 let args: crate::tools::verify::RunTestsArgs = serde_json::from_value(params)
                     .map_err(|e| format!("bad args: {e}"))?;
                 let output = crate::tools::verify::RunTestsTool.call(args).await
                     .map_err(|e| e.to_string())?;
-                serde_json::to_value(McpToolResult {
-                    success: output.success,
-                    content: format!("Runner: {}\n{}", output.test_runner, output.output),
-                    error: output.error,
-                }).map_err(|e| e.to_string())
+                if output.success {
+                    McpToolResult::Success { content: format!("Runner: {}\n{}", output.test_runner, output.output) }
+                } else {
+                    McpToolResult::Error { message: output.error.unwrap_or_else(|| "run tests failed".into()) }
+                }
             }
             ToolKind::CheckOutput => {
                 let args: crate::tools::verify::CheckOutputArgs = serde_json::from_value(params)
                     .map_err(|e| format!("bad args: {e}"))?;
                 let output = crate::tools::verify::CheckOutputTool.call(args).await
                     .map_err(|e| e.to_string())?;
-                serde_json::to_value(McpToolResult {
-                    success: output.success,
-                    content: output.stdout,
-                    error: output.error,
-                }).map_err(|e| e.to_string())
+                if output.success {
+                    McpToolResult::Success { content: output.stdout }
+                } else {
+                    McpToolResult::Error { message: output.error.unwrap_or_else(|| "check output failed".into()) }
+                }
             }
             ToolKind::DiffCheck => {
                 let args: crate::tools::verify::DiffCheckArgs = serde_json::from_value(params)
                     .map_err(|e| format!("bad args: {e}"))?;
                 let output = crate::tools::verify::DiffCheckTool.call(args).await
                     .map_err(|e| e.to_string())?;
-                serde_json::to_value(McpToolResult {
-                    success: output.success,
-                    content: format!("{}\n\n{}", output.stats, output.diff),
-                    error: output.error,
-                }).map_err(|e| e.to_string())
+                if output.success {
+                    McpToolResult::Success { content: format!("{}\n\n{}", output.stats, output.diff) }
+                } else {
+                    McpToolResult::Error { message: output.error.unwrap_or_else(|| "diff check failed".into()) }
+                }
             }
-        }
+        };
+        serde_json::to_value(result).map_err(|e| e.to_string())
     }
 }
 
@@ -425,27 +309,28 @@ impl ToolExecutor for McpToolExecutor {
 
         match result {
             Ok(value) => {
-                let success = value
-                    .get("success")
-                    .and_then(|v| v.as_bool())
-                    .unwrap_or(false);
-                let content = value
-                    .get("content")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string();
-                let error = value
-                    .get("error")
-                    .and_then(|v| v.as_str())
-                    .map(|s| s.to_string());
-                Ok(McpToolResult { success, content, error })
+                // Deserialize from the enum JSON representation
+                serde_json::from_value::<McpToolResult>(value)
+                    .map_err(|e| AgentError::Mcp(format!("failed to parse tool result: {e}")))
             }
-            Err(e) => Ok(McpToolResult {
-                success: false,
-                content: String::new(),
-                error: Some(e),
-            }),
+            Err(e) => Ok(McpToolResult::Error { message: e }),
         }
+    }
+
+    /// Execute multiple tools in parallel using tokio's join_all.
+    async fn execute_tools_parallel(
+        &self,
+        tool_calls: Vec<(String, serde_json::Value)>,
+    ) -> Vec<AgentResult<McpToolResult>> {
+        let executor = Arc::new(self.clone());
+        let futures: Vec<_> = tool_calls
+            .into_iter()
+            .map(move |(name, params)| {
+                let executor_clone = Arc::clone(&executor);
+                async move { executor_clone.execute_tool(&name, params).await }
+            })
+            .collect();
+        futures::future::join_all(futures).await
     }
 }
 
@@ -460,8 +345,19 @@ mod tests {
             .execute_tool("echo", serde_json::json!({"message": "hello world"}))
             .await
             .unwrap();
-        assert!(result.success);
-        assert_eq!(result.content, "echo: hello world");
+        assert!(result.is_success());
+        assert_eq!(result.content(), "echo: hello world");
+    }
+
+    #[tokio::test]
+    async fn test_echo() {
+        let executor = McpToolExecutor::new();
+        let result = executor
+            .execute_tool("echo", serde_json::json!({"message": "hello world"}))
+            .await
+            .unwrap();
+        assert!(result.is_success());
+        assert_eq!(result.content(), "echo: hello world");
     }
 
     #[tokio::test]
@@ -471,8 +367,8 @@ mod tests {
             .execute_tool("file_read", serde_json::json!({"path": "target/_nonexistent_xyz_test_file"}))
             .await
             .unwrap();
-        assert!(!result.success);
-        assert!(result.error.is_some());
+        assert!(!result.is_success());
+        assert!(result.error_message().is_some());
     }
 
     #[tokio::test]
@@ -491,8 +387,8 @@ mod tests {
             .execute_tool("list_directory", serde_json::json!({"path": "."}))
             .await
             .unwrap();
-        assert!(result.success, "list_directory failed: {:?}", result.error);
-        assert!(!result.content.is_empty());
+        assert!(result.is_success(), "list_directory failed: {:?}", result.error_message());
+        assert!(!result.content().is_empty());
     }
 
     #[tokio::test]
@@ -514,7 +410,7 @@ mod tests {
             )
             .await
             .unwrap();
-        assert!(write_result.success);
+        assert!(write_result.is_success());
 
         let read_result = executor
             .execute_tool(
@@ -523,8 +419,8 @@ mod tests {
             )
             .await
             .unwrap();
-        assert!(read_result.success);
-        assert!(read_result.content.contains("hello from mcp test"));
+        assert!(read_result.is_success());
+        assert!(read_result.content().contains("hello from mcp test"));
 
         // cleanup
         let _ = std::fs::remove_file(&test_path);
@@ -535,9 +431,11 @@ mod tests {
     async fn test_list_tools() {
         let executor = McpToolExecutor::new();
         let tools = executor.list_tools().await;
-        assert_eq!(tools.len(), 8);
+        assert_eq!(tools.len(), 9);
         assert!(tools.contains(&"echo".into()));
         assert!(tools.contains(&"file_read".into()));
+        assert!(tools.contains(&"file_write".into()));
+        assert!(tools.contains(&"list_directory".into()));
         assert!(tools.contains(&"web_search".into()));
         assert!(tools.contains(&"run_tests".into()));
         assert!(tools.contains(&"check_output".into()));

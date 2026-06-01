@@ -26,6 +26,9 @@ rupoo-config.toml
 !README.md
 !readme-*.md
 !CONTRIBUTING.md
+!CHANGELOG.md
+!MILESTONE*.md
+!PROJECT-AUDIT-REPORT*.md
 !docs/**/*.md
 
 # macOS metadata
@@ -38,8 +41,6 @@ target/
 # Old dev scripts (moved to cargo install)
 scripts/
 
-# Config example (configuration via rupoo config set)
-rupoo-config.example.toml
 Thumbs.db
 
 # Logs

@@ -55,16 +55,7 @@ impl rig::tool::Tool for EchoTool {
             rig::completion::ToolDefinition {
                 name: "echo".into(),
                 description: "Echo back a message. Useful for testing.".into(),
-                parameters: serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "message": {
-                            "type": "string",
-                            "description": "The message to echo back"
-                        }
-                    },
-                    "required": ["message"]
-                }),
+                parameters: crate::tools::schema::echo(),
             }
         }
     }
@@ -123,16 +114,7 @@ impl rig::tool::Tool for FileReadTool {
             rig::completion::ToolDefinition {
                 name: "file_read".into(),
                 description: "Read the contents of a file at the given path.".into(),
-                parameters: serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "path": {
-                            "type": "string",
-                            "description": "Absolute or relative path to the file"
-                        }
-                    },
-                    "required": ["path"]
-                }),
+                parameters: crate::tools::schema::file_read(),
             }
         }
     }
@@ -210,20 +192,7 @@ impl rig::tool::Tool for FileWriteTool {
             rig::completion::ToolDefinition {
                 name: "file_write".into(),
                 description: "Write content to a file. Overwrites existing content.".into(),
-                parameters: serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "path": {
-                            "type": "string",
-                            "description": "Path to the file to write"
-                        },
-                        "content": {
-                            "type": "string",
-                            "description": "Content to write to the file"
-                        }
-                    },
-                    "required": ["path", "content"]
-                }),
+                parameters: crate::tools::schema::file_write(),
             }
         }
     }
@@ -301,16 +270,7 @@ impl rig::tool::Tool for ListDirTool {
             rig::completion::ToolDefinition {
                 name: "list_directory".into(),
                 description: "List entries in a directory.".into(),
-                parameters: serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "path": {
-                            "type": "string",
-                            "description": "Path to the directory to list"
-                        }
-                    },
-                    "required": ["path"]
-                }),
+                parameters: crate::tools::schema::list_directory(),
             }
         }
     }
@@ -403,16 +363,7 @@ impl rig::tool::Tool for WebSearchTool {
             rig::completion::ToolDefinition {
                 name: "web_search".into(),
                 description: "Search the web using DuckDuckGo. Returns up to 10 search results with titles, snippets, and URLs.".into(),
-                parameters: serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "query": {
-                            "type": "string",
-                            "description": "The search query string"
-                        }
-                    },
-                    "required": ["query"]
-                }),
+                parameters: crate::tools::schema::web_search(),
             }
         }
     }
@@ -492,20 +443,7 @@ impl rig::tool::Tool for ShellExecTool {
             rig::completion::ToolDefinition {
                 name: "shell_exec".into(),
                 description: "Execute a shell command and return its output. Commands run in the current working directory with safety validation (sudo/rm/etc. are blocked). Use for: running code, installing packages, git operations, file manipulation, building projects, etc.".into(),
-                parameters: serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "command": {
-                            "type": "string",
-                            "description": "The shell command to execute (e.g. 'ls -la', 'cargo build', 'python script.py')"
-                        },
-                        "timeout": {
-                            "type": "integer",
-                            "description": "Optional timeout in seconds (default: 30)"
-                        }
-                    },
-                    "required": ["command"]
-                }),
+                parameters: crate::tools::schema::shell_exec(),
             }
         }
     }
@@ -541,13 +479,7 @@ impl rig::tool::Tool for ShellExecTool {
                         .kill_on_drop(true);
 
                     // Strip sensitive env vars
-                    cmd.env_clear();
-                    cmd.env("PATH", std::env::var("PATH").unwrap_or_default());
-                    cmd.env("HOME", std::env::var("HOME").unwrap_or_default());
-                    cmd.env("USER", std::env::var("USER").unwrap_or_default());
-                    cmd.env("SHELL", std::env::var("SHELL").unwrap_or_default());
-                    cmd.env("LANG", std::env::var("LANG").unwrap_or_default());
-                    cmd.env("TERM", std::env::var("TERM").unwrap_or_default());
+                    crate::safety::SafetyContext::forward_safe_env_async(&mut cmd);
 
                     let child = cmd.spawn();
                     match child {

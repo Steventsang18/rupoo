@@ -9,6 +9,7 @@
 //! - Hard 30-second timeout prevents hanging.
 
 use crate::error::{AgentError, AgentResult};
+use crate::http_client::HTTP_CLIENT;
 use crate::task::HttpMethod;
 
 // SafetyContext provides SSRF protection via localhost URL detection
@@ -68,10 +69,7 @@ pub async fn execute_http_request(
         }
     }
 
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(30))
-        .build()
-        .map_err(|e| AgentError::Network(format!("failed to build HTTP client: {e}")))?;
+    let client = HTTP_CLIENT.as_ref();
 
     let mut req = match method {
         HttpMethod::GET => client.get(url),

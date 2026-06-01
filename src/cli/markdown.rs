@@ -19,17 +19,7 @@ use super::theme;
 
 /// Get the current terminal width. Falls back to 80 if detection fails.
 fn terminal_width() -> usize {
-    std::process::Command::new("stty")
-        .arg("size")
-        .stdin(std::process::Stdio::inherit())
-        .output()
-        .ok()
-        .and_then(|o| {
-            let s = String::from_utf8_lossy(&o.stdout);
-            // "rows cols\n" format
-            s.split_whitespace().nth(1).and_then(|c| c.parse::<usize>().ok())
-        })
-        .unwrap_or(80)
+    console::Term::stdout().size().1 as usize
 }
 
 struct Highlighter {
@@ -445,14 +435,18 @@ fn render_inline(text: &str) -> String {
     let mut in_bold = false;
 
     while i < bytes.len() {
-        let ch = text[i..].chars().next().unwrap();
+        let Some(ch) = text[i..].chars().next() else {
+            break;
+        };
 
         // Inline code: `code`
         if ch == '`' {
             let mut code_content = String::new();
             i += 1; // skip opening `
             while i < bytes.len() {
-                let c = text[i..].chars().next().unwrap();
+                let Some(c) = text[i..].chars().next() else {
+                    break;
+                };
                 if c == '`' {
                     i += c.len_utf8();
                     break;

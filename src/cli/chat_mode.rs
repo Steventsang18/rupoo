@@ -40,9 +40,9 @@ impl AgentUiBridge {
                         tool_name: tool_name.clone(),
                         phase: ToolPhase::Calling,
                     });
-                    // Show compact tool call status
+                    // Show compact tool call status — Unicode-safe truncation
                     let display_args = if args.len() > 60 {
-                        format!("{}…", &args[..57])
+                        format!("{}…", args.chars().take(57).collect::<String>())
                     } else {
                         args.clone()
                     };
@@ -55,9 +55,9 @@ impl AgentUiBridge {
                         tool_name: tool_name.clone(),
                         phase: ToolPhase::Completed,
                     });
-                    // Show compact tool result
+                    // Show compact tool result — Unicode-safe truncation
                     let display_result = if result.len() > 120 {
-                        format!("{}…", &result[..117])
+                        format!("{}…", result.chars().take(117).collect::<String>())
                     } else {
                         result.clone()
                     };

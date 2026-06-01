@@ -10,7 +10,7 @@ mod executor;
 /// Rupoo — AI-powered assistant for your terminal.
 /// Run without subcommands to enter interactive mode.
 #[derive(Parser)]
-#[command(name = "rupoo", version = "0.3.0", about)]
+#[command(name = "rupoo", version = env!("CARGO_PKG_VERSION"), about)]
 struct Cli {
     /// Show debug-level logs on stderr.
     #[arg(long, global = true)]
@@ -119,6 +119,11 @@ enum Commands {
         /// Port to listen on
         #[arg(long, default_value_t = 8080)]
         port: u16,
+    },
+    /// Generate shell completions
+    Completions {
+        /// Shell type (bash, zsh, fish, elvish, powershell)
+        shell: String,
     },
 }
 

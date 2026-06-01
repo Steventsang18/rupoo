@@ -23,6 +23,7 @@ use crate::safety::SafetyContext;
 use crate::agent::ToolExecutor;
 use crate::error::{AgentError, AgentResult};
 use crate::mcp::McpToolExecutor;
+use crate::task::McpToolResult;
 
 // ---------------------------------------------------------------------------
 // JSON-RPC types
@@ -161,10 +162,9 @@ impl McpServer {
                 // Delegate to McpToolExecutor (which applies path_jail + safety checks)
                 match self.executor.execute_tool(&name, arguments).await {
                     Ok(mcp_result) => {
-                        let text = if mcp_result.success {
-                            mcp_result.content
-                        } else {
-                            format!("Error: {}", mcp_result.error.unwrap_or_default())
+                        let text = match &mcp_result {
+                            McpToolResult::Success { content } => content.clone(),
+                            McpToolResult::Error { message } => format!("Error: {}", message),
                         };
                         Some(JsonRpcResponse {
                             jsonrpc: "2.0",

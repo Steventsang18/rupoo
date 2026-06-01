@@ -42,13 +42,7 @@ pub async fn execute_command(
     // Security: strip sensitive environment variables before execution.
     // This prevents child processes from leaking credentials.
     // Only essential safe vars are preserved.
-    cmd.env_clear();
-    cmd.env("PATH", std::env::var("PATH").unwrap_or_default());
-    cmd.env("HOME", std::env::var("HOME").unwrap_or_default());
-    cmd.env("USER", std::env::var("USER").unwrap_or_default());
-    cmd.env("SHELL", std::env::var("SHELL").unwrap_or_default());
-    cmd.env("LANG", std::env::var("LANG").unwrap_or_default());
-    cmd.env("TERM", std::env::var("TERM").unwrap_or_default());
+    crate::safety::SafetyContext::forward_safe_env_async(&mut cmd);
     // NOTE: The following are explicitly NOT forwarded:
     // AWS_*, GITHUB_*, TOKEN, SECRET, PASSWORD, KEY, DOCKER_AUTH
 

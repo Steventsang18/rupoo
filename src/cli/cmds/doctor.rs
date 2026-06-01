@@ -87,10 +87,15 @@ async fn all_checks() -> Vec<CheckResult> {
     let mut results = Vec::new();
 
     // 1. Database
-    match TaskRepo::new("agent.db") {
+    let db_path = {
+        let home = std::env::var("HOME").unwrap_or_default();
+        std::path::Path::new(&home).join(".rupoo").join("agent.db")
+    };
+    let db_path_str = db_path.to_string_lossy().to_string();
+    match TaskRepo::new(&db_path_str) {
         Ok(_repo) => {
             let tables = ["plans", "checkpoints", "settings", "memories"];
-            let msg = format!("agent.db — connected, {} tables present", tables.len());
+            let msg = format!("{} — connected, {} tables present", db_path_str, tables.len());
             results.push(CheckResult::new("Database", true, Some(msg), false));
         }
         Err(e) => {
@@ -115,8 +120,9 @@ async fn all_checks() -> Vec<CheckResult> {
                 }
             }
         }
-        // Ollama check
-        match reqwest::get("http://localhost:11434/api/tags").await {
+        // Ollama check — use a shared client for connection reuse
+        let ollama_client = reqwest::Client::new();
+        match ollama_client.get("http://localhost:11434/api/tags").send().await {
             Ok(resp) if resp.status().is_success() => {
                 msgs.push("ollama: reachable at localhost:11434".into());
             }

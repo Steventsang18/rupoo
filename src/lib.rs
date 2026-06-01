@@ -1,11 +1,13 @@
 pub mod agent;
 pub mod db;
 pub mod error;
+pub mod http_client;
 pub mod git;
 pub mod llm;
 pub mod mcp;
 pub mod mcp_server;
 pub mod memory;
+pub mod memory_cache;
 pub mod rig_tools;
 pub mod safety;
 pub mod shared;

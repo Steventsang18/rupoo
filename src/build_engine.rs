@@ -17,9 +17,17 @@ pub async fn build_engine(db_path: &str) -> anyhow::Result<(
 
     // Load safety configuration from file if present
     let safety_ctx = {
-        let config_path = std::path::Path::new("rupoo-config.toml");
-        if config_path.exists() {
-            SafetyContext::from_config(config_path)
+        // Priority: ~/.rupoo/rupoo-config.toml > ./rupoo-config.toml
+        let home_dir = std::env::var("HOME").unwrap_or_default();
+        let home_config = std::path::Path::new(&home_dir).join(".rupoo").join("rupoo-config.toml");
+        let cwd_config = std::path::Path::new("rupoo-config.toml");
+
+        if home_config.exists() {
+            info!(path = %home_config.display(), "loading safety config from home directory");
+            SafetyContext::from_config(&home_config)
+        } else if cwd_config.exists() {
+            info!(path = %cwd_config.display(), "loading safety config from current directory");
+            SafetyContext::from_config(cwd_config)
         } else {
             SafetyContext::default()
         }
@@ -74,11 +82,11 @@ pub async fn build_engine(db_path: &str) -> anyhow::Result<(
             if let Some(base_url) = repo.get_setting(&format!("base_url.{}", provider)).await? {
                 cfg.base_url = Some(base_url);
             }
-            let gateway = if let Some(ref root) = jail_root {
-                rupoo::llm::LlmGateway::with_jail(cfg, root.clone())
-            } else {
-                rupoo::llm::LlmGateway::new(cfg)
-            };
+            let gateway = rupoo::llm::LlmGateway::with_http_client(
+                cfg,
+                jail_root.clone(),
+                agent.http_client.clone(),
+            );
             agent = agent.with_llm(gateway);
             info!("{} LLM configured", provider);
             llm_configured = true;
