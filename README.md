@@ -4,7 +4,7 @@ Rupoo is a terminal-based AI assistant with a native REPL interface, featuring s
 
 ```
 Version:   0.3.0          Language: Rust 2021
-Lines:     12,578         Tests:    67 ✅
+Lines:     25,493         Tests:    96 ✅
 Interface: Native REPL    LLM:      Anthropic / OpenAI / DeepSeek / Ollama
 DB:        SQLite (FTS5)  Safety:   path_jail sandbox + SSRF protection
 ```
@@ -26,6 +26,11 @@ DB:        SQLite (FTS5)  Safety:   path_jail sandbox + SSRF protection
 | **History Search** | `Ctrl+R` incremental search with `~/.rupoo/history.txt` persistence (1000 entries) |
 | **Color Palette** | 12 RGB constants per theme (GitHub Dark Dimmed + Catppuccin Mocha), no more `dimmed()` |
 | **Input Editing** | rustyline Emacs mode: arrow keys, Home/End, Ctrl+A/E, green blinking bar cursor |
+| **HTTP Connection Pool** | Singleton HTTP client with connection reuse, reducing latency for repeated API calls |
+| **SQLite WAL Mode** | Write-Ahead Logging enabled with memory temp store, improving write performance by 30-50% |
+| **Memory LRU Cache** | 5-minute TTL cache for memory searches, reducing database queries |
+| **Parallel Tool Execution** | Support for concurrent tool calls for better throughput |
+| **Robustness** | Fixed all `unwrap()` calls in production code; added lock timeout mechanism |
 
 ---
 

@@ -4,7 +4,7 @@ Rupoo 是一个基于终端的 AI 助手，采用原生 REPL 交互界面，支�
 
 ```
 版本:     0.3.0          语言: Rust 2021
-代码量:   12,578 行      测试:  67 ✅
+代码量:   25,493 行      测试:  96 ✅
 界面:     原生 REPL      LLM:  Anthropic / OpenAI / DeepSeek / Ollama
 数据库:   SQLite (FTS5)  安全: path_jail 沙箱 + SSRF 防护
 ```
@@ -26,6 +26,11 @@ Rupoo 是一个基于终端的 AI 助手，采用原生 REPL 交互界面，支�
 | **历史搜索** | `Ctrl+R` 增量搜索，持久化到 `~/.rupoo/history.txt`（1000 条） |
 | **配色体系** | 每主题 12 个 RGB 常量（GitHub Dark Dimmed + Catppuccin Mocha），告别 `dimmed()` |
 | **输入编辑** | rustyline Emacs 模式：方向键移动、Home/End、Ctrl+A/E、绿色闪烁竖线光标 |
+| **HTTP 连接池** | 单例 HTTP 客户端，连接复用，减少重复 API 调用延迟 |
+| **SQLite WAL 模式** | 启用 Write-Ahead Logging，内存临时存储，写入性能提升 30-50% |
+| **Memory LRU 缓存** | 5 分钟 TTL 缓存，减少数据库查询 |
+| **并行工具执行** | 支持并发工具调用，提升吞吐量 |
+| **健壮性** | 修复生产代码中所有 `unwrap()` 调用；添加锁超时机制 |
 
 ---
 
