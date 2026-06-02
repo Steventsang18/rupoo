@@ -48,3 +48,4 @@ Thumbs.db
 
 # Optional: ignore docs-generated HTML (keep src/ docs)
 # docs/*.html
+node_modules/
