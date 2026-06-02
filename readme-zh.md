@@ -3,7 +3,7 @@
 Rupoo 是一个基于终端的 AI 助手，采用原生 REPL 交互界面，支持语法高亮代码块、Markdown 渲染、主题切换和 Claude Code 风格工具调用展示——由双模式 Agent 引擎（Chat + Plan）驱动。
 
 ```
-版本:     0.3.0          语言: Rust 2021
+版本:     0.3.1          语言: Rust 2021
 代码量:   25,493 行      测试:  96 ✅
 界面:     原生 REPL      LLM:  Anthropic / OpenAI / DeepSeek / Ollama
 数据库:   SQLite (FTS5)  安全: path_jail 沙箱 + SSRF 防护
