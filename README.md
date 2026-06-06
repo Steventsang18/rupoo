@@ -1,5 +1,7 @@
 # Rupoo — AI-powered Terminal Assistant
 
+[中文版本](README_CN.md) | English
+
 Rupoo is a terminal-based AI assistant with a native REPL interface, featuring syntax-highlighted code blocks, Markdown rendering, theme switching, and Claude Code–style tool call display — all driven by a dual-mode agent engine (Chat + Plan).
 
 ```
