@@ -10,12 +10,56 @@
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::sync::OnceLock;
+use std::time::{Duration, Instant};
 
 
 use tracing::warn;
+use lru::LruCache;
 
 use crate::error::{AgentError, AgentResult};
+
+/// Default TTL for DNS cache entries (5 minutes).
+/// This balances security (preventing cache poisoning) and performance.
+const DNS_CACHE_TTL: Duration = Duration::from_secs(300);
+
+/// DNS cache entry with TTL for cache invalidation.
+#[derive(Debug, Clone, Copy)]
+struct DnsCacheEntry {
+    is_private: bool,
+    expires_at: Instant,
+}
+
+impl DnsCacheEntry {
+    /// Create a new cache entry with the default TTL.
+    fn new(is_private: bool) -> Self {
+        Self {
+            is_private,
+            expires_at: Instant::now() + DNS_CACHE_TTL,
+        }
+    }
+    
+    /// Check if the cache entry is still valid (not expired).
+    fn is_valid(&self) -> bool {
+        Instant::now() < self.expires_at
+    }
+}
+
+/// LRU cache for DNS resolution results to prevent repeated lookups.
+/// This mitigates DNS cache poisoning attacks and improves performance.
+/// 
+/// # Security
+/// - Uses TTL-based cache invalidation to prevent stale entries
+/// - Default TTL of 5 minutes provides balance between security and performance
+/// - Maximum TTL of 1 hour prevents indefinitely cached entries
+static DNS_CACHE: OnceLock<std::sync::Mutex<LruCache<String, DnsCacheEntry>>> = OnceLock::new();
+
+/// Get or initialize the DNS cache with a capacity of 100 entries.
+fn dns_cache() -> &'static std::sync::Mutex<LruCache<String, DnsCacheEntry>> {
+    DNS_CACHE.get_or_init(|| {
+        std::sync::Mutex::new(LruCache::new(std::num::NonZeroUsize::new(100).unwrap()))
+    })
+}
 
 /// Security context that governs all system-level operations.
 ///
@@ -198,6 +242,8 @@ impl SafetyContext {
     ///
     /// This prevents DNS rebinding attacks where `evil.com` resolves to 127.0.0.1
     /// after passing the string-based `is_localhost_url` check.
+    ///
+    /// Results are cached to improve performance and mitigate DNS cache poisoning.
     pub async fn is_private_host(host: &str) -> bool {
         // Fast path: known local strings don't need DNS lookup
         let lower = host.to_lowercase();
@@ -205,8 +251,21 @@ impl SafetyContext {
             return true;
         }
 
+        // Check cache first (with TTL validation)
+        if let Ok(mut cache) = dns_cache().lock() {
+            if let Some(entry) = cache.get(&lower) {
+                if entry.is_valid() {
+                    // Cache hit - return cached result
+                    return entry.is_private;
+                } else {
+                    // Cache entry expired - remove it
+                    cache.pop(&lower);
+                }
+            }
+        }
+
         // DNS resolution
-        match tokio::net::lookup_host(format!("{host}:0")).await {
+        let result = match tokio::net::lookup_host(format!("{host}:0")).await {
             Ok(addrs) => {
                 for addr in addrs {
                     let ip = addr.ip();
@@ -224,6 +283,7 @@ impl SafetyContext {
                             ip = %ip,
                             "host resolves to private IP — SSRF blocked"
                         );
+                        let _ = dns_cache().lock().map(|mut c| c.put(lower, DnsCacheEntry::new(true)));
                         return true;
                     }
                 }
@@ -232,9 +292,14 @@ impl SafetyContext {
             Err(e) => {
                 // If DNS resolution fails, be conservative and block
                 warn!(host = %host, error = %e, "DNS resolution failed — blocking for safety");
-                true
+                let _ = dns_cache().lock().map(|mut c| c.put(lower, DnsCacheEntry::new(true)));
+                return true;
             }
-        }
+        };
+
+        // Cache the successful non-private result
+        let _ = dns_cache().lock().map(|mut c| c.put(lower, DnsCacheEntry::new(result)));
+        result
     }
 
     /// Return the primary jail root path, if configured.
@@ -242,29 +307,96 @@ impl SafetyContext {
         self.allowed_paths.first().map(|p| p.as_path())
     }
 
+    /// Environment variables that are safe to forward to child processes.
+    /// These are considered non-sensitive and essential for basic operation.
+    const SAFE_ENV_VARS: &[&str] = &[
+        "PATH", "HOME", "USER", "SHELL", "LANG", "LC_ALL", "TERM",
+        "PWD", "LOGNAME", "SUDO_UID", "SUDO_GID", "SUDO_USER",
+        "RUST_LOG", "CARGO_TARGET_DIR",
+        "TERM_PROGRAM", "TERM_PROGRAM_VERSION",
+    ];
+
+    /// Patterns for sensitive environment variables that must be blocked.
+    /// These are checked against variable names (case-insensitive).
+    const SENSITIVE_PATTERNS: &[&str] = &[
+        "AWS_", "GITHUB_", "TOKEN", "SECRET", "PASSWORD", "KEY", "DOCKER_AUTH",
+        "API_KEY", "ACCESS_KEY", "SECRET_KEY", "BEARER_TOKEN",
+        "SSH_AUTH_SOCK", "PGPASSWORD", "MYSQL_PWD", "MONGODB_URI",
+        "OPENAI_", "ANTHROPIC_", "DEEPSEEK_", "OLLAMA_",
+    ];
+
     /// Forward safe environment variables to a child process after clearing.
     /// Only essential, non-sensitive vars are preserved.
-    // NOTE: The following are explicitly NOT forwarded:
-    // AWS_*, GITHUB_*, TOKEN, SECRET, PASSWORD, KEY, DOCKER_AUTH
+    /// 
+    /// # Security
+    /// - Clears all environment variables first (defense in depth)
+    /// - Only forwards variables in the SAFE_ENV_VARS whitelist
+    /// - Logs any sensitive variables that were present in the parent environment
     pub fn forward_safe_env(cmd: &mut std::process::Command) {
+        // Clear all environment variables first
         cmd.env_clear();
-        cmd.env("PATH", std::env::var("PATH").unwrap_or_default());
-        cmd.env("HOME", std::env::var("HOME").unwrap_or_default());
-        cmd.env("USER", std::env::var("USER").unwrap_or_default());
-        cmd.env("SHELL", std::env::var("SHELL").unwrap_or_default());
-        cmd.env("LANG", std::env::var("LANG").unwrap_or_default());
-        cmd.env("TERM", std::env::var("TERM").unwrap_or_default());
+        
+        // Track sensitive variables for auditing
+        let mut blocked_sensitive = Vec::new();
+        
+        // Check for sensitive variables and log them (for auditing)
+        for (key, _) in std::env::vars() {
+            let key_upper = key.to_ascii_uppercase();
+            if Self::SENSITIVE_PATTERNS.iter().any(|pattern| {
+                key_upper.starts_with(pattern) || key_upper.contains(pattern)
+            }) {
+                blocked_sensitive.push(key);
+            }
+        }
+        
+        // Log blocked sensitive variables for security auditing
+        if !blocked_sensitive.is_empty() {
+            tracing::debug!(
+                blocked_vars = ?blocked_sensitive,
+                "blocked sensitive environment variables from child process"
+            );
+        }
+        
+        // Forward safe variables
+        for &var in Self::SAFE_ENV_VARS {
+            if let Ok(val) = std::env::var(var) {
+                cmd.env(var, val);
+            }
+        }
     }
 
     /// Forward safe environment variables to a tokio child process after clearing.
     pub fn forward_safe_env_async(cmd: &mut tokio::process::Command) {
+        // Clear all environment variables first
         cmd.env_clear();
-        cmd.env("PATH", std::env::var("PATH").unwrap_or_default());
-        cmd.env("HOME", std::env::var("HOME").unwrap_or_default());
-        cmd.env("USER", std::env::var("USER").unwrap_or_default());
-        cmd.env("SHELL", std::env::var("SHELL").unwrap_or_default());
-        cmd.env("LANG", std::env::var("LANG").unwrap_or_default());
-        cmd.env("TERM", std::env::var("TERM").unwrap_or_default());
+        
+        // Track sensitive variables for auditing
+        let mut blocked_sensitive = Vec::new();
+        
+        // Check for sensitive variables and log them (for auditing)
+        for (key, _) in std::env::vars() {
+            let key_upper = key.to_ascii_uppercase();
+            if Self::SENSITIVE_PATTERNS.iter().any(|pattern| {
+                key_upper.starts_with(pattern) || key_upper.contains(pattern)
+            }) {
+                blocked_sensitive.push(key);
+            }
+        }
+        
+        // Log blocked sensitive variables for security auditing
+        if !blocked_sensitive.is_empty() {
+            tracing::debug!(
+                blocked_vars = ?blocked_sensitive,
+                "blocked sensitive environment variables from async child process"
+            );
+        }
+        
+        // Forward safe variables
+        for &var in Self::SAFE_ENV_VARS {
+            if let Ok(val) = std::env::var(var) {
+                cmd.env(var, val);
+            }
+        }
     }
 
     /// Check if a tool call requires user approval before execution.

@@ -41,6 +41,15 @@ impl AgentUiBridge {
                     ChatMessage::system(format!("Generated plan with {} steps", total)),
                 ));
 
+                // Send task list for display
+                let task_list: Vec<(String, rupoo::task::StepStatus)> = steps.iter()
+                    .map(|spec| {
+                        let task_name = spec.instruction.chars().take(50).collect::<String>();
+                        (task_name, rupoo::task::StepStatus::Pending)
+                    })
+                    .collect();
+                let _ = self.ui_tx.send(AgentToTui::PlanTaskList { tasks: task_list });
+
                 // Convert StepSpec to Plan steps
                 let plan_steps: Vec<rupoo::task::Step> = steps.into_iter().map(|spec| {
                     match spec.step_type.as_str() {

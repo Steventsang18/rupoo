@@ -9,6 +9,7 @@
 pub mod gateway;
 pub mod history;
 pub mod providers;
+pub mod traits;
 
 use serde::{Deserialize, Serialize};
 
@@ -16,6 +17,7 @@ use serde::{Deserialize, Serialize};
 pub use gateway::LlmGateway;
 pub use history::{ConversationHistory, LlmChatMessage, LlmChatRole};
 pub use providers::{extract_text_from_assistant_content, extract_text_from_user_content, role_label};
+pub use traits::{LlmAgent, LlmGatewayBackend, MockLlmAgent, MockLlmGateway};
 
 // Re-export config and types
 pub use crate::error::{AgentError, AgentResult};
@@ -79,6 +81,12 @@ pub struct LlmConfig {
     pub base_url: Option<String>,
     pub max_tokens: u32,
     pub temperature: f64,
+    /// Embedding model for vector search (optional).
+    /// If not set, uses provider-specific defaults:
+    /// - OpenAI: text-embedding-3-small
+    /// - Ollama: nomic-embed-text
+    #[serde(default)]
+    pub embedding_model: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -115,6 +123,7 @@ impl LlmConfig {
             base_url,
             max_tokens: 2048,
             temperature: 0.7,
+            embedding_model: None,
         }
     }
 }

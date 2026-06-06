@@ -5,10 +5,12 @@
 
 pub mod app;
 pub mod cmds;
+pub mod completion;
 
 pub mod output;
 pub mod markdown;
 pub mod theme;
+pub mod enhanced_ui;
 
 mod bridge;
 mod chat_mode;
@@ -19,18 +21,15 @@ pub use rupoo::{AgentToTui, ChatMessage, PendingTool, ToolPhase, TuiToAgent};
 pub use app::RupooApp;
 
 use std::io::{self, Write};
-use std::sync::atomic::AtomicUsize;
 
 use owo_colors::OwoColorize;
 use crossbeam_channel::{Receiver, Sender};
+use tracing::warn;
 use rupoo::db::TaskRepo;
 use rupoo::agent::Agent;
 use rupoo::llm::ConversationHistory;
-use rustyline::config::Configurer;
-
-/// Global SIGINT counter — incremented by Ctrl+C signal handler.
-/// Checked in both the readline loop and the drain_and_render loop.
-static SIGINT_COUNT: AtomicUsize = AtomicUsize::new(0);
+use rustyline::Editor;
+use rustyline::history::{FileHistory, History};
 
 // ═══════════════════════════════════════════════════════════════════════════
 // REPL Session
@@ -39,7 +38,7 @@ static SIGINT_COUNT: AtomicUsize = AtomicUsize::new(0);
 pub struct ReplSession {
     app: RupooApp,
     ui_rx: Option<Receiver<AgentToTui>>,
-    rl: rustyline::DefaultEditor,
+    rl: Editor<completion::RupooHelper, FileHistory>,
     /// Streaming state for current assistant response
     stream_state: markdown::StreamState,
     /// Timestamp when current generation started
@@ -90,21 +89,22 @@ impl ReplSession {
             .cloned()
             .unwrap_or_default();
 
-        // Init rustyline: emacs mode — Ctrl+R search, arrow-key nav, Home/End
-        let rl_config = rustyline::config::Config::builder()
-            .edit_mode(rustyline::config::EditMode::Emacs)
-            .completion_type(rustyline::config::CompletionType::Circular)
-            .build();
-        let mut rl = rustyline::DefaultEditor::with_config(rl_config)
+        // Init rustyline with completion support
+        let mut rl = completion::create_editor()
             .map_err(|_| "readline_init_failed")?;
-        let _ = rl.set_max_history_size(1000);
+
+        // Session labels are handled internally
 
         // Persist history to ~/.rupoo/history.txt — survives restarts
         let history_path = crate::tracing_setup::history_path();
         if let Some(parent) = history_path.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
-        let _ = rl.load_history(&history_path); // ignore error — file may not exist yet
+        if history_path.exists() {
+            if let Err(e) = rl.load_history(&history_path) {
+                warn!("Failed to load history: {e}");
+            }
+        }
 
         Ok(Self {
             app,
@@ -119,12 +119,6 @@ impl ReplSession {
     pub fn run(&mut self) -> Result<(), &'static str> {
         // Set green blinking bar cursor
         output::set_cursor_style_bar();
-
-        // Register SIGINT handler — increments global counter on Ctrl+C
-        // This works even when rustyline is NOT reading input (e.g. during streaming)
-        let _ = ctrlc::set_handler(|| {
-            SIGINT_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        });
 
         // Print welcome
         output::welcome(env!("CARGO_PKG_VERSION"), &self.app.model_label);
@@ -148,15 +142,22 @@ impl ReplSession {
                 break Ok(());
             }
 
-            // Reset SIGINT counter for each loop iteration
-            let sigint_before = SIGINT_COUNT.load(std::sync::atomic::Ordering::Relaxed);
-
             // If thinking, drain events and show spinner
             if self.app.thinking {
                 self.drain_and_render()?;
                 continue;
             }
 
+            // Show footer status bar
+            output::footer(
+                self.app.token_in,
+                self.app.token_out,
+                self.app.ctx_tokens,
+                self.app.ctx_budget,
+                &self.app.model_label,
+                self.app.hybrid_search,
+            );
+            
             // Read input
             let prompt = self.build_prompt();
             match self.rl.readline(&prompt) {
@@ -176,28 +177,17 @@ impl ReplSession {
                         }
                     }
 
+                    // Handle quick action shortcuts
+                    if self.handle_quick_action(&input) {
+                        continue;
+                    }
+
                     // Submit user message
                     self.submit_message(&input);
                 }
                 Err(rustyline::error::ReadlineError::Interrupted) => {
-                    // Ctrl+C — interrupt current generation or quit
-                    let sigint_now = SIGINT_COUNT.load(std::sync::atomic::Ordering::Relaxed);
-                    let presses = sigint_now.saturating_sub(sigint_before);
-                    if self.app.thinking || presses == 1 {
-                        self.interrupt_generation();
-                    } else if presses >= 2 {
-                        // Double Ctrl+C — quit
-                        println!("\n  Bye! 👋");
-                        break Ok(());
-                    } else {
-                        // Single Ctrl+C while idle — prompt quit
-                        self.app.ctrl_c_count += 1;
-                        if self.app.ctrl_c_count >= 2 {
-                            println!("\n  Bye! 👋");
-                            break Ok(());
-                        }
-                        println!("\n  {} Press Ctrl+C again to quit", "›".dimmed());
-                    }
+                    // Ctrl+C — ignored, use Ctrl+D to quit
+                    println!("\n  {} Use Ctrl+D to quit", "›".dimmed());
                 }
                 Err(rustyline::error::ReadlineError::Eof) => {
                     // Ctrl+D — quit
@@ -208,8 +198,6 @@ impl ReplSession {
                     break Err("terminal input error — please restart rupoo");
                 }
             }
-
-            self.app.ctrl_c_count = 0;
         }
     }
 
@@ -223,33 +211,10 @@ impl ReplSession {
         let mut spinner_frame = 0;
         let mut tool_card_open = false;
 
-        // Snapshot SIGINT count at start — we only care about NEW presses
-        let sigint_base = SIGINT_COUNT.load(std::sync::atomic::Ordering::Relaxed);
-
         // Take the receiver to avoid borrow conflicts
         let rx = self.ui_rx.take();
         
         loop {
-            // Check for Ctrl+C during streaming — interrupt or quit
-            let sigint_now = SIGINT_COUNT.load(std::sync::atomic::Ordering::Relaxed);
-            let new_presses = sigint_now.saturating_sub(sigint_base);
-            if new_presses > 0 {
-                if new_presses >= 2 {
-                    // Double Ctrl+C — quit
-                    output::clear_spinner();
-                    markdown::flush_stream(&mut self.stream_state);
-                    self.stream_state = markdown::StreamState::new();
-                    println!("\n  Bye! 👋");
-                    self.app.quit = true;
-                    self.ui_rx = rx;
-                    return Ok(());
-                } else {
-                    // Single Ctrl+C — interrupt generation
-                    self.interrupt_generation();
-                    self.ui_rx = rx;
-                    return Ok(());
-                }
-            }
             // Wait for the next event with a timeout.
             // recv_timeout returns immediately when a message arrives (zero latency)
             // and blocks at most 50ms before waking to drive the spinner animation.
@@ -404,11 +369,36 @@ impl ReplSession {
                 output::clear_spinner();
                 println!("  {} {}/{}: {}", "▸".yellow().bold(), step_index + 1, total, step_name.dimmed());
             }
+            AgentToTui::PlanTaskList { tasks } => {
+                output::clear_spinner();
+                output::plan_task_list(&tasks);
+            }
+            AgentToTui::HybridSearchUpdate { enabled } => {
+                self.app.hybrid_search = enabled;
+            }
         }
         true
     }
 
     /// Handle slash commands.
+    /// 
+    /// # Arguments
+    /// * `input` - Command string starting with '/'
+    /// 
+    /// # Supported Commands
+    /// * `/help` - Show help message
+    /// * `/tools (/ts)` - List available tools
+    /// * `/new` - Create new session
+    /// * `/sessions` - List all sessions
+    /// * `/switch <n>` - Switch to session #n
+    /// * `/model` - Show current model
+    /// * `/theme (/t) <name>` - Switch UI theme
+    /// * `/plan <msg>` - Enter plan mode
+    /// * `/clear` - Clear terminal screen
+    /// * `/quit` - Exit application
+    /// 
+    /// # Returns
+    /// `true` if command was handled, `false` otherwise
     fn handle_command(&mut self, input: &str) -> bool {
         let parts: Vec<&str> = input.splitn(2, ' ').collect();
         let cmd = parts[0];
@@ -419,15 +409,32 @@ impl ReplSession {
                 println!();
                 println!("  {}", "Commands:".cyan().bold());
                 println!("  {} /help        — show this help", "›".dimmed());
+                println!("  {} /tools (/ts) — list available tools", "›".dimmed());
                 println!("  {} /new         — new session", "›".dimmed());
                 println!("  {} /sessions    — list sessions", "›".dimmed());
                 println!("  {} /switch <n>  — switch to session #n", "›".dimmed());
                 println!("  {} /model       — show current model", "›".dimmed());
-                println!("  {} /theme <name>— switch theme (dark/light/monokai)", "›".dimmed());
+                println!("  {} /theme (/t)  — switch theme (dark/light/monokai)", "›".dimmed());
                 println!("  {} /plan <msg>  — plan mode", "›".dimmed());
+                println!("  {} /history     — show command history", "›".dimmed());
+                println!("  {} /alias       — show command aliases", "›".dimmed());
                 println!("  {} /clear       — clear screen", "›".dimmed());
                 println!("  {} /quit        — exit rupoo", "›".dimmed());
                 println!();
+                println!("  {}", "Quick Actions:".cyan().bold());
+                println!("  {} @<path>      — read file (e.g., @./src/main.rs)", "›".dimmed());
+                println!("  {} !<cmd>       — execute shell command (e.g., !ls -la)", "›".dimmed());
+                println!("  {} ~<query>     — web search (e.g., ~Rust async)", "›".dimmed());
+                println!("  {} %% [path]    — list directory", "›".dimmed());
+                println!();
+                println!("  {}", "Tips:".cyan().bold());
+                println!("  {} Press Tab for autocomplete", "›".dimmed());
+                println!("  {} Ctrl+R to search history", "›".dimmed());
+                println!();
+                true
+            }
+            "/tools" | "/ts" => {
+                self.show_available_tools();
                 true
             }
             "/new" => {
@@ -522,7 +529,94 @@ impl ReplSession {
                 }
                 true
             }
+            "/memory" | "/mem" => {
+                self.handle_memory_command(arg);
+                true
+            }
+            "/history" => {
+                self.show_history(arg);
+                true
+            }
+            "/alias" => {
+                self.handle_alias(arg);
+                true
+            }
             _ => false, // Not a recognized command, treat as regular input
+        }
+    }
+
+    /// Show command history
+    fn show_history(&self, arg: &str) {
+        let history = self.rl.history();
+        
+        if arg.is_empty() {
+            // Show recent history
+            let count = history.len().min(10);
+            println!();
+            println!("  {} Recent History:", "📜".cyan().bold());
+            for (i, entry) in history.iter().rev().take(count).enumerate() {
+                let idx = history.len() - i;
+                println!("  {} [{}] {}", "▸".dimmed(), idx, entry);
+            }
+            println!();
+        } else {
+            // Search history
+            let query = arg.to_lowercase();
+            let results: Vec<_> = history
+                .iter()
+                .enumerate()
+                .filter(|(_, entry): &(usize, &String)| entry.to_lowercase().contains(&query))
+                .collect();
+            
+            if results.is_empty() {
+                println!("  {} No history found matching '{}'", "✗".red(), arg);
+            } else {
+                println!();
+                println!("  {} Search Results:", "🔍".cyan().bold());
+                for (idx, entry) in results {
+                    println!("  {} [{}] {}", "▸".dimmed(), idx + 1, entry);
+                }
+                println!();
+            }
+        }
+    }
+
+    /// Handle alias command
+    fn handle_alias(&self, arg: &str) {
+        if arg.is_empty() {
+            // Show available aliases
+            println!();
+            println!("  {} Command Aliases:", "⚡".cyan().bold());
+            println!("  {} /h      → /help", "▸".dimmed());
+            println!("  {} /ts     → /tools", "▸".dimmed());
+            println!("  {} /ls     → /sessions", "▸".dimmed());
+            println!("  {} /s      → /switch", "▸".dimmed());
+            println!("  {} /m      → /model", "▸".dimmed());
+            println!("  {} /t      → /theme", "▸".dimmed());
+            println!("  {} /q      → /quit", "▸".dimmed());
+            println!("  {} /cls    → /clear", "▸".dimmed());
+            println!("  {} /mem    → /memory", "▸".dimmed());
+            println!();
+        } else {
+            println!("  {} Usage: /alias (no arguments)", "✗".red());
+        }
+    }
+
+    /// Handle memory command
+    fn handle_memory_command(&mut self, arg: &str) {
+        let cmd = if arg.is_empty() {
+            "/memory".to_string()
+        } else {
+            format!("/memory {}", arg)
+        };
+        
+        if let Some(ref tx) = self.app.agent_tx {
+            let _ = tx.send(TuiToAgent::SubmitMessage(cmd));
+            self.app.set_thinking();
+            self.gen_start = Some(std::time::Instant::now());
+            self.stream_state = markdown::StreamState::new();
+        } else {
+            println!("  {} Agent not available", "✗".red());
         }
     }
 
@@ -587,16 +681,6 @@ impl ReplSession {
         }
     }
 
-    /// Interrupt current generation.
-    fn interrupt_generation(&mut self) {
-        self.app.cancel_flag.store(true, std::sync::atomic::Ordering::Relaxed);
-        output::clear_spinner();
-        markdown::flush_stream(&mut self.stream_state);
-        self.stream_state = markdown::StreamState::new();
-        println!("\n  {} Generation interrupted", "⚠".yellow());
-        self.app.set_idle();
-    }
-
     /// Create a new session.
     fn create_new_session(&mut self) {
         let id = uuid::Uuid::new_v4().to_string();
@@ -636,6 +720,121 @@ impl ReplSession {
             println!("  {} {} [{}] {}", marker, color, i + 1, s.label);
         }
         println!();
+    }
+
+    /// Show available tools with descriptions.
+    fn show_available_tools(&self) {
+        println!();
+        println!("  {}", "Available Tools:".cyan().bold());
+        println!("  ──────────────────────────────────────────────────");
+        println!("  {} {}", "📄".bold(), "file_read".cyan());
+        println!("      Read file contents");
+        println!("      Shortcut: @<path>");
+        println!("      Example: @./Cargo.toml");
+        println!();
+        println!("  {} {}", "📁".bold(), "list_dir".cyan());
+        println!("      List directory contents");
+        println!("      Shortcut: %% [path]");
+        println!("      Example: %% ./src");
+        println!();
+        println!("  {} {}", "🔧".bold(), "shell_exec".cyan());
+        println!("      Execute shell command");
+        println!("      Shortcut: !<command>");
+        println!("      Example: !ls -la");
+        println!();
+        println!("  {} {}", "🔍".bold(), "web_search".cyan());
+        println!("      Search the web");
+        println!("      Shortcut: ~<query>");
+        println!("      Example: ~Rust async programming");
+        println!();
+        println!("  {} {}", "✏️".bold(), "file_write".cyan());
+        println!("      Write content to file");
+        println!("      Example: Write to ./output.txt");
+        println!();
+        println!("  {}", "Quick Actions:".cyan().bold());
+        println!("    @<path>      - Read file directly");
+        println!("    !<cmd>       - Execute shell command");
+        println!("    ~<query>     - Web search");
+        println!("    %% [path]    - List directory");
+        println!();
+    }
+
+    /// Handle quick action shortcuts (@path, !cmd, ~query, %%path).
+    /// 
+    /// # Quick Actions
+    /// * `@<path>` - Read file at path
+    /// * `!<cmd>` - Execute shell command
+    /// * `~<query>` - Web search for query
+    /// * `%% [path]` - List directory (default: current directory)
+    /// 
+    /// # Arguments
+    /// * `input` - User input string to check for quick action
+    /// 
+    /// # Returns
+    /// `true` if quick action was matched and executed, `false` otherwise
+    fn handle_quick_action(&mut self, input: &str) -> bool {
+        let trimmed = input.trim();
+        
+        // @path - Read file
+        if trimmed.starts_with('@') && trimmed.len() > 1 {
+            let path = trimmed[1..].trim();
+            if !path.is_empty() {
+                output::user_message(input);
+                if let Some(ref tx) = self.app.agent_tx {
+                    let _ = tx.send(TuiToAgent::SubmitMessage(format!("Read file at: {}", path)));
+                }
+                self.app.set_thinking();
+                self.gen_start = Some(std::time::Instant::now());
+                self.stream_state = markdown::StreamState::new();
+                return true;
+            }
+        }
+        
+        // !cmd - Execute shell command
+        if trimmed.starts_with('!') && trimmed.len() > 1 {
+            let cmd = trimmed[1..].trim();
+            if !cmd.is_empty() {
+                output::user_message(input);
+                if let Some(ref tx) = self.app.agent_tx {
+                    let _ = tx.send(TuiToAgent::SubmitMessage(format!("Execute command: {}", cmd)));
+                }
+                self.app.set_thinking();
+                self.gen_start = Some(std::time::Instant::now());
+                self.stream_state = markdown::StreamState::new();
+                return true;
+            }
+        }
+        
+        // ~query - Web search
+        if trimmed.starts_with('~') && trimmed.len() > 1 {
+            let query = trimmed[1..].trim();
+            if !query.is_empty() {
+                output::user_message(input);
+                if let Some(ref tx) = self.app.agent_tx {
+                    let _ = tx.send(TuiToAgent::SubmitMessage(format!("Search the web for: {}", query)));
+                }
+                self.app.set_thinking();
+                self.gen_start = Some(std::time::Instant::now());
+                self.stream_state = markdown::StreamState::new();
+                return true;
+            }
+        }
+        
+        // %%path - List directory
+        if trimmed.starts_with("%%") {
+            let path = trimmed[2..].trim();
+            let dir_path = if path.is_empty() { "." } else { path };
+            output::user_message(input);
+            if let Some(ref tx) = self.app.agent_tx {
+                let _ = tx.send(TuiToAgent::SubmitMessage(format!("List directory: {}", dir_path)));
+            }
+            self.app.set_thinking();
+            self.gen_start = Some(std::time::Instant::now());
+            self.stream_state = markdown::StreamState::new();
+            return true;
+        }
+        
+        false
     }
 
     /// Switch to a session by index (1-based).

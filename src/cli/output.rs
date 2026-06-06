@@ -1,5 +1,8 @@
 //! ANSI output layer — direct terminal rendering without TUI framework.
 //! Colors come from the runtime-switchable Theme (cli::theme).
+//!
+//! Note: Some functions are reserved for future UI enhancements.
+#![allow(dead_code)]
 
 use owo_colors::OwoColorize;
 use std::io::Write;
@@ -7,6 +10,13 @@ use unicode_width::UnicodeWidthStr;
 use console::Term;
 
 use super::theme;
+use super::enhanced_ui;
+
+// Thread-local storage for the active tool frame
+thread_local! {
+    static TOOL_FRAME: std::cell::RefCell<Option<enhanced_ui::ToolFrame>> = 
+        std::cell::RefCell::new(None);
+}
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Terminal helpers
@@ -163,65 +173,40 @@ pub fn assistant_footer(duration_s: f64, token_in: u64, token_out: u64, ctx_toke
 // ═══════════════════════════════════════════════════════════════════════════
 
 pub fn tool_call_start(tool_name: &str, args: &str) {
-    let t = theme::current();
-    println!();
-    let display_args = if args.len() > 80 {
-        format!("{}…", &args[..77])
-    } else {
-        args.to_string()
-    };
-    println!(
-        "{} {} {}({})",
-        "╭─".color(t.tool_accent),
-        "🔧".to_string().color(t.tool_accent),
-        tool_name.color(t.tool_accent).bold(),
-        display_args.color(t.tool_accent),
-    );
+    let frame = enhanced_ui::ToolFrame::new(tool_name);
+    frame.start(args);
+    
+    // Store the frame for later use
+    TOOL_FRAME.with(|f| {
+        *f.borrow_mut() = Some(frame);
+    });
 }
 
 pub fn tool_result(result: &str, truncated: bool) {
-    let t = theme::current();
-    let lines: Vec<&str> = result.lines().collect();
-    let max_lines = 8;
-    let display_lines: Vec<&str> = lines.iter().take(max_lines).copied().collect();
+    TOOL_FRAME.with(|f| {
+        if let Some(frame) = &mut *f.borrow_mut() {
+            let lines: Vec<&str> = result.lines().collect();
+            let max_lines = 8;
+            let display_lines: Vec<&str> = lines.iter().take(max_lines).copied().collect();
 
-    for line in &display_lines {
-                let display = if line.len() > 200 {
-                    format!("{}…", line.chars().take(197).collect::<String>())
-                } else {
-                    line.to_string()
-                };
-        println!("{} {}", "│".color(t.tool_dim), display.color(t.tool_dim));
-    }
+            for line in &display_lines {
+                frame.println(line);
+            }
 
-    if truncated || lines.len() > max_lines {
-        let extra = if lines.len() > max_lines { lines.len() - max_lines } else { 0 };
-        println!("{} {}", "│".color(t.dim), format!("... ({} more lines)", extra).color(t.dim));
-    }
+            if truncated || lines.len() > max_lines {
+                let extra = if lines.len() > max_lines { lines.len() - max_lines } else { 0 };
+                frame.println(&format!("... ({} more lines)", extra));
+            }
+        }
+    });
 }
 
 pub fn tool_call_end(done: bool, duration_s: Option<f64>) {
-    let t = theme::current();
-    let status = if done { "✅ done" } else { "⏳ running" };
-    let duration_str = duration_s.map(|d| format!(" ({:.1}s)", d)).unwrap_or_default();
-    if done {
-        println!(
-            "{} {}{} {}",
-            "╰─".color(t.border),
-            status.color(t.user_med),
-            duration_str.color(t.user_med),
-            "─".repeat(30).color(t.border),
-        );
-    } else {
-        println!(
-            "{} {}{} {}",
-            "╰─".color(t.border),
-            status.color(t.think),
-            duration_str.color(t.think),
-            "─".repeat(30).color(t.border),
-        );
-    }
-    println!();
+    TOOL_FRAME.with(|f| {
+        if let Some(frame) = f.borrow_mut().take() {
+            frame.end(done, duration_s);
+        }
+    });
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -276,7 +261,10 @@ pub fn system(msg: &str) {
 pub fn welcome(version: &str, model: &str) {
     let t = theme::current();
     println!();
-    println!("  {} {}", "Rupoo".color(t.ai_header).bold(), format!("v{}", version).color(t.dim));
+    
+    // Use enhanced header bar (slogan is shown in header now)
+    enhanced_ui::header_bar(version, Some(model), None, false);
+    
     if model == "not configured" {
         println!("  {} {} Run: {} or {}",
             "⚠".to_string().yellow(),
@@ -284,12 +272,30 @@ pub fn welcome(version: &str, model: &str) {
             "rupoo config set api_key.anthropic <key>".color(t.ai_accent),
             "rupoo doctor".color(t.ai_accent),
         );
-    } else {
-        println!("  {} {}", "Model:".color(t.dim), model.color(t.ai_accent));
     }
     println!("  {} Theme: {}", "│".color(t.dim), t.name.color(t.ai_accent));
     println!();
-    println!("  {} /help for commands │ /new for new session │ /theme <name> to switch", "›".color(t.dim));
+    println!("  {} Quick Actions:", "›".color(t.dim));
+    println!("     @<path>    - Read file (e.g., @./src/main.rs)");
+    println!("     !<cmd>     - Execute command (e.g., !ls -la)");
+    println!("     ~<query>   - Web search (e.g., ~Rust async)");
+    println!("     %% [path]  - List directory");
+    println!();
+    println!("  {} /help for full commands │ /tools to list tools", "›".color(t.dim));
     println!();
     separator();
+}
+
+/// Print footer status bar with token usage
+pub fn footer(token_in: u64, token_out: u64, ctx_tokens: usize, ctx_budget: usize, model: &str, hybrid_search: bool) {
+    enhanced_ui::footer_bar(token_in, token_out, ctx_tokens, ctx_budget, model, hybrid_search);
+}
+
+/// Print plan task list
+pub fn plan_task_list(tasks: &[(String, rupoo::task::StepStatus)]) {
+    let converted: Vec<(String, enhanced_ui::TaskStatus)> = tasks
+        .iter()
+        .map(|(name, status)| (name.clone(), enhanced_ui::step_status_to_task_status(status)))
+        .collect();
+    enhanced_ui::task_list(&converted);
 }

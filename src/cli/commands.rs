@@ -236,6 +236,13 @@ impl CommandRegistry {
             aliases: &[],
             usage: "/doctor",
         });
+        self.register(CommandDef {
+            name: "memory",
+            description: "Manage memory feature (on/off/list/search)",
+            category: CommandCategory::Agent,
+            aliases: &["mem"],
+            usage: "/memory [on|off|list|search <query>]",
+        });
 
         // Config commands
         self.register(CommandDef {

@@ -184,10 +184,10 @@ async fn save_checkpoint_standalone_works() -> Result<()> {
 #[tokio::test]
 async fn set_setting_upserts_value() -> Result<()> {
     let repo = in_memory_repo();
-    repo.set_setting("model", "gpt-4").await?;
-    repo.set_setting("model", "claude-3").await?; // overwrite
+    repo.set_setting("model.anthropic", "claude-sonnet-4-20250514").await?;
+    repo.set_setting("model.anthropic", "claude-3").await?; // overwrite
     // Verify via a second save — if it didn't upsert, second would error
-    repo.set_setting("model", "claude-3.5").await?;
+    repo.set_setting("model.anthropic", "claude-3.5").await?;
     Ok(())
 }
 

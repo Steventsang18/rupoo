@@ -422,6 +422,39 @@ impl TaskRepo {
         })
         .await
     }
+
+    /// Get a specific memory entry by ID.
+    pub async fn get_memory(&self, id: &str) -> AgentResult<Option<MemoryEntry>> {
+        let id = id.to_string();
+        self.with_read_conn(move |conn| {
+            let mut stmt = conn.prepare(
+                "SELECT content_id, content, tags, source, created_at, updated_at
+                 FROM memories
+                 WHERE content_id = ?1",
+            )?;
+
+            let result = stmt
+                .query_row(rusqlite::params![id], |row| {
+                    let tags_str: String = row.get(2)?;
+                    let tags: Vec<String> = serde_json::from_str(&tags_str).unwrap_or_else(|e| {
+                        warn!(tags_str = %tags_str, error = %e, "failed to deserialize tags, using empty vec");
+                        Vec::new()
+                    });
+                    Ok(MemoryEntry {
+                        id: row.get::<_, String>(0)?,
+                        content: row.get(1)?,
+                        tags,
+                        source: row.get(3)?,
+                        created_at: row.get(4)?,
+                        updated_at: row.get(5)?,
+                    })
+                })
+                .ok();
+
+            Ok(result)
+        })
+        .await
+    }
 }
 
 // ---------------------------------------------------------------------------

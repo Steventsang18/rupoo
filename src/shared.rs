@@ -5,6 +5,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::task::StepStatus;
+
 // ---------------------------------------------------------------------------
 // Message types (mirrors what was previously in cli/app.rs)
 // ---------------------------------------------------------------------------
@@ -103,6 +105,10 @@ pub enum AgentToTui {
     StepProgress { step_index: usize, total: usize, step_name: String },
     /// Tool call status update for Chat Mode progress display.
     ToolStatus { tool_name: String, phase: ToolPhase },
+    /// Plan task list for display in Plan Mode.
+    PlanTaskList { tasks: Vec<(String, StepStatus)> },
+    /// Hybrid search (deep search) status update.
+    HybridSearchUpdate { enabled: bool },
 }
 
 /// Phase of a tool call for status display.

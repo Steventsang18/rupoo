@@ -85,10 +85,14 @@ impl AgentUiBridge {
             self.handle_plan_mode(task).await;
         } else if text.starts_with("/model ") {
             self.handle_model_switch(text).await;
+        } else if text.starts_with("/memory") {
+            self.handle_memory(text).await;
         } else if text == "/clear" {
             self.handle_clear().await;
         } else if text == "/status" {
             self.handle_status().await;
+        } else if text.starts_with("/deep") {
+            self.handle_deep(text).await;
         } else if text == "/help" || text == "/?" {
             self.handle_help().await;
         } else {
@@ -202,15 +206,158 @@ impl AgentUiBridge {
     async fn handle_help(&self) {
         let help = "\
 Available commands:
-  /plan <task>    — Generate and execute a step-by-step plan
+  /plan <task>          — Generate and execute a step-by-step plan
   /model <prov> [model] — Switch LLM provider/model
-  /clear          — Clear conversation history
-  /status         — Show current session status
-  /help           — Show this help message
-  Ctrl+C         — Cancel current generation (press twice to quit)";
+  /memory [on/off/list/search <query>] — Manage memory feature
+  /deep [on/off]        — Enable/disable deep search (hybrid FTS5 + vector)
+  /clear                — Clear conversation history
+  /status               — Show current session status
+  /help                 — Show this help message
+  Ctrl+C               — Cancel current generation (press twice to quit)";
         let _ = self.ui_tx.send(AgentToTui::Message(
             ChatMessage::system(help.to_string()),
         ));
+        let _ = self.ui_tx.send(AgentToTui::Idle);
+    }
+
+    /// Handle /memory command.
+    async fn handle_memory(&mut self, text: &str) {
+        let args = text.trim_start_matches("/memory ").trim();
+        
+        if args.is_empty() {
+            // Show memory status
+            let enabled = self.agent.is_memory_enabled();
+            let count = match self.agent.memory_count().await {
+                Ok(c) => c.to_string(),
+                Err(e) => format!("Error: {}", e),
+            };
+            let status = format!(
+                "Memory Status:\n  Enabled: {}\n  Entries: {}",
+                if enabled { "Yes" } else { "No" },
+                count
+            );
+            let _ = self.ui_tx.send(AgentToTui::Message(
+                ChatMessage::system(status),
+            ));
+        } else {
+            let parts: Vec<&str> = args.splitn(2, ' ').collect();
+            let subcmd = parts[0];
+            let query = parts.get(1).copied().unwrap_or("");
+
+            match subcmd {
+                "on" => {
+                    self.agent.set_memory_enabled(true);
+                    let _ = self.ui_tx.send(AgentToTui::Message(
+                        ChatMessage::system("Memory feature enabled".to_string()),
+                    ));
+                }
+                "off" => {
+                    self.agent.set_memory_enabled(false);
+                    let _ = self.ui_tx.send(AgentToTui::Message(
+                        ChatMessage::system("Memory feature disabled".to_string()),
+                    ));
+                }
+                "list" => {
+                    match self.agent.recent_memories(10).await {
+                        Ok(memories) => {
+                            if memories.is_empty() {
+                                let _ = self.ui_tx.send(AgentToTui::Message(
+                                    ChatMessage::system("No memories found".to_string()),
+                                ));
+                            } else {
+                                let mut list = "Recent Memories:\n".to_string();
+                                for (i, mem) in memories.iter().enumerate() {
+                                    list.push_str(&format!("  [{}] {}\n", i + 1, mem.content));
+                                }
+                                let _ = self.ui_tx.send(AgentToTui::Message(
+                                    ChatMessage::system(list),
+                                ));
+                            }
+                        }
+                        Err(e) => {
+                            let _ = self.ui_tx.send(AgentToTui::Message(
+                                ChatMessage::error(format!("Failed to list memories: {}", e)),
+                            ));
+                        }
+                    }
+                }
+                "search" => {
+                    if query.is_empty() {
+                        let _ = self.ui_tx.send(AgentToTui::Message(
+                            ChatMessage::error("Usage: /memory search <query>".to_string()),
+                        ));
+                    } else {
+                        match self.agent.recall(query, 10).await {
+                            Ok(memories) => {
+                                if memories.is_empty() {
+                                    let _ = self.ui_tx.send(AgentToTui::Message(
+                                        ChatMessage::system(format!("No memories found matching '{}'", query)),
+                                    ));
+                                } else {
+                                    let mut results = format!("Search Results for '{}':\n", query);
+                                    for (i, mem) in memories.iter().enumerate() {
+                                        results.push_str(&format!("  [{}] {}\n", i + 1, mem.content));
+                                    }
+                                    let _ = self.ui_tx.send(AgentToTui::Message(
+                                        ChatMessage::system(results),
+                                    ));
+                                }
+                            }
+                            Err(e) => {
+                                let _ = self.ui_tx.send(AgentToTui::Message(
+                                    ChatMessage::error(format!("Failed to search memories: {}", e)),
+                                ));
+                            }
+                        }
+                    }
+                }
+                _ => {
+                    let _ = self.ui_tx.send(AgentToTui::Message(
+                        ChatMessage::error(format!("Unknown memory command: {}", subcmd)),
+                    ));
+                }
+            }
+        }
+        let _ = self.ui_tx.send(AgentToTui::Idle);
+    }
+
+    /// Handle /deep command for controlling hybrid search (deep search) feature.
+    async fn handle_deep(&mut self, text: &str) {
+        let args = text.trim_start_matches("/deep ").trim();
+        
+        if args.is_empty() {
+            // Show deep search status
+            let enabled = self.agent.is_hybrid_search_enabled();
+            let status = format!(
+                "Deep Search (Hybrid) Status:\n  Enabled: {}",
+                if enabled { "Yes" } else { "No" }
+            );
+            let _ = self.ui_tx.send(AgentToTui::Message(
+                ChatMessage::system(status),
+            ));
+        } else {
+            match args {
+                "on" => {
+                    self.agent.set_hybrid_search_enabled(true);
+                    let _ = self.ui_tx.send(AgentToTui::Message(
+                        ChatMessage::system("Deep search (hybrid) enabled. Now using FTS5 + vector semantic search for better memory retrieval.".to_string()),
+                    ));
+                    let _ = self.ui_tx.send(AgentToTui::HybridSearchUpdate { enabled: true });
+                }
+                "off" => {
+                    self.agent.set_hybrid_search_enabled(false);
+                    let _ = self.ui_tx.send(AgentToTui::Message(
+                        ChatMessage::system("Deep search (hybrid) disabled. Using FTS5 full-text search only.".to_string()),
+                    ));
+                    let _ = self.ui_tx.send(AgentToTui::HybridSearchUpdate { enabled: false });
+                }
+                _ => {
+                    let _ = self.ui_tx.send(AgentToTui::Message(
+                        ChatMessage::error(format!("Unknown deep command: {}\nUsage: /deep [on/off]", args)),
+                    ));
+                }
+            }
+        }
         let _ = self.ui_tx.send(AgentToTui::Idle);
     }
 }

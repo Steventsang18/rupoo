@@ -154,7 +154,7 @@ pub async fn run_cmd(cmd: super::Commands) -> anyhow::Result<()> {
     match cmd {
         super::Commands::Run { task, db, input } => {
             let db = resolve_db(db);
-            let (repo, agent, _tool_executor, _llm_router) = crate::build_engine::build_engine(&db).await?;
+            let (repo, agent, _tool_executor) = crate::build_engine::build_engine(&db).await?;
             crate::executor::execute_plan(&repo, &agent, &task, input.as_deref()).await?;
         }
         super::Commands::Git { action } => {
@@ -187,7 +187,7 @@ pub async fn run_cmd(cmd: super::Commands) -> anyhow::Result<()> {
         super::Commands::Config { action } => match action {
             ConfigAction::Set { key, value, db } => {
                 let db = resolve_db(db);
-                let (repo, _agent, _tool_executor, _llm_router) = crate::build_engine::build_engine(&db).await?;
+                let (repo, _agent, _tool_executor) = crate::build_engine::build_engine(&db).await?;
                 repo.set_setting(&key, &value).await?;
                 info!(key = %key, "configuration saved");
                 if key.starts_with("api_key") {
@@ -199,7 +199,7 @@ pub async fn run_cmd(cmd: super::Commands) -> anyhow::Result<()> {
             }
             ConfigAction::Get { key, db } => {
                 let db = resolve_db(db);
-                let (repo, _agent, _tool_executor, _llm_router) = crate::build_engine::build_engine(&db).await?;
+                let (repo, _agent, _tool_executor) = crate::build_engine::build_engine(&db).await?;
                 match repo.get_setting(&key).await? {
                     Some(value) => println!("{key} = {value}"),
                     None => println!("{key} is not set"),
@@ -207,7 +207,7 @@ pub async fn run_cmd(cmd: super::Commands) -> anyhow::Result<()> {
             }
             ConfigAction::List { db } => {
                 let db = resolve_db(db);
-                let (repo, _agent, _tool_executor, _llm_router) = crate::build_engine::build_engine(&db).await?;
+                let (repo, _agent, _tool_executor) = crate::build_engine::build_engine(&db).await?;
                 let settings = repo.list_settings().await?;
                 if settings.is_empty() {
                     println!("No configuration set.");
@@ -251,7 +251,7 @@ pub async fn run_cmd(cmd: super::Commands) -> anyhow::Result<()> {
                 let manager = SkillManager::new(SkillManager::default_dir());
                 let skill = manager.load_skill(&name)?;
                 let plan = manager.skill_to_plan(&skill);
-                let (repo, agent, _tool_executor, _llm_router) = crate::build_engine::build_engine(&db).await?;
+                let (repo, agent, _tool_executor) = crate::build_engine::build_engine(&db).await?;
                 repo.save_plan(&plan).await?;
                 info!(plan_id = %plan.id, skill = %name, "skill plan saved");
                 print_plan_summary(&plan);
@@ -284,7 +284,7 @@ pub async fn run_cmd(cmd: super::Commands) -> anyhow::Result<()> {
         },
         super::Commands::Demo { db } => {
             let db = resolve_db(db);
-            let (repo, agent, _tool_executor, _llm_router) = crate::build_engine::build_engine(&db).await?;
+            let (repo, agent, _tool_executor) = crate::build_engine::build_engine(&db).await?;
 
             let plan = Plan::new(
                 "Demo Plan",

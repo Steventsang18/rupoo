@@ -3,7 +3,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use tracing::info;
+use tracing::{info, warn};
 
 use crate::error::{AgentError, AgentResult};
 use crate::llm::history::{ConversationHistory, LlmChatMessage};
@@ -28,24 +28,95 @@ impl LlmGateway {
     /// Create a gateway with jail_root set to the current working directory.
     /// File writes are restricted to CWD and its subdirectories.
     pub fn new(config: LlmConfig) -> Self {
+        let jail_root = std::env::current_dir()
+            .ok()
+            .map(|p| Self::normalize_path(&p));
+        
+        info!(
+            jail_root = ?jail_root.as_ref().map(|p| p.as_os_str()),
+            "Created LlmGateway with jail_root from CWD"
+        );
+        
         Self {
-            jail_root: std::env::current_dir().ok(),
+            jail_root,
             http_client: crate::http_client::HTTP_CLIENT.clone(),
             config,
         }
     }
 
     pub fn with_jail(config: LlmConfig, jail_root: PathBuf) -> Self {
+        let normalized = Self::normalize_path(&jail_root);
+        
+        info!(
+            jail_root = ?normalized.as_os_str(),
+            "Created LlmGateway with explicit jail_root"
+        );
+        
         Self {
             config,
-            jail_root: Some(jail_root),
+            jail_root: Some(normalized),
             http_client: crate::http_client::HTTP_CLIENT.clone(),
         }
     }
 
     /// Create a gateway with a pre-built shared HTTP client.
     pub fn with_http_client(config: LlmConfig, jail_root: Option<PathBuf>, http_client: Arc<reqwest::Client>) -> Self {
+        let jail_root = jail_root.map(|p| Self::normalize_path(&p));
+        
+        info!(
+            jail_root = ?jail_root.as_ref().map(|p| p.as_os_str()),
+            "Created LlmGateway with custom HTTP client"
+        );
+        
         Self { config, jail_root, http_client }
+    }
+    
+    /// Normalize a path to an absolute, canonical path.
+    /// This prevents path traversal attacks by resolving all symlinks and
+    /// converting to an absolute path.
+    fn normalize_path(path: &PathBuf) -> PathBuf {
+        match path.canonicalize() {
+            Ok(canonical) => canonical,
+            Err(e) => {
+                warn!(
+                    path = %path.display(),
+                    error = %e,
+                    "Failed to canonicalize path, falling back to absolute path"
+                );
+                // Fall back to absolute path if canonicalization fails
+                if path.is_absolute() {
+                    path.clone()
+                } else {
+                    match std::env::current_dir() {
+                        Ok(cwd) => cwd.join(path),
+                        Err(_) => path.clone(),
+                    }
+                }
+            }
+        }
+    }
+    
+    /// Validate that a path is within the jail_root.
+    /// Returns Ok(path) if valid, Err if path traversal is detected.
+    pub fn validate_path(&self, path: &PathBuf) -> AgentResult<PathBuf> {
+        let normalized = Self::normalize_path(path);
+        
+        if let Some(ref jail) = self.jail_root {
+            // Check if the normalized path starts with the jail_root
+            if !normalized.starts_with(jail) {
+                return Err(AgentError::PathTraversal {
+                    path: path.display().to_string(),
+                    jail_root: jail.display().to_string(),
+                });
+            }
+        }
+        
+        Ok(normalized)
+    }
+    
+    /// Get the jail_root as an absolute path.
+    pub fn jail_root_absolute(&self) -> Option<&PathBuf> {
+        self.jail_root.as_ref()
     }
 
     pub fn config(&self) -> &LlmConfig {

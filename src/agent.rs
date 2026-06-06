@@ -1,16 +1,19 @@
 use std::sync::Arc;
 use std::path::PathBuf;
 use std::fs;
+use std::sync::atomic::{AtomicBool, Ordering};
 
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 use crate::db::TaskRepo;
 use crate::error::{AgentError, AgentResult};
 use crate::llm::{LlmGateway, TokenUsage, ConversationHistory, AgentEvent};
+use crate::memory::{MemoryStore, HybridSearchConfig};
 use crate::memory_cache::MemoryCache;
+use crate::embedding::EmbeddingService;
 
 use crate::task::{
-    Checkpoint, CheckpointStatus, McpToolResult, Plan, PlanStatus, Step, StepStatus,
+    Checkpoint, CheckpointStatus, McpToolResult, Plan, PlanStatus, Step, StepStatus, MemoryEntry,
 };
 
 use crate::safety::SafetyContext;
@@ -53,11 +56,23 @@ pub trait ToolExecutor: Send + Sync {
         &self,
         tool_calls: Vec<(String, serde_json::Value)>,
     ) -> Vec<AgentResult<McpToolResult>> {
-        let mut results = Vec::with_capacity(tool_calls.len());
-        for (name, params) in tool_calls {
-            results.push(self.execute_tool(&name, params).await);
-        }
-        results
+        // Use Arc to share string references across async tasks
+        let tool_calls: Vec<_> = tool_calls.into_iter()
+            .map(|(name, params)| (Arc::new(name), params))
+            .collect();
+
+        // Spawn all tasks concurrently
+        let tasks: Vec<_> = tool_calls.into_iter()
+            .map(|(name, params)| {
+                let executor = self as &Self;
+                async move {
+                    executor.execute_tool(&name, params).await
+                }
+            })
+            .collect();
+
+        // Wait for all tasks to complete
+        futures::future::join_all(tasks).await
     }
 }
 
@@ -87,6 +102,14 @@ impl ToolExecutor for DummyToolExecutor {
 pub struct Agent {
     repo: Arc<TaskRepo>,
     memory_cache: std::sync::Arc<MemoryCache>,
+    /// Full memory store with hybrid search support
+    memory_store: std::sync::Arc<MemoryStore>,
+    /// Embedding service for vector search
+    embedding_service: Option<std::sync::Arc<EmbeddingService>>,
+    /// Memory feature enabled flag
+    memory_enabled: AtomicBool,
+    /// Hybrid search (deep search) enabled flag
+    hybrid_search_enabled: AtomicBool,
     pub tool_executor: Box<dyn ToolExecutor>,
     llm_gateway: Option<LlmGateway>,
     pub safety_ctx: SafetyContext,
@@ -104,9 +127,14 @@ pub struct Agent {
 impl Agent {
     pub fn new(repo: Arc<TaskRepo>, tool_executor: Box<dyn ToolExecutor>) -> Self {
         let memory_cache = std::sync::Arc::new(MemoryCache::new(Arc::clone(&repo), 64));
+        let memory_store = std::sync::Arc::new(MemoryStore::new(Arc::clone(&repo)));
         Self {
             repo,
             memory_cache,
+            memory_store,
+            embedding_service: None,
+            memory_enabled: AtomicBool::new(true),
+            hybrid_search_enabled: AtomicBool::new(false),
             tool_executor,
             llm_gateway: None,
             safety_ctx: SafetyContext::default(),
@@ -159,6 +187,88 @@ impl Agent {
     /// Check if LLM is configured.
     pub fn has_llm(&self) -> bool {
         self.llm_gateway.is_some()
+    }
+
+    // ------------------------------------------------------------------
+    // Memory Management
+    // ------------------------------------------------------------------
+
+    /// Enable or disable memory feature.
+    pub fn set_memory_enabled(&self, enabled: bool) {
+        self.memory_enabled.store(enabled, Ordering::SeqCst);
+        info!(enabled = enabled, "memory feature {}", if enabled { "enabled" } else { "disabled" });
+    }
+
+    /// Check if memory feature is enabled.
+    pub fn is_memory_enabled(&self) -> bool {
+        self.memory_enabled.load(Ordering::SeqCst)
+    }
+
+    /// Enable or disable hybrid search (deep search) feature.
+    pub fn set_hybrid_search_enabled(&self, enabled: bool) {
+        self.hybrid_search_enabled.store(enabled, Ordering::SeqCst);
+        info!(enabled = enabled, "hybrid search (deep search) feature {}", if enabled { "enabled" } else { "disabled" });
+    }
+
+    /// Check if hybrid search (deep search) feature is enabled.
+    pub fn is_hybrid_search_enabled(&self) -> bool {
+        self.hybrid_search_enabled.load(Ordering::SeqCst)
+    }
+
+    /// Attach embedding service for vector search.
+    pub fn with_embedding_service(mut self, service: EmbeddingService) -> Self {
+        self.embedding_service = Some(Arc::new(service));
+        // Upgrade memory store to support hybrid search
+        let config = HybridSearchConfig::default();
+        self.memory_store = Arc::new(MemoryStore::with_hybrid_search(
+            Arc::clone(&self.repo),
+            self.embedding_service.clone(),
+            config,
+        ));
+        info!("embedding service attached, hybrid search enabled");
+        self
+    }
+
+    /// Store a memory entry with tags.
+    pub async fn remember(&self, content: &str, tags: &[&str]) -> AgentResult<String> {
+        if !self.is_memory_enabled() {
+            return Err(AgentError::MemoryDisabled);
+        }
+        let id = self.memory_store.remember(content, tags).await?;
+        // Invalidate cache to ensure fresh data is used
+        self.memory_cache.invalidate().await;
+        Ok(id)
+    }
+
+    /// Store a memory with explicit source.
+    pub async fn remember_from(&self, content: &str, tags: &[&str], source: &str) -> AgentResult<String> {
+        if !self.is_memory_enabled() {
+            return Err(AgentError::MemoryDisabled);
+        }
+        let id = self.memory_store.remember_from(content, tags, source).await?;
+        self.memory_cache.invalidate().await;
+        Ok(id)
+    }
+
+    /// Retrieve relevant memories using hybrid search.
+    pub async fn recall(&self, query: &str, limit: usize) -> AgentResult<Vec<MemoryEntry>> {
+        if !self.is_memory_enabled() {
+            return Ok(Vec::new());
+        }
+        self.memory_store.recall(query, limit).await
+    }
+
+    /// Get recent memories.
+    pub async fn recent_memories(&self, limit: usize) -> AgentResult<Vec<MemoryEntry>> {
+        if !self.is_memory_enabled() {
+            return Ok(Vec::new());
+        }
+        self.memory_store.recent(limit).await
+    }
+
+    /// Get memory count.
+    pub async fn memory_count(&self) -> AgentResult<usize> {
+        self.memory_store.count().await
     }
 
     // ------------------------------------------------------------------
@@ -273,9 +383,26 @@ impl Agent {
             .flatten();
 
         // Run the agent loop
-        gateway
+        let (response, usage) = gateway
             .chat_agent_loop(user_message, history, max_turns, safe_mode, context_ref, on_event, custom_preamble.as_deref(), intent)
-            .await
+            .await?;
+
+        // Store conversation memory after successful chat
+        if self.is_memory_enabled() {
+            let memory_content = format!("User: {}\nAssistant: {}", user_message, response);
+            match self.remember(&memory_content, &["chat", "conversation"]).await {
+                Ok(id) => {
+                    info!(memory_id = %id, "conversation memory stored successfully");
+                }
+                Err(e) => {
+                    warn!(error = %e, "failed to store conversation memory");
+                }
+            }
+        } else {
+            debug!("memory feature disabled, skipping memory storage");
+        }
+
+        Ok((response, usage))
     }
 
     // ------------------------------------------------------------------

@@ -526,19 +526,19 @@ async fn test_plan_to_skill_preserves_types() {
 async fn test_settings_crud() {
     let (_tmp, repo) = test_repo();
 
-    // Set settings
-    repo.set_setting("api_key", "secret123").await.unwrap();
+    // Set settings with valid keys
+    repo.set_setting("api_key.anthropic", "secret123").await.unwrap();
     repo.set_setting("theme", "dark").await.unwrap();
-    repo.set_setting("timeout", "30").await.unwrap();
+    repo.set_setting("default_timeout_secs", "30").await.unwrap();
 
     // Get individual setting
-    let api_key = repo.get_setting("api_key").await.unwrap().unwrap();
+    let api_key = repo.get_setting("api_key.anthropic").await.unwrap().unwrap();
     assert_eq!(api_key, "secret123");
 
     // List all settings
     let settings = repo.list_settings().await.unwrap();
     assert_eq!(settings.len(), 3);
-    assert!(settings.iter().any(|(k, _)| k == "api_key"));
+    assert!(settings.iter().any(|(k, _)| k == "api_key.anthropic"));
     assert!(settings.iter().any(|(k, _)| k == "theme"));
 
     // Delete a setting

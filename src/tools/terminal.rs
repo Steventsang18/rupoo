@@ -16,8 +16,8 @@ use tokio::process::Command;
 use crate::error::{AgentError, AgentResult};
 use crate::safety::SafetyContext;
 
-/// Maximum command output length.
-const MAX_OUTPUT_CHARS: usize = 10_000;
+/// Default maximum command output length.
+const DEFAULT_MAX_OUTPUT_CHARS: usize = 10_000;
 
 /// Execute a command with safety checks.
 pub async fn execute_command(
@@ -25,6 +25,17 @@ pub async fn execute_command(
     args: &[String],
     timeout_secs: Option<u64>,
     safety: &SafetyContext,
+) -> AgentResult<String> {
+    execute_command_with_max_output(command, args, timeout_secs, safety, DEFAULT_MAX_OUTPUT_CHARS).await
+}
+
+/// Execute a command with safety checks and custom max output length.
+pub async fn execute_command_with_max_output(
+    command: &str,
+    args: &[String],
+    timeout_secs: Option<u64>,
+    safety: &SafetyContext,
+    max_output_chars: usize,
 ) -> AgentResult<String> {
     // Security check: validate command
     safety.validate_command(command)?;
@@ -63,7 +74,7 @@ pub async fn execute_command(
                 format!("{stdout}\n{stderr}")
             };
 
-            let truncated = crate::signal::compress_output(&combined, Some(MAX_OUTPUT_CHARS));
+            let truncated = crate::signal::compress_output(&combined, Some(max_output_chars));
 
             if output.status.success() {
                 Ok(truncated)

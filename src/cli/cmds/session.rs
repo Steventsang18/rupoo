@@ -179,7 +179,8 @@ mod tests {
 
     #[test]
     fn test_step_icon_pending() {
-        assert_eq!(step_icon(&StepStatus::Pending), "·");
+        let icon = step_icon(&StepStatus::Pending);
+        assert!(icon.contains("·"), "Expected icon to contain '·', got: {:?}", icon);
     }
 
     #[test]

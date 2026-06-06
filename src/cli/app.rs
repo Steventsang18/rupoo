@@ -77,6 +77,9 @@ pub struct RupooApp {
     pub messages: Vec<ChatMessage>,
     pub token_in: u64,
     pub token_out: u64,
+    pub ctx_tokens: usize,
+    pub ctx_budget: usize,
+    pub hybrid_search: bool,
     pub pending_tool: Option<PendingTool>,
     pub cmd_query: String,
     pub cmd_selected: usize,
@@ -101,7 +104,6 @@ pub struct RupooApp {
     pub chat_safe_mode: bool,
     pub stream_buffer: String,
     pub current_tool_status: Option<(String, String)>,
-    pub ctrl_c_count: u8,
     pub cancel_flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
     pub approve_all: bool,
 }
@@ -148,6 +150,9 @@ impl RupooApp {
             messages: Vec::new(),
             token_in: 0,
             token_out: 0,
+            ctx_tokens: 0,
+            ctx_budget: 60000,
+            hybrid_search: false,
             pending_tool: None,
             cmd_query: String::new(),
             cmd_selected: 0,
@@ -172,7 +177,6 @@ impl RupooApp {
             chat_safe_mode: true,
             stream_buffer: String::new(),
             current_tool_status: None,
-            ctrl_c_count: 0,
             cancel_flag: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             approve_all: false,
         }
@@ -287,6 +291,12 @@ impl RupooApp {
                     rupoo::ToolPhase::Completed => "completed",
                 };
                 self.current_tool_status = Some((tool_name.clone(), phase_str.to_string()));
+            }
+            AgentToTui::PlanTaskList { .. } => {
+                // Handled by the CLI output layer
+            }
+            AgentToTui::HybridSearchUpdate { enabled } => {
+                self.hybrid_search = enabled;
             }
         }
     }
