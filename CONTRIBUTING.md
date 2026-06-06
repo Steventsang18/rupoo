@@ -18,6 +18,9 @@ cargo build
 # Run tests
 cargo test
 
+# Run with verbose output
+cargo test -- --nocapture
+
 # If project path contains non-ASCII characters:
 CARGO_TARGET_DIR=/tmp/rupoo-target cargo build --release
 
@@ -34,39 +37,46 @@ src/
 ├── lib.rs               # Crate root, re-exports shared types
 ├── build_engine.rs      # Engine bootstrap (LLM gateway + DB + agent)
 ├── agent.rs             # Agent state machine: 7 step types, crash recovery
-├── db.rs                # SQLite (WAL + FTS5): Plan CRUD, checkpoints, memories, themes
-├── llm.rs               # LLM gateway: unified interface for Anthropic/OpenAI/Ollama
-├── executor.rs          # Step executor dispatch
+├── db.rs                # SQLite (WAL + FTS5): Plan CRUD, checkpoints, memories
+├── llm/                 # LLM module
+│   ├── gateway.rs       # LLM gateway: unified interface
+│   ├── router.rs       # Provider routing
+│   └── providers.rs    # Anthropic/OpenAI/DeepSeek/Ollama
+├── memory.rs            # Long-term memory with FTS5 + Vector hybrid search
+├── memory_cache.rs      # LRU cache for memory
+├── vector_store.rs      # Vector storage and retrieval
+├── embedding.rs         # Embedding service for vector generation
+├── safety.rs            # Sandboxing: path_jail, command blacklist, SSRF
+├── mcp.rs               # MCP tool dispatcher + JSON-RPC client
+├── mcp_server.rs        # MCP protocol server (JSON-RPC over stdio)
+├── skill.rs             # Skill system: JSON files, auto-learn from plans
+├── git.rs               # Git integration via git2 + gh CLI
+├── task.rs              # Step/Plan/Checkpoint type definitions
+├── shared.rs            # Shared types between agent core and REPL
+├── error.rs             # Unified error type (AgentError)
+├── retry.rs             # Retry mechanism
+├── strings.rs           # String utilities
+├── tracing_setup.rs     # Logging configuration
 ├── cli/
 │   ├── mod.rs           # REPL event loop, Agent bridge thread
-│   ├── app.rs           # App state, session management, message routing
+│   ├── app.rs           # App state, session management
 │   ├── bridge.rs        # Agent ↔ REPL bridge (crossbeam channels)
 │   ├── chat_mode.rs     # Chat Mode handler
 │   ├── plan_mode.rs     # Plan Mode: interactive step execution
 │   ├── approval.rs      # Tool approval workflow
-│   ├── output.rs        # Output formatting: chat bubbles, tool cards, thinking chain
-│   ├── markdown.rs      # Markdown renderer: tables, blockquotes, task lists, links
-│   ├── theme.rs         # Theme system: Dark/Light/Monokai with 12 RGB constants
-│   ├── handlers.rs      # Input mode strategies
-│   └── cmds/            # CLI subcommands: status, model, session, doctor, logs...
-├── tools/
-│   ├── browser.rs       # Browser automation (Navigate/Screenshot/Click/GetText)
-│   ├── search.rs        # Web search integration
-│   ├── network.rs       # HTTP request tool
-│   └── terminal.rs      # Terminal command execution
-├── safety.rs            # Sandboxing: path_jail, command blacklist, SSRF protection
-├── mcp.rs               # MCP tool dispatcher + JSON-RPC client
-├── mcp_server.rs        # MCP protocol server (JSON-RPC over stdio)
-├── rig_tools.rs         # Built-in tools: Echo, FileRead, FileWrite, ListDir
-├── skill.rs             # Skill system: JSON files, auto-learn from plans
-├── memory.rs            # Long-term memory with FTS5 full-text search
-├── git.rs               # Git integration via git2 + gh CLI
-├── task.rs              # Step/Plan/Checkpoint type definitions
-├── shared.rs            # Shared types between agent core and REPL
-├── error.rs             # Unified error type
-├── tracing_setup.rs     # Logging configuration
-├── gui.rs               # GUI mode (feature-gated)
-└── tray.rs              # System tray (feature-gated)
+│   ├── output.rs        # Output formatting
+│   ├── markdown.rs      # Markdown renderer
+│   ├── enhanced_ui.rs   # Enhanced UI components
+│   ├── shortcuts.rs     # Keyboard shortcuts handler
+│   ├── completion.rs    # Auto-completion system
+│   ├── commands.rs      # Command registry system
+│   ├── theme.rs         # Theme system: Dark/Light/Monokai
+│   └── cmds/            # CLI subcommands
+└── tools/
+    ├── browser.rs       # Browser automation
+    ├── search.rs        # Web search integration
+    ├── network.rs       # HTTP request tool
+    └── terminal.rs      # Terminal command execution
 ```
 
 ## Architecture Notes
@@ -77,6 +87,26 @@ The REPL runs on the main thread with rustyline for input. The agent engine runs
 
 - **REPL → Agent**: `TuiToAgent { SubmitMessage, ApproveTool, ApproveAll, DenyTool, Cancel }`
 - **Agent → REPL**: `AgentToTui { Message, Thinking, Idle, TokenUpdate, RequestApproval }`
+
+### Memory System Architecture
+
+```
+User Query
+    │
+    ├──► FTS5 Search (keyword matching)
+    │         │ Fast, exact keyword matches
+    │
+    └──► Vector Search (semantic understanding)
+              │ Understands intent and meaning
+
+Combined Results (RRF ranking)
+```
+
+Key components:
+- **MemoryStore**: High-level memory operations with hybrid search
+- **MemoryCache**: LRU cache for fast repeated queries
+- **VectorStore**: Vector storage using SQLite
+- **EmbeddingService**: Generates embeddings for semantic search
 
 ### Theme System
 
@@ -98,8 +128,9 @@ The REPL requires a TTY for rustyline. Subcommands (`status`, `doctor`, `logs`) 
 2. **Run tests**: `cargo test --lib && cargo test`
 3. **Run clippy**: `cargo clippy -- -D warnings`
 4. **Format**: `cargo fmt`
-5. **Commit** with a clear message describing the change.
-6. **Open a PR** targeting `master`.
+5. **Update documentation** if adding new features
+6. **Commit** with a clear message describing the change.
+7. **Open a PR** targeting `master`.
 
 ## Reporting Bugs
 
@@ -109,6 +140,41 @@ Please include:
 - Platform (macOS/Linux/Windows + version)
 - Steps to reproduce
 - Expected vs actual behavior
+- Memory/Deep Search related: include search queries and results
+
+## Testing
+
+### Running Tests
+
+```bash
+# Run all tests
+cargo test
+
+# Run specific test
+cargo test test_name
+
+# Run with verbose output
+cargo test -- --nocapture
+
+# Run benchmarks
+cargo bench
+```
+
+### Writing Tests
+
+Tests are located in:
+- Unit tests: alongside source files
+- Integration tests: `tests/` directory
+
+```rust
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn test_feature() {
+        // Test implementation
+    }
+}
+```
 
 ## Making a Release
 
@@ -118,6 +184,9 @@ Releases are managed via GitHub Releases with Git tags and a pre-built binary.
 
 ```bash
 # 1. Ensure the version is up to date in Cargo.toml
+# Update version in:
+# - [package] version
+# - [package.metadata.bundle] version
 
 # 2. Run final checks
 cargo test --lib && cargo test
@@ -128,18 +197,20 @@ cargo fmt --check
 cargo build --release
 
 # 4. Tag the release
-git tag -a v0.3.0 -m "v0.3.0 — AI-powered Terminal Assistant"
+git tag -a v0.4.0 -m "v0.4.0 — Memory System Enhancement + Hybrid Search"
 
 # 5. Push the tag
-git push origin v0.3.0
+git push origin v0.4.0
 
 # 6. Create the GitHub Release with binary attachment
-gh release create v0.3.0 \
-  --title "v0.3.0 — AI-powered Terminal Assistant" \
+gh release create v0.4.0 \
+  --title "v0.4.0 — Memory System Enhancement" \
   --notes "## Release Notes
 
 ### ✨ Features
-- ... (list key changes since last release)
+- Hybrid Search (FTS5 + Vector)
+- Memory Toggle Control
+- Deep Search Toggle
 
 ### 📦 Binary
 - Build from source with \`cargo build --release\`
@@ -151,7 +222,7 @@ gh release create v0.3.0 \
 
 This project follows **Semantic Versioning** (SemVer):
 
-- **Patch** (0.3.x): Bug fixes, minor improvements — backward compatible
+- **Patch** (0.4.x): Bug fixes, minor improvements — backward compatible
 - **Minor** (0.x.0): New features, non-breaking API changes
 - **Major** (x.0.0): Breaking changes, significant architectural shifts
 
@@ -162,3 +233,47 @@ This project follows **Semantic Versioning** (SemVer):
 - `clippy` with deny-by-default warnings
 - Document public API with doc comments (`///`)
 - Prefer `thiserror` for error types, `anyhow` for propagation
+
+## Feature Flags
+
+The project uses Cargo feature flags:
+
+| Flag | Description |
+|------|-------------|
+| `gui` | Enable GUI mode with system tray |
+
+## Security
+
+When contributing code that handles:
+- User input
+- File system operations
+- Network requests
+- Memory storage
+
+Please ensure:
+- Input validation
+- Path sandboxing
+- SSRF protection
+- Memory encryption (if applicable)
+
+## Performance
+
+For performance-critical code:
+- Use benchmarks in `benches/bench.rs`
+- Profile with `cargo flamegraph`
+- Consider caching strategies
+- Document time/space complexity
+
+## Documentation
+
+When adding new features:
+
+1. Update **README.md** with feature overview
+2. Add to **docs/USER_GUIDE.md** with usage examples
+3. Add to **CHANGELOG.md** with version and date
+4. Add code comments for complex logic
+
+## Getting Help
+
+- **GitHub Issues**: https://github.com/Steventsang18/rupoo/issues
+- **Discussions**: https://github.com/Steventsang18/rupoo/discussions
