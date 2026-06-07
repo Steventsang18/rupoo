@@ -1,40 +1,102 @@
-use std::sync::Arc;
-use std::path::PathBuf;
+//! Core agent implementation for task execution and planning.
+//!
+//! This module provides the main Agent struct that orchestrates task execution,
+//! plan management, memory operations, and tool execution. The agent supports:
+//!
+//! - **Plan Execution**: Execute step-by-step plans with checkpoint-based recovery
+//! - **Memory System**: Store and retrieve memories with hybrid search support
+//! - **Tool Execution**: Execute tools with retry logic and safety approval
+//! - **Chat Mode**: Multi-turn conversation with memory integration
+//! - **Crash Recovery**: Resume plans from last checkpoint after interruptions
+//!
+//! # Architecture Overview
+//!
+//! ```text
+//!                          Agent
+//!                            │
+//!          ┌─────────────────┼─────────────────┐
+//!          ▼                 ▼                 ▼
+//!     TaskRepo          MemoryStore      LlmGateway
+//!     (SQLite)          (FTS5+HNSW)     (LLM Provider)
+//!          │                 │                 │
+//!          ▼                 ▼                 ▼
+//!     Plans/Steps       Vector Store      Chat Completions
+//!                       Document Cache
+//! ```
+//!
+//! # Key Components
+//!
+//! - **Agent**: Main orchestrator for task execution
+//! - **ToolExecutor**: Trait for executing tools (supports parallel execution)
+//! - **PlanCache**: LRU cache for generated plans
+//! - **StepOutcome**: Enum representing step execution results
+//!
+//! # Usage Example
+//!
+//! ```rust
+//! use rupoo::agent::{Agent, DummyToolExecutor};
+//! use rupoo::db::TaskRepo;
+//!
+//! // Create a task repository
+//! let repo = TaskRepo::new(":memory:").await.unwrap();
+//!
+//! // Create agent with dummy tool executor
+//! let mut agent = Agent::new(Arc::new(repo), Box::new(DummyToolExecutor));
+//!
+//! // Enable memory
+//! agent.set_memory_enabled(true);
+//!
+//! // Store a memory
+//! let memory_id = agent.remember("Hello world", &["greeting"]).await.unwrap();
+//! println!("Stored memory: {}", memory_id);
+//! ```
 use std::fs;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 use tracing::{debug, error, info, warn};
 
 use crate::db::TaskRepo;
-use crate::error::{AgentError, AgentResult};
-use crate::llm::{LlmGateway, TokenUsage, ConversationHistory, AgentEvent};
-use crate::memory::{MemoryStore, HybridSearchConfig};
-use crate::memory_cache::MemoryCache;
 use crate::embedding::EmbeddingService;
+use crate::error::{AgentError, AgentResult};
+use crate::llm::{AgentEvent, ConversationHistory, LlmGateway, TokenUsage};
+use crate::memory::{HybridSearchConfig, MemoryStore};
+use crate::memory_cache::MemoryCache;
 
 use crate::task::{
-    Checkpoint, CheckpointStatus, McpToolResult, Plan, PlanStatus, Step, StepStatus, MemoryEntry,
+    Checkpoint, CheckpointStatus, McpToolResult, MemoryEntry, Plan, PlanStatus, Step, StepStatus,
 };
 
 use crate::safety::SafetyContext;
 
-/// Result of running a single step.
+/// Result of running a single step in a plan.
+///
+/// This enum captures all possible outcomes of executing a plan step,
+/// allowing the caller to decide how to proceed.
 #[derive(Debug)]
 pub enum StepOutcome {
-    /// Step executed successfully; continue to next.
+    /// Step executed successfully; continue to the next step.
     Advanced,
-    /// Plan is fully finished.
+    /// Plan is fully finished and complete.
     Finished,
-    /// Agent is waiting for human input.
+    /// Agent is waiting for human input before proceeding.
     WaitingForInput(String),
     /// Tool call requires user approval before execution.
-    /// Bridge should call store_pending_plan then break the loop.
+    ///
+    /// The bridge should call `store_pending_plan` then break the loop,
+    /// allowing the user to review and approve the operation.
     RequiresApproval {
+        /// Name of the tool requiring approval
         tool_name: String,
+        /// Parameters for the tool call
         params: serde_json::Value,
+        /// Index of the step in the plan
         step_index: usize,
     },
     /// Step failed (fatal for the plan).
+    ///
+    /// Contains the error message describing the failure.
     Failed(String),
 }
 
@@ -42,8 +104,22 @@ pub enum StepOutcome {
 // Tool executor trait — allows plugging in different tool backends
 // ---------------------------------------------------------------------------
 
+/// Trait for executing tools in the agent system.
+///
+/// Implement this trait to provide custom tool execution behavior.
+/// The default implementation supports parallel execution of multiple tools.
 #[async_trait::async_trait]
 pub trait ToolExecutor: Send + Sync {
+    /// Execute a single tool with the given parameters.
+    ///
+    /// # Arguments
+    ///
+    /// * `tool_name` - Name of the tool to execute
+    /// * `params` - JSON parameters for the tool
+    ///
+    /// # Returns
+    ///
+    /// Returns `AgentResult<McpToolResult>` with the tool execution result.
     async fn execute_tool(
         &self,
         tool_name: &str,
@@ -51,23 +127,32 @@ pub trait ToolExecutor: Send + Sync {
     ) -> AgentResult<McpToolResult>;
 
     /// Execute multiple tools in parallel.
-    /// Returns a vector of results in the same order as the input.
+    ///
+    /// Returns a vector of results in the same order as the input tool calls.
+    ///
+    /// # Arguments
+    ///
+    /// * `tool_calls` - Vector of (tool_name, params) pairs to execute
+    ///
+    /// # Returns
+    ///
+    /// Vector of results corresponding to each tool call.
     async fn execute_tools_parallel(
         &self,
         tool_calls: Vec<(String, serde_json::Value)>,
     ) -> Vec<AgentResult<McpToolResult>> {
         // Use Arc to share string references across async tasks
-        let tool_calls: Vec<_> = tool_calls.into_iter()
+        let tool_calls: Vec<_> = tool_calls
+            .into_iter()
             .map(|(name, params)| (Arc::new(name), params))
             .collect();
 
         // Spawn all tasks concurrently
-        let tasks: Vec<_> = tool_calls.into_iter()
+        let tasks: Vec<_> = tool_calls
+            .into_iter()
             .map(|(name, params)| {
                 let executor = self as &Self;
-                async move {
-                    executor.execute_tool(&name, params).await
-                }
+                async move { executor.execute_tool(&name, params).await }
             })
             .collect();
 
@@ -76,7 +161,11 @@ pub trait ToolExecutor: Send + Sync {
     }
 }
 
-/// Dummy tool executor for testing — echoes back the params as result.
+/// Dummy tool executor for testing and development.
+///
+/// Echoes back the tool name and parameters as the result.
+/// Useful for testing plan execution without requiring real tool implementations.
+#[derive(Debug, Default)]
 pub struct DummyToolExecutor;
 
 #[async_trait::async_trait]
@@ -99,6 +188,14 @@ impl ToolExecutor for DummyToolExecutor {
 // Agent
 // ---------------------------------------------------------------------------
 
+/// Core agent struct that orchestrates task execution, memory operations, and tool usage.
+///
+/// The Agent is the central component of the rupoo system, responsible for:
+/// - Executing step-by-step plans with checkpoint-based recovery
+/// - Managing memory (storing and retrieving memories)
+/// - Executing tools with safety checks
+/// - Running chat conversations with memory integration
+/// - Handling plan caching and crash recovery
 pub struct Agent {
     repo: Arc<TaskRepo>,
     memory_cache: std::sync::Arc<MemoryCache>,
@@ -122,12 +219,124 @@ pub struct Agent {
     cancelled: std::sync::atomic::AtomicBool,
     /// Shared HTTP client for connection pooling (reqwest, tools, LLM providers).
     pub http_client: std::sync::Arc<reqwest::Client>,
+    /// Plan cache for storing and reusing generated plans
+    plan_cache: std::sync::Arc<PlanCache>,
+}
+
+// ---------------------------------------------------------------------------
+// Plan Cache - LRU cache for storing generated plans
+// ---------------------------------------------------------------------------
+
+use lru::LruCache;
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
+
+/// Cache entry for a generated plan
+#[derive(Debug, Clone)]
+pub struct CachedPlan {
+    pub steps: Vec<crate::llm::StepSpec>,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub task_hash: String,
+}
+
+/// Plan cache configuration
+#[derive(Debug, Clone)]
+pub struct PlanCacheConfig {
+    pub capacity: usize,
+    pub ttl_seconds: u64,
+}
+
+impl Default for PlanCacheConfig {
+    fn default() -> Self {
+        Self {
+            capacity: 100,
+            ttl_seconds: 3600, // 1 hour default TTL
+        }
+    }
+}
+
+/// Thread-safe LRU cache for storing generated plans
+pub struct PlanCache {
+    cache: std::sync::RwLock<LruCache<String, CachedPlan>>,
+    config: PlanCacheConfig,
+}
+
+impl PlanCache {
+    pub fn new(config: PlanCacheConfig) -> Self {
+        Self {
+            cache: std::sync::RwLock::new(LruCache::new(
+                std::num::NonZeroUsize::new(config.capacity).unwrap_or(std::num::NonZeroUsize::MIN),
+            )),
+            config,
+        }
+    }
+
+    /// Generate a cache key from task input using simple hashing
+    fn generate_key(task: &str, context: Option<&str>) -> String {
+        let mut hasher = DefaultHasher::new();
+        task.hash(&mut hasher);
+        if let Some(ctx) = context {
+            ctx.hash(&mut hasher);
+        }
+        let hash = hasher.finish();
+        format!("{:016x}", hash)
+    }
+
+    /// Check if a plan exists in cache and is valid
+    pub fn get(&self, task: &str, context: Option<&str>) -> Option<Vec<crate::llm::StepSpec>> {
+        let key = Self::generate_key(task, context);
+        let mut cache = self.cache.write().ok()?;
+
+        if let Some(cached) = cache.get(&key) {
+            // Check TTL
+            let now = chrono::Utc::now();
+            let age = now.signed_duration_since(cached.created_at).num_seconds() as u64;
+            if age < self.config.ttl_seconds {
+                debug!(key = %key, age_secs = age, "plan cache hit");
+                return Some(cached.steps.clone());
+            } else {
+                debug!(key = %key, age_secs = age, "plan cache expired");
+            }
+        }
+        None
+    }
+
+    /// Store a plan in cache
+    pub fn put(&self, task: &str, context: Option<&str>, steps: Vec<crate::llm::StepSpec>) {
+        let key = Self::generate_key(task, context);
+        let entry = CachedPlan {
+            steps,
+            created_at: chrono::Utc::now(),
+            task_hash: key.clone(),
+        };
+
+        if let Ok(mut cache) = self.cache.write() {
+            cache.put(key, entry);
+            debug!("plan cached");
+        }
+    }
+
+    /// Clear the entire cache
+    pub fn clear(&self) {
+        if let Ok(mut cache) = self.cache.write() {
+            cache.clear();
+            info!("plan cache cleared");
+        }
+    }
+
+    /// Get cache statistics
+    pub fn stats(&self) -> (usize, usize) {
+        let cache = self.cache.read().ok();
+        let len = cache.as_ref().map(|c| c.len()).unwrap_or(0);
+        (len, self.config.capacity)
+    }
 }
 
 impl Agent {
     pub fn new(repo: Arc<TaskRepo>, tool_executor: Box<dyn ToolExecutor>) -> Self {
         let memory_cache = std::sync::Arc::new(MemoryCache::new(Arc::clone(&repo), 64));
         let memory_store = std::sync::Arc::new(MemoryStore::new(Arc::clone(&repo)));
+        let plan_cache = std::sync::Arc::new(PlanCache::new(PlanCacheConfig::default()));
         Self {
             repo,
             memory_cache,
@@ -142,6 +351,7 @@ impl Agent {
             last_usage: std::sync::Mutex::new(None),
             cancelled: std::sync::atomic::AtomicBool::new(false),
             http_client: crate::http_client::HTTP_CLIENT.clone(),
+            plan_cache,
         }
     }
 
@@ -153,7 +363,8 @@ impl Agent {
     /// Request cancellation of the currently running plan.
     /// The agent will abort at the next step boundary.
     pub fn request_cancel(&self) {
-        self.cancelled.store(true, std::sync::atomic::Ordering::SeqCst);
+        self.cancelled
+            .store(true, std::sync::atomic::Ordering::SeqCst);
     }
 
     /// Check whether cancellation has been requested.
@@ -163,7 +374,8 @@ impl Agent {
 
     /// Reset the cancellation flag (e.g., before starting a new plan).
     pub fn reset_cancel(&self) {
-        self.cancelled.store(false, std::sync::atomic::Ordering::SeqCst);
+        self.cancelled
+            .store(false, std::sync::atomic::Ordering::SeqCst);
     }
 
     /// Return a reference to the tool executor (used by AgentUiBridge for
@@ -190,13 +402,45 @@ impl Agent {
     }
 
     // ------------------------------------------------------------------
+    // Plan Cache Management
+    // ------------------------------------------------------------------
+
+    /// Get a cached plan for the given task.
+    pub fn get_cached_plan(
+        &self,
+        task: &str,
+        context: Option<&str>,
+    ) -> Option<Vec<crate::llm::StepSpec>> {
+        self.plan_cache.get(task, context)
+    }
+
+    /// Store a plan in cache.
+    pub fn cache_plan(&self, task: &str, context: Option<&str>, steps: Vec<crate::llm::StepSpec>) {
+        self.plan_cache.put(task, context, steps);
+    }
+
+    /// Clear the plan cache.
+    pub fn clear_plan_cache(&self) {
+        self.plan_cache.clear();
+    }
+
+    /// Get plan cache statistics.
+    pub fn plan_cache_stats(&self) -> (usize, usize) {
+        self.plan_cache.stats()
+    }
+
+    // ------------------------------------------------------------------
     // Memory Management
     // ------------------------------------------------------------------
 
     /// Enable or disable memory feature.
     pub fn set_memory_enabled(&self, enabled: bool) {
         self.memory_enabled.store(enabled, Ordering::SeqCst);
-        info!(enabled = enabled, "memory feature {}", if enabled { "enabled" } else { "disabled" });
+        info!(
+            enabled = enabled,
+            "memory feature {}",
+            if enabled { "enabled" } else { "disabled" }
+        );
     }
 
     /// Check if memory feature is enabled.
@@ -207,7 +451,11 @@ impl Agent {
     /// Enable or disable hybrid search (deep search) feature.
     pub fn set_hybrid_search_enabled(&self, enabled: bool) {
         self.hybrid_search_enabled.store(enabled, Ordering::SeqCst);
-        info!(enabled = enabled, "hybrid search (deep search) feature {}", if enabled { "enabled" } else { "disabled" });
+        info!(
+            enabled = enabled,
+            "hybrid search (deep search) feature {}",
+            if enabled { "enabled" } else { "disabled" }
+        );
     }
 
     /// Check if hybrid search (deep search) feature is enabled.
@@ -241,11 +489,19 @@ impl Agent {
     }
 
     /// Store a memory with explicit source.
-    pub async fn remember_from(&self, content: &str, tags: &[&str], source: &str) -> AgentResult<String> {
+    pub async fn remember_from(
+        &self,
+        content: &str,
+        tags: &[&str],
+        source: &str,
+    ) -> AgentResult<String> {
         if !self.is_memory_enabled() {
             return Err(AgentError::MemoryDisabled);
         }
-        let id = self.memory_store.remember_from(content, tags, source).await?;
+        let id = self
+            .memory_store
+            .remember_from(content, tags, source)
+            .await?;
         self.memory_cache.invalidate().await;
         Ok(id)
     }
@@ -283,7 +539,9 @@ impl Agent {
         model: Option<&str>,
         repo: &TaskRepo,
     ) -> AgentResult<String> {
-        let api_key = repo.get_setting(&format!("api_key.{}", provider)).await
+        let api_key = repo
+            .get_setting(&format!("api_key.{}", provider))
+            .await
             .map_err(|e| AgentError::Config(format!("DB error: {}", e)))?
             .ok_or_else(|| AgentError::Config(format!("No API key for '{}'", provider)))?;
 
@@ -291,7 +549,12 @@ impl Agent {
             "anthropic" => crate::llm::LlmProvider::Anthropic,
             "openai" | "deepseek" => crate::llm::LlmProvider::OpenAI,
             "ollama" => crate::llm::LlmProvider::Ollama,
-            _ => return Err(AgentError::Config(format!("Unknown provider: '{}'", provider))),
+            _ => {
+                return Err(AgentError::Config(format!(
+                    "Unknown provider: '{}'",
+                    provider
+                )))
+            }
         };
 
         let mut cfg = crate::llm::LlmConfig::new(llm_provider, Some(api_key));
@@ -312,11 +575,8 @@ impl Agent {
         let model_label = cfg.model.clone();
 
         let jail_root = self.safety_ctx.jail_root().map(|p| p.to_path_buf());
-        let gateway = crate::llm::LlmGateway::with_http_client(
-            cfg,
-            jail_root,
-            self.http_client.clone(),
-        );
+        let gateway =
+            crate::llm::LlmGateway::with_http_client(cfg, jail_root, self.http_client.clone());
 
         self.llm_gateway = Some(gateway);
         self.cached_system_prompt = std::cell::RefCell::new(None); // invalidate cache on model switch
@@ -357,8 +617,9 @@ impl Agent {
         F: FnMut(AgentEvent) + Send,
     {
         // Check if LLM is configured
-        let gateway = self.llm_gateway.as_ref()
-            .ok_or_else(|| AgentError::Config("LLM not configured. Set api_key and provider first.".into()))?;
+        let gateway = self.llm_gateway.as_ref().ok_or_else(|| {
+            AgentError::Config("LLM not configured. Set api_key and provider first.".into())
+        })?;
 
         // Search memories for context
         let memory_context = self
@@ -378,19 +639,29 @@ impl Agent {
         let context_ref = memory_context.as_deref();
 
         // Check for DB-stored system prompt override
-        let custom_preamble = self.repo.get_setting("system_prompt").await
-            .ok()
-            .flatten();
+        let custom_preamble = self.repo.get_setting("system_prompt").await.ok().flatten();
 
         // Run the agent loop
         let (response, usage) = gateway
-            .chat_agent_loop(user_message, history, max_turns, safe_mode, context_ref, on_event, custom_preamble.as_deref(), intent)
+            .chat_agent_loop(
+                user_message,
+                history,
+                max_turns,
+                safe_mode,
+                context_ref,
+                on_event,
+                custom_preamble.as_deref(),
+                intent,
+            )
             .await?;
 
         // Store conversation memory after successful chat
         if self.is_memory_enabled() {
             let memory_content = format!("User: {}\nAssistant: {}", user_message, response);
-            match self.remember(&memory_content, &["chat", "conversation"]).await {
+            match self
+                .remember(&memory_content, &["chat", "conversation"])
+                .await
+            {
                 Ok(id) => {
                     info!(memory_id = %id, "conversation memory stored successfully");
                 }
@@ -445,14 +716,24 @@ impl Agent {
         );
 
         // Store the response in the step
-        if let Some(Step::WaitForInput { ref mut response, ref mut status, .. }) = plan.steps.get_mut(step_index) {
+        if let Some(Step::WaitForInput {
+            ref mut response,
+            ref mut status,
+            ..
+        }) = plan.steps.get_mut(step_index)
+        {
             *response = Some(input.to_string());
             *status = StepStatus::Completed;
         }
 
         // Atomically commit checkpoint + plan update
         self.repo
-            .record_step_completion(&pid, step_index, StepStatus::Completed, Some(input.to_string()))
+            .record_step_completion(
+                &pid,
+                step_index,
+                StepStatus::Completed,
+                Some(input.to_string()),
+            )
             .await?;
 
         plan.status = PlanStatus::Running;
@@ -565,21 +846,50 @@ impl Agent {
             Step::Think { instruction, .. } => {
                 self.exec_think(plan, step_index, &instruction).await
             }
-            Step::ToolCall { tool_name, params, .. } => {
-                self.exec_tool_call(plan, step_index, &tool_name, &params).await
+            Step::ToolCall {
+                tool_name, params, ..
+            } => {
+                self.exec_tool_call(plan, step_index, &tool_name, &params)
+                    .await
             }
             Step::WaitForInput { prompt, .. } => {
                 self.exec_wait_for_input(plan, step_index, &prompt).await
             }
             Step::Finish { summary, .. } => self.exec_finish(plan, step_index, &summary).await,
-            Step::Exec { command, args, timeout_secs, .. } => {
-                self.exec_command(plan, step_index, &command, &args, timeout_secs).await
+            Step::Exec {
+                command,
+                args,
+                timeout_secs,
+                ..
+            } => {
+                self.exec_command(plan, step_index, &command, &args, timeout_secs)
+                    .await
             }
-            Step::HttpRequest { url, method, body, headers, .. } => {
-                self.exec_http_req(plan, step_index, &url, &method, body.as_deref(), headers.as_ref()).await
+            Step::HttpRequest {
+                url,
+                method,
+                body,
+                headers,
+                ..
+            } => {
+                self.exec_http_req(
+                    plan,
+                    step_index,
+                    &url,
+                    &method,
+                    body.as_deref(),
+                    headers.as_ref(),
+                )
+                .await
             }
-            Step::BrowserAction { action, url, timeout_secs, .. } => {
-                self.exec_browser(plan, step_index, &action, url.as_deref(), timeout_secs).await
+            Step::BrowserAction {
+                action,
+                url,
+                timeout_secs,
+                ..
+            } => {
+                self.exec_browser(plan, step_index, &action, url.as_deref(), timeout_secs)
+                    .await
             }
         }
     }
@@ -588,63 +898,63 @@ impl Agent {
     // Step executors
     // ------------------------------------------------------------------
 
-// ---------------------------------------------------------------------------
-// System prompt loading: file → fallback → hardcoded default
-// ---------------------------------------------------------------------------
+    // ---------------------------------------------------------------------------
+    // System prompt loading: file → fallback → hardcoded default
+    // ---------------------------------------------------------------------------
 
-/// Build the system prompt for LLM reasoning.
-///
-/// Load order:
-/// 1. `~/.rupoo/prompt.toml` — per-user customization
-/// 2. `~/.rupoo/prompt.default.toml` — shipped defaults
-/// 3. Compiled-in `prompt.default.toml` via `include_str!` — always in sync, no drift
-fn build_system_prompt() -> String {
-    let paths = [
-        // User config in home directory
-        std::env::var("HOME")
-            .ok()
-            .map(|h| PathBuf::from(h).join(".rupoo").join("prompt.toml")),
-        // Shipped default (~/.rupoo/prompt.default.toml)
-        std::env::var("HOME")
-            .ok()
-            .map(|h| PathBuf::from(h).join(".rupoo").join("prompt.default.toml")),
-    ];
+    /// Build the system prompt for LLM reasoning.
+    ///
+    /// Load order:
+    /// 1. `~/.rupoo/prompt.toml` — per-user customization
+    /// 2. `~/.rupoo/prompt.default.toml` — shipped defaults
+    /// 3. Compiled-in `prompt.default.toml` via `include_str!` — always in sync, no drift
+    fn build_system_prompt() -> String {
+        let paths = [
+            // User config in home directory
+            std::env::var("HOME")
+                .ok()
+                .map(|h| PathBuf::from(h).join(".rupoo").join("prompt.toml")),
+            // Shipped default (~/.rupoo/prompt.default.toml)
+            std::env::var("HOME")
+                .ok()
+                .map(|h| PathBuf::from(h).join(".rupoo").join("prompt.default.toml")),
+        ];
 
-    for path in paths.into_iter().flatten() {
-        if path.exists() {
-            if let Ok(content) = fs::read_to_string(&path) {
-                if let Ok(config) = content.parse::<toml::Value>() {
-                    if let Some(template) = config
-                        .get("system_prompt")
-                        .and_then(|v| v.get("template"))
-                        .and_then(|v| v.as_str())
-                    {
-                        return template.to_string();
+        for path in paths.into_iter().flatten() {
+            if path.exists() {
+                if let Ok(content) = fs::read_to_string(&path) {
+                    if let Ok(config) = content.parse::<toml::Value>() {
+                        if let Some(template) = config
+                            .get("system_prompt")
+                            .and_then(|v| v.get("template"))
+                            .and_then(|v| v.as_str())
+                        {
+                            return template.to_string();
+                        }
                     }
                 }
             }
         }
-    }
 
-    // Fallback: compiled-in prompt.default.toml — always in sync with the file, no hardcoded drift
-    const DEFAULT_PROMPT_TOML: &str = include_str!("../prompt.default.toml");
-    if let Ok(config) = DEFAULT_PROMPT_TOML.parse::<toml::Value>() {
-        if let Some(template) = config
-            .get("system_prompt")
-            .and_then(|v| v.get("template"))
-            .and_then(|v| v.as_str())
-        {
-            return template.to_string();
+        // Fallback: compiled-in prompt.default.toml — always in sync with the file, no hardcoded drift
+        const DEFAULT_PROMPT_TOML: &str = include_str!("../prompt.default.toml");
+        if let Ok(config) = DEFAULT_PROMPT_TOML.parse::<toml::Value>() {
+            if let Some(template) = config
+                .get("system_prompt")
+                .and_then(|v| v.get("template"))
+                .and_then(|v| v.as_str())
+            {
+                return template.to_string();
+            }
         }
+
+        // Absolute last resort (should never happen if prompt.default.toml is valid)
+        "You are Rupoo, an AI-powered terminal assistant.".to_string()
     }
 
-    // Absolute last resort (should never happen if prompt.default.toml is valid)
-    "You are Rupoo, an AI-powered terminal assistant.".to_string()
-}
-
-// ---------------------------------------------------------------------------
-// Think step with streaming support for Plan Mode
-// ---------------------------------------------------------------------------
+    // ---------------------------------------------------------------------------
+    // Think step with streaming support for Plan Mode
+    // ---------------------------------------------------------------------------
 
     async fn exec_think(
         &self,
@@ -676,9 +986,10 @@ fn build_system_prompt() -> String {
                 if cache.is_none() {
                     *cache = Some(Self::build_system_prompt());
                 }
-                cache.as_ref().cloned().ok_or_else(|| {
-                    AgentError::Other("failed to build system prompt".to_string())
-                })?
+                cache
+                    .as_ref()
+                    .cloned()
+                    .ok_or_else(|| AgentError::Other("failed to build system prompt".to_string()))?
             };
 
             if !memory_context.is_empty() {
@@ -692,7 +1003,7 @@ fn build_system_prompt() -> String {
 
             let messages = vec![
                 LlmChatMessage::system(&system),
-                LlmChatMessage::user(&instruction.to_string()),
+                LlmChatMessage::user(instruction),
             ];
             match gateway.chat(&messages).await {
                 Ok((response, usage)) => {
@@ -755,12 +1066,16 @@ fn build_system_prompt() -> String {
         self.heartbeat(&pid, step_index).await?;
 
         // Execute via tool executor
-        let result = self.tool_executor.execute_tool(tool_name, params.clone()).await;
+        let result = self
+            .tool_executor
+            .execute_tool(tool_name, params.clone())
+            .await;
 
         match result {
             Ok(mcp_result) => {
                 // Record result in step
-                if let Some(Step::ToolCall { ref mut result, .. }) = plan.steps.get_mut(step_index) {
+                if let Some(Step::ToolCall { ref mut result, .. }) = plan.steps.get_mut(step_index)
+                {
                     *result = Some(serde_json::json!({
                         "success": mcp_result.is_success(),
                         "content": mcp_result.content(),
@@ -830,18 +1145,25 @@ fn build_system_prompt() -> String {
         Fut: std::future::Future<Output = AgentResult<String>>,
     {
         let pid = plan.id.clone();
-        self.repo.update_step_progress(&pid, step_index, StepStatus::Running).await?;
+        self.repo
+            .update_step_progress(&pid, step_index, StepStatus::Running)
+            .await?;
         self.heartbeat(&pid, step_index).await?;
 
+        // Execute the operation once
         let result = execute().await;
         let (output, outcome) = match result {
             Ok(out) => (Some(out), StepOutcome::Advanced),
             Err(e) => {
-                warn!(%e, "{} failed", step_label);
-                (Some(format!("error: {e}")), StepOutcome::Failed(e.to_string()))
+                warn!(tool = step_label, error = %e, "operation failed");
+                (
+                    Some(format!("error: {}", e)),
+                    StepOutcome::Failed(e.to_string()),
+                )
             }
         };
 
+        // Update step status
         if let Some(step) = plan.steps.get_mut(step_index) {
             let step_status = match outcome {
                 StepOutcome::Advanced => StepStatus::Completed,
@@ -861,6 +1183,70 @@ fn build_system_prompt() -> String {
         plan.current_step_index = step_index + 1;
         plan.updated_at = chrono::Utc::now();
         Ok(outcome)
+    }
+
+    // ------------------------------------------------------------------
+    // Tool execution with retry support
+    // ------------------------------------------------------------------
+
+    /// Execute a tool with intelligent retry mechanism.
+    /// Returns the result and retry count.
+    pub async fn execute_tool_with_retry(
+        &self,
+        tool_name: &str,
+        params: serde_json::Value,
+        max_retries: usize,
+    ) -> (AgentResult<McpToolResult>, usize) {
+        let mut attempt = 0;
+        let mut last_error = None;
+
+        while attempt <= max_retries {
+            match self
+                .tool_executor
+                .execute_tool(tool_name, params.clone())
+                .await
+            {
+                Ok(result) => {
+                    if attempt > 0 {
+                        info!(
+                            tool = tool_name,
+                            attempt = attempt + 1,
+                            "tool succeeded after retry"
+                        );
+                    }
+                    return (Ok(result), attempt);
+                }
+                Err(e) => {
+                    if e.is_retryable() && attempt < max_retries {
+                        attempt += 1;
+                        let delay_ms = 1000u64 * (2_u64.pow(attempt as u32));
+                        warn!(
+                            tool = tool_name,
+                            attempt = attempt,
+                            max_retries = max_retries,
+                            delay_ms = delay_ms,
+                            error = %e,
+                            "retrying after transient error"
+                        );
+                        tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+                        last_error = Some(e);
+                    } else {
+                        warn!(
+                            tool = tool_name,
+                            total_attempts = attempt + 1,
+                            error = %e,
+                            "tool failed after all retries"
+                        );
+                        return (Err(e), attempt);
+                    }
+                }
+            }
+        }
+
+        (
+            Err(last_error.unwrap_or_else(|| AgentError::Other("max retries exceeded".to_string()))),
+            attempt,
+        )
     }
 
     async fn exec_command(
@@ -890,14 +1276,21 @@ fn build_system_prompt() -> String {
             step_index,
             "exec_command",
             || async move {
-                crate::tools::terminal::execute_command(&command_owned, &args_owned, timeout, &safety).await
+                crate::tools::terminal::execute_command(
+                    &command_owned,
+                    &args_owned,
+                    timeout,
+                    &safety,
+                )
+                .await
             },
             |step, result| {
                 if let Step::Exec { ref mut output, .. } = step {
                     *output = result;
                 }
             },
-        ).await
+        )
+        .await
     }
 
     async fn exec_http_req(
@@ -924,14 +1317,19 @@ fn build_system_prompt() -> String {
                     &method_owned,
                     body_owned.as_deref(),
                     headers_owned.as_ref(),
-                ).await
+                )
+                .await
             },
             |step, result| {
-                if let Step::HttpRequest { ref mut response, .. } = step {
+                if let Step::HttpRequest {
+                    ref mut response, ..
+                } = step
+                {
                     *response = result;
                 }
             },
-        ).await
+        )
+        .await
     }
 
     async fn exec_browser(
@@ -957,14 +1355,16 @@ fn build_system_prompt() -> String {
                     url_owned.as_deref(),
                     timeout,
                     &safety,
-                ).await
+                )
+                .await
             },
             |step, result| {
                 if let Step::BrowserAction { ref mut output, .. } = step {
                     *output = result;
                 }
             },
-        ).await
+        )
+        .await
     }
 
     async fn exec_wait_for_input(
@@ -1027,9 +1427,8 @@ fn build_system_prompt() -> String {
             let pid = pid.clone();
             tokio::spawn(async move {
                 if let Err(e) = async {
-                    let manager = crate::skill::SkillManager::new(
-                        crate::skill::SkillManager::default_dir(),
-                    );
+                    let manager =
+                        crate::skill::SkillManager::new(crate::skill::SkillManager::default_dir());
                     let skill_name = format!("auto-{}", pid.split('-').next().unwrap_or("plan"));
                     let skill = crate::skill::SkillManager::plan_to_skill(
                         &plan_clone,
@@ -1052,7 +1451,9 @@ fn build_system_prompt() -> String {
                         }
                     }
                     Ok::<(), AgentError>(())
-                }.await {
+                }
+                .await
+                {
                     error!(error = %e, plan = %pid, "auto-learn skill task failed");
                 }
             });
@@ -1113,16 +1514,29 @@ mod tests {
 
         let mut plan = agent.resume(&id).await.unwrap().unwrap();
 
-        assert!(matches!(agent.run_next_step(&mut plan).await.unwrap(), StepOutcome::Advanced));
-        assert!(matches!(agent.run_next_step(&mut plan).await.unwrap(), StepOutcome::Advanced));
-        assert!(matches!(agent.run_next_step(&mut plan).await.unwrap(), StepOutcome::Finished));
+        assert!(matches!(
+            agent.run_next_step(&mut plan).await.unwrap(),
+            StepOutcome::Advanced
+        ));
+        assert!(matches!(
+            agent.run_next_step(&mut plan).await.unwrap(),
+            StepOutcome::Advanced
+        ));
+        assert!(matches!(
+            agent.run_next_step(&mut plan).await.unwrap(),
+            StepOutcome::Finished
+        ));
         assert!(plan.is_complete());
     }
 
     #[tokio::test]
     async fn test_wait_for_input_does_not_advance() {
         let (repo, agent) = setup();
-        let steps = vec![think_step("prepare"), wait_for_input_step("confirm?"), finish_step("done")];
+        let steps = vec![
+            think_step("prepare"),
+            wait_for_input_step("confirm?"),
+            finish_step("done"),
+        ];
         let plan = Plan::new("wait-test", steps);
         let id = plan.id.clone();
         repo.save_plan(&plan).await.unwrap();
@@ -1177,7 +1591,7 @@ mod tests {
         assert_eq!(plan.current_step_index, 1);
 
         // Verify the step stored the response
-        if let Some(Step::WaitForInput { response, .. }) = plan.steps.get(0) {
+        if let Some(Step::WaitForInput { response, .. }) = plan.steps.first() {
             assert_eq!(response.as_deref(), Some("Alice"));
         } else {
             panic!("expected WaitForInput step");

@@ -1,11 +1,11 @@
 //! REPL application state — stripped down for native terminal output.
 
-use std::sync::Arc;
 use crossbeam_channel::Sender;
-use rupoo::{AgentToTui, ChatMessage, PendingTool, TuiToAgent};
 use rupoo::db::TaskRepo;
 use rupoo::llm::ConversationHistory;
 use rupoo::task::Plan;
+use rupoo::{AgentToTui, ChatMessage, PendingTool, TuiToAgent};
+use std::sync::Arc;
 
 // ---------------------------------------------------------------------------
 // Enums
@@ -62,7 +62,11 @@ pub struct CommandDef {
 
 impl CommandDef {
     pub fn new(name: &'static str, description: &'static str, category: &'static str) -> Self {
-        Self { name, description, category }
+        Self {
+            name,
+            description,
+            category,
+        }
     }
 }
 
@@ -120,13 +124,24 @@ impl RupooApp {
         let handle = self.rt_handle.clone();
         if let (Some(repo), Some(handle)) = (repo, handle) {
             let messages = self.messages.clone();
-            let messages_json = serde_json::to_string(&messages).unwrap_or_else(|_| "[]".to_string());
+            let messages_json =
+                serde_json::to_string(&messages).unwrap_or_else(|_| "[]".to_string());
             let sessions = self.sessions.clone();
-            let active_id = sessions.iter().find(|s| s.active).map(|s| s.id.clone()).unwrap_or_else(|| "default".to_string());
-            let active_label = sessions.iter().find(|s| s.active).map(|s| s.label.clone()).unwrap_or_else(|| "default".to_string());
+            let active_id = sessions
+                .iter()
+                .find(|s| s.active)
+                .map(|s| s.id.clone())
+                .unwrap_or_else(|| "default".to_string());
+            let active_label = sessions
+                .iter()
+                .find(|s| s.active)
+                .map(|s| s.label.clone())
+                .unwrap_or_else(|| "default".to_string());
             std::thread::spawn(move || {
                 handle.block_on(async {
-                    let _ = repo.save_ui_session(&active_id, &active_label, &messages_json, true).await;
+                    let _ = repo
+                        .save_ui_session(&active_id, &active_label, &messages_json, true)
+                        .await;
                 });
             });
         }
@@ -203,7 +218,11 @@ impl RupooApp {
         for s in &mut self.sessions {
             s.active = s.id == session_id;
         }
-        self.messages = self.session_messages.get(session_id).cloned().unwrap_or_default();
+        self.messages = self
+            .session_messages
+            .get(session_id)
+            .cloned()
+            .unwrap_or_default();
         self.persist_sessions();
     }
 
@@ -217,7 +236,8 @@ impl RupooApp {
 
     pub fn set_thinking(&mut self) {
         self.thinking = true;
-        self.cancel_flag.store(false, std::sync::atomic::Ordering::Relaxed);
+        self.cancel_flag
+            .store(false, std::sync::atomic::Ordering::Relaxed);
         if !self.stream_buffer.is_empty() {
             self.stream_buffer.clear();
         }
@@ -231,15 +251,20 @@ impl RupooApp {
             self.push_message(ChatMessage::assistant(partial));
             self.persist_sessions();
         }
-        self.cancel_flag.store(false, std::sync::atomic::Ordering::Relaxed);
+        self.cancel_flag
+            .store(false, std::sync::atomic::Ordering::Relaxed);
     }
 
     pub fn cancel_thinking(&mut self) {
-        self.cancel_flag.store(true, std::sync::atomic::Ordering::Relaxed);
+        self.cancel_flag
+            .store(true, std::sync::atomic::Ordering::Relaxed);
         if !self.stream_buffer.is_empty() {
             let partial = std::mem::take(&mut self.stream_buffer);
             if !partial.trim().is_empty() {
-                self.push_message(ChatMessage::system(format!("⚠ Interrupted (partial output):\n{}", partial)));
+                self.push_message(ChatMessage::system(format!(
+                    "⚠ Interrupted (partial output):\n{}",
+                    partial
+                )));
             }
         }
     }
@@ -262,7 +287,10 @@ impl RupooApp {
             }
             AgentToTui::Thinking => self.set_thinking(),
             AgentToTui::Idle => self.set_idle(),
-            AgentToTui::TokenUpdate { in_count, out_count } => {
+            AgentToTui::TokenUpdate {
+                in_count,
+                out_count,
+            } => {
                 self.token_in = self.token_in.saturating_add(in_count);
                 self.token_out = self.token_out.saturating_add(out_count);
             }
@@ -271,7 +299,11 @@ impl RupooApp {
                 self.stream_buffer.push_str(&text);
                 self.scroll_bottom = true;
             }
-            AgentToTui::LlmStatus { configured, provider, model_label } => {
+            AgentToTui::LlmStatus {
+                configured,
+                provider,
+                model_label,
+            } => {
                 self.llm_configured = configured;
                 self.llm_provider = provider.clone();
                 self.model_label = model_label.clone();
@@ -281,7 +313,11 @@ impl RupooApp {
                     "LLM not configured".to_string()
                 };
             }
-            AgentToTui::StepProgress { step_index, total, step_name } => {
+            AgentToTui::StepProgress {
+                step_index,
+                total,
+                step_name,
+            } => {
                 self.current_step_info = Some((step_index, total, step_name.clone()));
                 self.status = format!("Step {}/{}: {}", step_index + 1, total, step_name);
             }

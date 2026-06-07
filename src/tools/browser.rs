@@ -19,7 +19,7 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use tracing::{warn, info};
+use tracing::{info, warn};
 
 use crate::error::{AgentError, AgentResult};
 use crate::safety::SafetyContext;
@@ -41,9 +41,7 @@ fn find_browser() -> Option<PathBuf> {
         }
     }
     // Check common macOS path directly
-    let mac_path = PathBuf::from(
-        "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
-    );
+    let mac_path = PathBuf::from("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome");
     if mac_path.exists() {
         return Some(mac_path);
     }
@@ -60,28 +58,22 @@ pub async fn execute_browser_action(
     let timeout = timeout_secs.unwrap_or(30);
 
     // Find browser
-    let browser = safety
-        .browser_path
-        .as_ref()
-        .map_or_else(find_browser, |p| {
-            if p.exists() {
-                Some(p.clone())
-            } else {
-                find_browser()
-            }
-        });
+    let browser = safety.browser_path.as_ref().map_or_else(find_browser, |p| {
+        if p.exists() {
+            Some(p.clone())
+        } else {
+            find_browser()
+        }
+    });
 
     let browser_path = browser.ok_or_else(|| {
-        AgentError::Browser(
-            "No supported browser found (looked for Chrome/Chromium)".into(),
-        )
+        AgentError::Browser("No supported browser found (looked for Chrome/Chromium)".into())
     })?;
 
     match action {
         BrowserActionType::Navigate => {
-            let url_str = url.ok_or_else(|| {
-                AgentError::Browser("URL is required for Navigate action".into())
-            })?;
+            let url_str = url
+                .ok_or_else(|| AgentError::Browser("URL is required for Navigate action".into()))?;
 
             let output = run_browser_with_timeout(
                 &browser_path,
@@ -102,7 +94,10 @@ pub async fn execute_browser_action(
             } else {
                 output
             };
-            Ok(format!("Page source ({} chars):\n{}", output_len, truncated))
+            Ok(format!(
+                "Page source ({} chars):\n{}",
+                output_len, truncated
+            ))
         }
 
         BrowserActionType::Screenshot => {
@@ -150,9 +145,8 @@ pub async fn execute_browser_action(
 
         BrowserActionType::GetText => {
             // GetText: Load the page, dump DOM, then strip HTML tags for plain text
-            let url_str = url.ok_or_else(|| {
-                AgentError::Browser("URL is required for GetText action".into())
-            })?;
+            let url_str = url
+                .ok_or_else(|| AgentError::Browser("URL is required for GetText action".into()))?;
 
             let output = run_browser_with_timeout(
                 &browser_path,
@@ -169,20 +163,17 @@ pub async fn execute_browser_action(
 
             // Strip HTML tags to get plain text
             let plain_text = super::strip_html_tags(&output);
-            
+
             // Clean up extra whitespace and limit output
-            let cleaned: String = plain_text
-                .split_whitespace()
-                .collect::<Vec<_>>()
-                .join(" ");
-            
+            let cleaned: String = plain_text.split_whitespace().collect::<Vec<_>>().join(" ");
+
             let output_len = cleaned.len();
             let truncated = if output_len > 4000 {
                 format!("{}...\n[text truncated]", &cleaned[..4000])
             } else {
                 cleaned
             };
-            
+
             Ok(format!("Page text ({} chars):\n{}", output_len, truncated))
         }
 
@@ -190,9 +181,8 @@ pub async fn execute_browser_action(
             // Click in headless CLI mode: Use --virtual-time-budget to let JS execute
             // after page load, then dump the resulting DOM.
             // This is a best-effort approach for JS-heavy pages.
-            let url_str = url.ok_or_else(|| {
-                AgentError::Browser("URL is required for Click action".into())
-            })?;
+            let url_str =
+                url.ok_or_else(|| AgentError::Browser("URL is required for Click action".into()))?;
 
             let output = run_browser_with_timeout(
                 &browser_path,
@@ -214,13 +204,13 @@ pub async fn execute_browser_action(
             } else {
                 output
             };
-            
+
             info!(
                 action = "Click (JS execution)",
                 url = url_str,
                 "Page DOM after virtual-time-budget (3s JS execution)"
             );
-            
+
             Ok(format!(
                 "Clicked/navigated to '{}' and executed JS for 3 seconds.\nPage state ({} chars):\n{}",
                 url_str,
@@ -250,7 +240,7 @@ pub async fn execute_browser_action(
 
             // Parse all href links from the DOM
             let links = extract_links_from_html(&output);
-            
+
             if links.is_empty() {
                 Ok(format!("No links found on page: {}", url_str))
             } else {
@@ -266,7 +256,7 @@ pub async fn execute_browser_action(
                     })
                     .collect::<Vec<_>>()
                     .join("\n");
-                
+
                 Ok(format!(
                     "Found {} links on '{}':\n{}",
                     links.len(),
@@ -298,35 +288,36 @@ fn extract_links_from_html(html: &str) -> Vec<(String, String)> {
 
     while let Some(tag_start) = html[pos..].find("<a ") {
         pos += tag_start;
-        
+
         // Find the end of the opening tag
         if let Some(tag_end) = html[pos..].find('>') {
             let open_tag = &html[pos..pos + tag_end + 1];
             let after_open_tag = pos + tag_end + 1;
-            
+
             // Extract href attribute
             if let Some(href_start) = open_tag.find("href=\"") {
                 let href_pos = open_tag.len() - open_tag.len() + href_start + 6;
                 let href_end = open_tag[href_pos..].find('"').unwrap_or(usize::MAX);
                 let href = open_tag[href_pos..href_pos + href_end].to_string();
-                
+
                 // Extract link text (between </a> and start of next tag)
                 if let Some(close_pos) = html[after_open_tag..].find("</a>") {
-                    let link_text = super::strip_html_tags(&html[after_open_tag..after_open_tag + close_pos])
-                        .trim()
-                        .to_string();
-                    
+                    let link_text =
+                        super::strip_html_tags(&html[after_open_tag..after_open_tag + close_pos])
+                            .trim()
+                            .to_string();
+
                     if !href.is_empty() && !href.starts_with("javascript:") {
                         links.push((link_text, href));
                     }
                 }
             }
-            
+
             pos = after_open_tag;
         } else {
             pos += 1;
         }
-        
+
         // Safety limit
         if links.len() >= 100 {
             break;
@@ -368,7 +359,10 @@ async fn run_browser_with_timeout(
                 if !stdout.is_empty() {
                     Ok(stdout)
                 } else {
-                    Ok(format!("Browser exited with status: {}\n{}", output.status, stderr))
+                    Ok(format!(
+                        "Browser exited with status: {}\n{}",
+                        output.status, stderr
+                    ))
                 }
             }
         }

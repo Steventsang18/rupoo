@@ -75,16 +75,18 @@ impl TaskRepo {
         // Enable WAL mode for better concurrent read performance
         // Additional PRAGMA optimizations for better performance:
         // - synchronous=NORMAL: balances safety and performance
-        // - cache_size=10000: increase page cache (each page is ~4KB)
+        // - cache_size=64000: increase page cache to 64MB (each page is ~4KB)
         // - temp_store=MEMORY: use memory for temporary tables
         // - journal_size_limit=104857600: limit WAL file size to 100MB
+        // - mmap_size=30000000000: enable memory-mapped I/O for large databases
         conn.execute_batch(
             "PRAGMA journal_mode=WAL;
              PRAGMA busy_timeout=5000;
              PRAGMA synchronous=NORMAL;
-             PRAGMA cache_size=-10000;
+             PRAGMA cache_size=-64000;
              PRAGMA temp_store=MEMORY;
              PRAGMA journal_size_limit=104857600;
+             PRAGMA mmap_size=30000000000;
              PRAGMA foreign_keys=ON;",
         )?;
         conn.execute_batch(
@@ -146,6 +148,20 @@ impl TaskRepo {
                 content_id UNINDEXED,
                 tokenize='unicode61'
             );
+
+            -- Performance optimization: composite indexes
+            -- Note: FTS5 virtual tables cannot have additional indexes
+            -- Plans: index for status + created_at queries
+            CREATE INDEX IF NOT EXISTS idx_plans_status_created
+                ON plans(status, created_at DESC);
+
+            -- UI Sessions: index for active sessions + updated_at
+            CREATE INDEX IF NOT EXISTS idx_sessions_active
+                ON ui_sessions(is_active, updated_at DESC);
+
+            -- Conversation histories: index for updated_at
+            CREATE INDEX IF NOT EXISTS idx_conversations_updated
+                ON conversation_histories(updated_at DESC);
             ",
         )?;
         info!(db_path, "database initialized");
@@ -215,8 +231,10 @@ impl TaskRepo {
         tokio::task::spawn_blocking(move || {
             let read_conn = rusqlite::Connection::open_with_flags(
                 &db_path,
-                rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
-            ).map_err(|e| AgentError::Other(format!("failed to open read connection: {e}")))?;
+                rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY
+                    | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+            )
+            .map_err(|e| AgentError::Other(format!("failed to open read connection: {e}")))?;
             f(&read_conn)
         })
         .await

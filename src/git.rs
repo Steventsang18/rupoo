@@ -34,20 +34,13 @@ impl GitRepo {
     /// Get the current branch name.
     pub fn current_branch(&self) -> AgentResult<String> {
         match self.repo.head() {
-            Ok(head) => Ok(head
-                .shorthand()
-                .unwrap_or("(no branch)")
-                .to_string()),
+            Ok(head) => Ok(head.shorthand().unwrap_or("(no branch)").to_string()),
             Err(e) => {
                 // Unborn branch (no commits yet) or detached HEAD
                 // Try to read HEAD file directly for the branch name
-                if let Ok(content) = std::fs::read_to_string(
-                    self.repo.path().join("HEAD"),
-                ) {
+                if let Ok(content) = std::fs::read_to_string(self.repo.path().join("HEAD")) {
                     let trimmed = content.trim();
-                    if let Some(branch) = trimmed
-                        .strip_prefix("ref: refs/heads/")
-                    {
+                    if let Some(branch) = trimmed.strip_prefix("ref: refs/heads/") {
                         return Ok(branch.trim().to_string());
                     }
                 }
@@ -133,11 +126,7 @@ impl GitRepo {
     }
 
     /// Commit with a task ID reference in the message.
-    pub fn commit_with_task_ref(
-        &self,
-        message: &str,
-        task_id: &str,
-    ) -> AgentResult<String> {
+    pub fn commit_with_task_ref(&self, message: &str, task_id: &str) -> AgentResult<String> {
         let full_message = format!("[task:{task_id}] {message}");
         self.commit_all(&full_message)
     }
@@ -220,11 +209,17 @@ mod tests {
         // Non-zero flags must produce non-clean output
         let s = describe_status(git2::Status::INDEX_NEW);
         assert_ne!(s, "clean", "INDEX_NEW should not be clean");
-        assert!(s.contains("staged"), "INDEX_NEW should contain 'staged', got '{s}'");
+        assert!(
+            s.contains("staged"),
+            "INDEX_NEW should contain 'staged', got '{s}'"
+        );
 
         let s = describe_status(git2::Status::WT_MODIFIED);
         assert_ne!(s, "clean", "WT_MODIFIED should not be clean");
-        assert!(s.contains("modified"), "WT_MODIFIED should contain 'modified', got '{s}'");
+        assert!(
+            s.contains("modified"),
+            "WT_MODIFIED should contain 'modified', got '{s}'"
+        );
     }
 
     #[test]

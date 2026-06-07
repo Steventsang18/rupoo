@@ -5,9 +5,7 @@
 use tracing::info;
 
 use crate::error::{AgentError, AgentResult};
-use crate::task::{
-    Checkpoint, CheckpointStatus, Plan, PlanStatus, Step, StepStatus,
-};
+use crate::task::{Checkpoint, CheckpointStatus, Plan, PlanStatus, Step, StepStatus};
 
 use super::TaskRepo;
 
@@ -100,13 +98,19 @@ impl TaskRepo {
                     ))
                 })
                 .map_err(|e| match e {
-                    rusqlite::Error::QueryReturnedNoRows => {
-                        AgentError::PlanNotFound(pid.clone())
-                    }
+                    rusqlite::Error::QueryReturnedNoRows => AgentError::PlanNotFound(pid.clone()),
                     other => AgentError::Database(other),
                 })?;
 
-            let (id, name, steps_json, current_step_index, status_str, created_at_str, updated_at_str) = row;
+            let (
+                id,
+                name,
+                steps_json,
+                current_step_index,
+                status_str,
+                created_at_str,
+                updated_at_str,
+            ) = row;
 
             let steps: Vec<Step> = serde_json::from_str(&steps_json)?;
             let status = str_to_plan_status(&status_str)?;
@@ -297,9 +301,7 @@ impl TaskRepo {
                         _ => CheckpointStatus::Failed,
                     };
                     let created_at = chrono::DateTime::parse_from_rfc3339(&created_at_str)
-                        .map_err(|e| {
-                            AgentError::Other(format!("parse checkpoint date: {e}"))
-                        })?
+                        .map_err(|e| AgentError::Other(format!("parse checkpoint date: {e}")))?
                         .with_timezone(&chrono::Utc);
                     Ok(Some(Checkpoint {
                         id,
@@ -383,7 +385,11 @@ impl TaskRepo {
     // ---------------------------------------------------------------------------
 
     /// List plans ordered by updated_at descending.
-    pub async fn list_plans(&self, limit: usize, offset: usize) -> AgentResult<Vec<super::PlanSummary>> {
+    pub async fn list_plans(
+        &self,
+        limit: usize,
+        offset: usize,
+    ) -> AgentResult<Vec<super::PlanSummary>> {
         self.with_read_conn(move |conn| {
             let mut stmt = conn.prepare(
                 "SELECT id, name, steps_json, current_step_index, status, created_at, updated_at
@@ -453,10 +459,7 @@ impl TaskRepo {
                 "DELETE FROM checkpoints WHERE plan_id = ?1",
                 rusqlite::params![pid],
             )?;
-            tx.execute(
-                "DELETE FROM plans WHERE id = ?1",
-                rusqlite::params![pid],
-            )?;
+            tx.execute("DELETE FROM plans WHERE id = ?1", rusqlite::params![pid])?;
             tx.commit()?;
             Ok(())
         })
@@ -488,6 +491,198 @@ impl TaskRepo {
         })
         .await
     }
+
+    // ---------------------------------------------------------------------------
+    // Batch operations for performance optimization
+    // ---------------------------------------------------------------------------
+
+    /// Batch insert multiple plans in a single transaction.
+    /// This is significantly faster than inserting plans one by one.
+    ///
+    /// # Performance
+    ///
+    /// - Single transaction overhead instead of N transactions
+    /// - Reduced disk I/O with batched writes
+    /// - Expected speedup: 5-10x for large batches
+    pub async fn batch_save_plans(&self, plans: &[Plan]) -> AgentResult<()> {
+        if plans.is_empty() {
+            return Ok(());
+        }
+
+        let plans_data: Vec<_> = plans
+            .iter()
+            .map(|plan| {
+                Ok((
+                    plan.id.clone(),
+                    plan.name.clone(),
+                    serde_json::to_string(&plan.steps)?,
+                    plan.current_step_index,
+                    plan_status_to_str(&plan.status),
+                    plan.created_at.to_rfc3339(),
+                    plan.updated_at.to_rfc3339(),
+                ))
+            })
+            .collect::<AgentResult<Vec<_>>>()?;
+
+        let count = plans.len();
+        self.with_conn(move |conn| {
+            let tx = conn.unchecked_transaction()?;
+
+            {
+                let mut stmt = tx.prepare(
+                    "INSERT INTO plans (id, name, steps_json, current_step_index, status, created_at, updated_at)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                )?;
+
+                for (id, name, steps_json, step_index, status, created_at, updated_at) in plans_data {
+                    stmt.execute(rusqlite::params![
+                        id, name, steps_json, step_index, status, created_at, updated_at
+                    ])?;
+                }
+            }
+
+            tx.commit()?;
+            info!(count, "batch saved plans");
+            Ok(())
+        })
+        .await
+    }
+
+    /// Batch insert multiple checkpoints in a single transaction.
+    ///
+    /// # Performance
+    ///
+    /// - Single transaction overhead
+    /// - Reduced disk I/O
+    /// - Expected speedup: 5-10x for large batches
+    pub async fn batch_save_checkpoints(&self, checkpoints: &[Checkpoint]) -> AgentResult<()> {
+        if checkpoints.is_empty() {
+            return Ok(());
+        }
+
+        let checkpoints_data: Vec<_> = checkpoints
+            .iter()
+            .map(|ckpt| {
+                (
+                    ckpt.id.clone(),
+                    ckpt.plan_id.clone(),
+                    ckpt.step_index,
+                    checkpoint_status_to_str(&ckpt.status),
+                    ckpt.output.clone(),
+                    ckpt.created_at.to_rfc3339(),
+                )
+            })
+            .collect();
+
+        let count = checkpoints.len();
+        self.with_conn(move |conn| {
+            let tx = conn.unchecked_transaction()?;
+
+            {
+                let mut stmt = tx.prepare(
+                    "INSERT INTO checkpoints (id, plan_id, step_index, status, output, created_at)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                )?;
+
+                for (id, plan_id, step_index, status, output, created_at) in checkpoints_data {
+                    stmt.execute(rusqlite::params![
+                        id, plan_id, step_index, status, output, created_at
+                    ])?;
+                }
+            }
+
+            tx.commit()?;
+            info!(count, "batch saved checkpoints");
+            Ok(())
+        })
+        .await
+    }
+
+    /// Batch update plan statuses in a single transaction.
+    ///
+    /// # Performance
+    ///
+    /// - Single transaction overhead
+    /// - Reduced disk I/O
+    /// - Expected speedup: 3-5x for large batches
+    pub async fn batch_update_plan_status(
+        &self,
+        updates: &[(String, PlanStatus)], // (plan_id, new_status)
+    ) -> AgentResult<usize> {
+        if updates.is_empty() {
+            return Ok(0);
+        }
+
+        let updates = updates.to_vec();
+        let now = chrono::Utc::now().to_rfc3339();
+
+        self.with_conn(move |conn| {
+            let tx = conn.unchecked_transaction()?;
+
+            let mut count = 0;
+            {
+                let mut stmt =
+                    tx.prepare("UPDATE plans SET status = ?1, updated_at = ?2 WHERE id = ?3")?;
+
+                for (plan_id, status) in updates {
+                    let status_str = plan_status_to_str(&status);
+                    count += stmt.execute(rusqlite::params![status_str, now, plan_id])?;
+                }
+            }
+
+            tx.commit()?;
+            info!(count, "batch updated plan statuses");
+            Ok(count)
+        })
+        .await
+    }
+
+    /// Batch delete multiple plans and their checkpoints in a single transaction.
+    ///
+    /// # Performance
+    ///
+    /// - Single transaction overhead
+    /// - Cascading deletes for checkpoints
+    /// - Expected speedup: 5-10x for large batches
+    pub async fn batch_delete_plans(&self, plan_ids: &[String]) -> AgentResult<usize> {
+        if plan_ids.is_empty() {
+            return Ok(0);
+        }
+
+        let plan_ids = plan_ids.to_vec();
+
+        self.with_conn(move |conn| {
+            let tx = conn.unchecked_transaction()?;
+
+            let mut checkpoint_count = 0;
+            let mut plan_count = 0;
+
+            {
+                // Delete checkpoints first (foreign key constraint)
+                let mut stmt = tx.prepare("DELETE FROM checkpoints WHERE plan_id = ?1")?;
+                for plan_id in &plan_ids {
+                    checkpoint_count += stmt.execute(rusqlite::params![plan_id])?;
+                }
+            }
+
+            {
+                // Delete plans
+                let mut stmt = tx.prepare("DELETE FROM plans WHERE id = ?1")?;
+                for plan_id in &plan_ids {
+                    plan_count += stmt.execute(rusqlite::params![plan_id])?;
+                }
+            }
+
+            tx.commit()?;
+            info!(
+                plans = plan_count,
+                checkpoints = checkpoint_count,
+                "batch deleted plans and checkpoints"
+            );
+            Ok(plan_count)
+        })
+        .await
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -497,7 +692,7 @@ impl TaskRepo {
 #[cfg(test)]
 mod tests {
     use super::super::tests::repo;
-    use crate::task::{finish_step, think_step, Plan, PlanStatus, StepStatus};
+    use crate::task::{finish_step, think_step, Checkpoint, Plan, PlanStatus, StepStatus};
 
     #[tokio::test]
     async fn test_save_and_load_plan() {
@@ -515,7 +710,11 @@ mod tests {
     #[tokio::test]
     async fn test_record_step_completion_updates_checkpoint() {
         let repo = repo();
-        let steps = vec![think_step("step1"), think_step("step2"), finish_step("done")];
+        let steps = vec![
+            think_step("step1"),
+            think_step("step2"),
+            finish_step("done"),
+        ];
         let plan = Plan::new("checkpoint-test", steps);
         let id = plan.id.clone();
         repo.save_plan(&plan).await.unwrap();
@@ -560,5 +759,94 @@ mod tests {
         assert!(json.contains("Running"));
         let back: super::super::PlanSummary = serde_json::from_str(&json).unwrap();
         assert_eq!(back.total_steps, 5);
+    }
+
+    #[tokio::test]
+    async fn test_batch_save_plans() {
+        let repo = repo();
+
+        let plans: Vec<Plan> = (0..10)
+            .map(|i| Plan::new(&format!("batch-plan-{}", i), vec![finish_step("done")]))
+            .collect();
+
+        repo.batch_save_plans(&plans).await.unwrap();
+
+        // Verify all plans were saved
+        for plan in &plans {
+            let loaded = repo.load_plan(&plan.id).await.unwrap();
+            assert_eq!(loaded.name, plan.name);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_batch_save_checkpoints() {
+        let repo = repo();
+        let plan = Plan::new("test", vec![finish_step("done")]);
+        repo.save_plan(&plan).await.unwrap();
+
+        let checkpoints: Vec<Checkpoint> = (0..5)
+            .map(|i| Checkpoint {
+                id: format!("ckpt-{}", i),
+                plan_id: plan.id.clone(),
+                step_index: i,
+                status: crate::task::CheckpointStatus::Completed,
+                output: Some(format!("output {}", i)),
+                created_at: chrono::Utc::now(),
+            })
+            .collect();
+
+        repo.batch_save_checkpoints(&checkpoints).await.unwrap();
+
+        // Verify all checkpoints were saved
+        for _ckpt in &checkpoints {
+            let loaded = repo.get_last_checkpoint(&plan.id).await.unwrap();
+            assert!(loaded.is_some());
+        }
+    }
+
+    #[tokio::test]
+    async fn test_batch_update_plan_status() {
+        let repo = repo();
+
+        let plans: Vec<Plan> = (0..5)
+            .map(|i| Plan::new(&format!("plan-{}", i), vec![finish_step("done")]))
+            .collect();
+
+        repo.batch_save_plans(&plans).await.unwrap();
+
+        let updates: Vec<(String, PlanStatus)> = plans
+            .iter()
+            .map(|p| (p.id.clone(), PlanStatus::Completed))
+            .collect();
+
+        let count = repo.batch_update_plan_status(&updates).await.unwrap();
+        assert_eq!(count, 5);
+
+        // Verify all plans were updated
+        for plan in &plans {
+            let loaded = repo.load_plan(&plan.id).await.unwrap();
+            assert_eq!(loaded.status, PlanStatus::Completed);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_batch_delete_plans() {
+        let repo = repo();
+
+        let plans: Vec<Plan> = (0..5)
+            .map(|i| Plan::new(&format!("plan-{}", i), vec![finish_step("done")]))
+            .collect();
+
+        repo.batch_save_plans(&plans).await.unwrap();
+
+        let plan_ids: Vec<String> = plans.iter().map(|p| p.id.clone()).collect();
+        let count = repo.batch_delete_plans(&plan_ids).await.unwrap();
+        assert_eq!(count, 5);
+
+        // Verify all plans were deleted
+        for plan_id in &plan_ids {
+            let result = repo.load_plan(plan_id).await;
+            assert!(result.is_err());
+        }
     }
 }

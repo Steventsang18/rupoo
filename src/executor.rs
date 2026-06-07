@@ -70,7 +70,9 @@ pub async fn execute_plan(
                 println!("Prompt: {prompt}");
                 println!("==========================");
                 if input.is_some() {
-                    println!("Input was provided but the step type was not WaitForInput at resume time.");
+                    println!(
+                        "Input was provided but the step type was not WaitForInput at resume time."
+                    );
                 } else {
                     println!("The plan is paused. Re-run with `--input <text>` to provide input.");
                 }
@@ -108,28 +110,50 @@ fn print_plan_result(plan: &rupoo::task::Plan) {
         };
 
         let label = match step {
-            rupoo::task::Step::Think { instruction, output, .. } => {
-                format!("THINK: {instruction} | out: {}", output.as_deref().unwrap_or("-"))
+            rupoo::task::Step::Think {
+                instruction,
+                output,
+                ..
+            } => {
+                format!(
+                    "THINK: {instruction} | out: {}",
+                    output.as_deref().unwrap_or("-")
+                )
             }
-            rupoo::task::Step::ToolCall { tool_name, result, .. } => {
+            rupoo::task::Step::ToolCall {
+                tool_name, result, ..
+            } => {
                 let r = result
                     .as_ref()
                     .map(|v| v.to_string())
                     .unwrap_or_else(|| "-".to_string());
                 format!("TOOL: {tool_name} | result: {r}")
             }
-            rupoo::task::Step::WaitForInput { prompt, response, .. } => {
-                format!("WAIT: {prompt} | response: {}", response.as_deref().unwrap_or("(pending)"))
+            rupoo::task::Step::WaitForInput {
+                prompt, response, ..
+            } => {
+                format!(
+                    "WAIT: {prompt} | response: {}",
+                    response.as_deref().unwrap_or("(pending)")
+                )
             }
             rupoo::task::Step::Finish { summary, .. } => format!("FINISH: {summary}"),
-            rupoo::task::Step::Exec { command, output, .. } => {
-                format!("EXEC: {command} | out: {}", output.as_deref().unwrap_or("-"))
+            rupoo::task::Step::Exec {
+                command, output, ..
+            } => {
+                format!(
+                    "EXEC: {command} | out: {}",
+                    output.as_deref().unwrap_or("-")
+                )
             }
             rupoo::task::Step::HttpRequest { url, response, .. } => {
                 format!("HTTP: {url} | resp: {}", response.as_deref().unwrap_or("-"))
             }
             rupoo::task::Step::BrowserAction { action, output, .. } => {
-                format!("BROWSER: {action:?} | out: {}", output.as_deref().unwrap_or("-"))
+                format!(
+                    "BROWSER: {action:?} | out: {}",
+                    output.as_deref().unwrap_or("-")
+                )
             }
         };
         println!("  {status_mark} [{i}] {label}");

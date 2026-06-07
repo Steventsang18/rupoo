@@ -12,7 +12,12 @@ struct CheckResult {
 
 impl CheckResult {
     fn new(name: &'static str, passed: bool, message: Option<String>, fixable: bool) -> Self {
-        Self { name, passed, message, fixable }
+        Self {
+            name,
+            passed,
+            message,
+            fixable,
+        }
     }
 }
 
@@ -66,18 +71,28 @@ pub async fn output(show_hint: bool) -> Result<String> {
 
     writeln!(out, "{}", style("─".repeat(50)).dim())?;
     let (pass, warn, fail) = status_summary(&results);
-    writeln!(out, "{} {}  {} {}  {} {}",
+    writeln!(
+        out,
+        "{} {}  {} {}  {} {}",
         style("●").green(),
         style(format!("{pass} passed")).green(),
         style("●").yellow(),
         style(format!("{warn} warnings")).yellow(),
-        if fail == 0 { style("●").green() } else { style("✗").red() },
+        if fail == 0 {
+            style("●").green()
+        } else {
+            style("✗").red()
+        },
         style(format!("{fail} errors")).red(),
     )?;
 
     let (_, warn, fail) = status_summary(&results);
     if show_hint && warn + fail > 0 {
-        writeln!(out, "  {} Run with --fix to auto-resolve fixable issues.", style("→").dim())?;
+        writeln!(
+            out,
+            "  {} Run with --fix to auto-resolve fixable issues.",
+            style("→").dim()
+        )?;
     }
 
     Ok(out)
@@ -95,11 +110,20 @@ async fn all_checks() -> Vec<CheckResult> {
     match TaskRepo::new(&db_path_str) {
         Ok(_repo) => {
             let tables = ["plans", "checkpoints", "settings", "memories"];
-            let msg = format!("{} — connected, {} tables present", db_path_str, tables.len());
+            let msg = format!(
+                "{} — connected, {} tables present",
+                db_path_str,
+                tables.len()
+            );
             results.push(CheckResult::new("Database", true, Some(msg), false));
         }
         Err(e) => {
-            results.push(CheckResult::new("Database", false, Some(format!("Cannot open DB: {e}")), false));
+            results.push(CheckResult::new(
+                "Database",
+                false,
+                Some(format!("Cannot open DB: {e}")),
+                false,
+            ));
         }
     }
 
@@ -115,23 +139,40 @@ async fn all_checks() -> Vec<CheckResult> {
                     msgs.push(format!("{}: configured ({prefix}...)", provider));
                 }
                 _ => {
-                    msgs.push(format!("{}: {} — no {} set", provider, style("WARN").yellow(), key));
+                    msgs.push(format!(
+                        "{}: {} — no {} set",
+                        provider,
+                        style("WARN").yellow(),
+                        key
+                    ));
                     all_ok = false;
                 }
             }
         }
         // Ollama check — use a shared client for connection reuse
         let ollama_client = reqwest::Client::new();
-        match ollama_client.get("http://localhost:11434/api/tags").send().await {
+        match ollama_client
+            .get("http://localhost:11434/api/tags")
+            .send()
+            .await
+        {
             Ok(resp) if resp.status().is_success() => {
                 msgs.push("ollama: reachable at localhost:11434".into());
             }
             _ => {
-                msgs.push(format!("ollama: {} — connection refused (optional)", style("WARN").yellow()));
+                msgs.push(format!(
+                    "ollama: {} — connection refused (optional)",
+                    style("WARN").yellow()
+                ));
                 // Don't mark all_ok false for optional Ollama
             }
         }
-        results.push(CheckResult::new("LLM Configuration", all_ok, Some(msgs.join("\n")), true));
+        results.push(CheckResult::new(
+            "LLM Configuration",
+            all_ok,
+            Some(msgs.join("\n")),
+            true,
+        ));
     }
 
     // 3. Skills
@@ -140,12 +181,21 @@ async fn all_checks() -> Vec<CheckResult> {
         match SkillManager::new(skill_dir.clone()).list_skills() {
             Ok(skills) => {
                 let names: Vec<String> = skills.iter().map(|s| format!("'{}'", s)).collect();
-                let msg = format!("{} installed at {}\n  {}",
-                    skills.len(), skill_dir.display(), names.join(", "));
+                let msg = format!(
+                    "{} installed at {}\n  {}",
+                    skills.len(),
+                    skill_dir.display(),
+                    names.join(", ")
+                );
                 results.push(CheckResult::new("Skills", true, Some(msg), false));
             }
             Err(e) => {
-                results.push(CheckResult::new("Skills", false, Some(format!("Error: {e}")), false));
+                results.push(CheckResult::new(
+                    "Skills",
+                    false,
+                    Some(format!("Error: {e}")),
+                    false,
+                ));
             }
         }
     } else {
@@ -161,18 +211,31 @@ async fn all_checks() -> Vec<CheckResult> {
             results.push(CheckResult::new("Git", true, Some(msg), false));
         }
         Err(_) => {
-            results.push(CheckResult::new("Git", true, Some("(not a git repository)".into()), false));
+            results.push(CheckResult::new(
+                "Git",
+                true,
+                Some("(not a git repository)".into()),
+                false,
+            ));
         }
     }
 
     // 5. Data directory
     let data_dir = crate::tracing_setup::data_dir();
     if data_dir.exists() {
-        results.push(CheckResult::new("Data Directory", true,
-            Some(format!("{} — exists, writable", data_dir.display())), false));
+        results.push(CheckResult::new(
+            "Data Directory",
+            true,
+            Some(format!("{} — exists, writable", data_dir.display())),
+            false,
+        ));
     } else {
-        results.push(CheckResult::new("Data Directory", false,
-            Some(format!("Not found: {}", data_dir.display())), true));
+        results.push(CheckResult::new(
+            "Data Directory",
+            false,
+            Some(format!("Not found: {}", data_dir.display())),
+            true,
+        ));
     }
 
     // 6. Log file
@@ -184,12 +247,20 @@ async fn all_checks() -> Vec<CheckResult> {
             } else {
                 format!("{:.1} KB", meta.len() as f64 / 1024.0)
             };
-            results.push(CheckResult::new("Log File", true,
-                Some(format!("{} — {}", log_path.display(), size)), false));
+            results.push(CheckResult::new(
+                "Log File",
+                true,
+                Some(format!("{} — {}", log_path.display(), size)),
+                false,
+            ));
         }
         Err(_) => {
-            results.push(CheckResult::new("Log File", false,
-                Some(format!("Not found: {}", log_path.display())), true));
+            results.push(CheckResult::new(
+                "Log File",
+                false,
+                Some(format!("Not found: {}", log_path.display())),
+                true,
+            ));
         }
     }
 

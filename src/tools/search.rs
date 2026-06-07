@@ -102,7 +102,8 @@ fn parse_ddg_results(html: &str) -> Vec<SearchResult> {
                         let title = extract_ddg_field(block, "result__a").unwrap_or_default();
 
                         // Extract snippet: <a class="result__snippet" ...>Snippet</a>
-                        let snippet = extract_ddg_field(block, "result__snippet").unwrap_or_default();
+                        let snippet =
+                            extract_ddg_field(block, "result__snippet").unwrap_or_default();
 
                         // Extract URL from the title link href
                         let url = extract_ddg_url(block, "result__a").unwrap_or_default();
@@ -203,13 +204,11 @@ mod tests {
 
     #[test]
     fn test_format_results() {
-        let results = vec![
-            SearchResult {
-                title: "Rust Programming".to_string(),
-                snippet: "A language empowering everyone.".to_string(),
-                url: "https://rust-lang.org".to_string(),
-            },
-        ];
+        let results = vec![SearchResult {
+            title: "Rust Programming".to_string(),
+            snippet: "A language empowering everyone.".to_string(),
+            url: "https://rust-lang.org".to_string(),
+        }];
         let out = format_search_results(&results, "rust");
         assert!(out.contains("Rust Programming"));
         assert!(out.contains("language empowering"));

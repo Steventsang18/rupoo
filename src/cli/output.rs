@@ -4,18 +4,18 @@
 //! Note: Some functions are reserved for future UI enhancements.
 #![allow(dead_code)]
 
+use console::Term;
 use owo_colors::OwoColorize;
 use std::io::Write;
 use unicode_width::UnicodeWidthStr;
-use console::Term;
 
-use super::theme;
 use super::enhanced_ui;
+use super::theme;
 
 // Thread-local storage for the active tool frame
 thread_local! {
-    static TOOL_FRAME: std::cell::RefCell<Option<enhanced_ui::ToolFrame>> = 
-        std::cell::RefCell::new(None);
+    static TOOL_FRAME: std::cell::RefCell<Option<enhanced_ui::ToolFrame>> =
+        const { std::cell::RefCell::new(None) };
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -96,7 +96,11 @@ fn print_right_separator(text: &str, width: usize) {
         .unwrap_or(10);
     let sep_len = (max_w + 4).min(width);
     let sep_pad = width.saturating_sub(sep_len);
-    println!("{}{}", " ".repeat(sep_pad), "─".repeat(sep_len).color(t.user_dim));
+    println!(
+        "{}{}",
+        " ".repeat(sep_pad),
+        "─".repeat(sep_len).color(t.user_dim)
+    );
 }
 
 /// Erase the rustyline input line(s) and replace with a right-aligned user message.
@@ -139,11 +143,21 @@ pub fn user_message(text: &str) {
 
 pub fn assistant_header() {
     let t = theme::current();
-    println!("{} {}", "◂".color(t.ai_header), "Rupoo".color(t.ai_header).bold());
+    println!(
+        "{} {}",
+        "◂".color(t.ai_header),
+        "Rupoo".color(t.ai_header).bold()
+    );
     thick_separator();
 }
 
-pub fn assistant_footer(duration_s: f64, token_in: u64, token_out: u64, ctx_tokens: usize, ctx_budget: usize) {
+pub fn assistant_footer(
+    duration_s: f64,
+    token_in: u64,
+    token_out: u64,
+    ctx_tokens: usize,
+    ctx_budget: usize,
+) {
     let t = theme::current();
     println!();
     let ctx_pct = (ctx_tokens * 100).checked_div(ctx_budget).unwrap_or(0);
@@ -175,7 +189,7 @@ pub fn assistant_footer(duration_s: f64, token_in: u64, token_out: u64, ctx_toke
 pub fn tool_call_start(tool_name: &str, args: &str) {
     let frame = enhanced_ui::ToolFrame::new(tool_name);
     frame.start(args);
-    
+
     // Store the frame for later use
     TOOL_FRAME.with(|f| {
         *f.borrow_mut() = Some(frame);
@@ -194,7 +208,11 @@ pub fn tool_result(result: &str, truncated: bool) {
             }
 
             if truncated || lines.len() > max_lines {
-                let extra = if lines.len() > max_lines { lines.len() - max_lines } else { 0 };
+                let extra = if lines.len() > max_lines {
+                    lines.len() - max_lines
+                } else {
+                    0
+                };
                 frame.println(&format!("... ({} more lines)", extra));
             }
         }
@@ -216,12 +234,22 @@ pub fn tool_call_end(done: bool, duration_s: Option<f64>) {
 pub fn thinking_spinner(frame: usize, tool_name: Option<&str>) {
     let t = theme::current();
     let spinner = match frame % 10 {
-        0 => "⠋", 1 => "⠙", 2 => "⠹", 3 => "⠸",
-        4 => "⠼", 5 => "⠴", 6 => "⠦", 7 => "⠧",
-        8 => "⠇", _ => "⠏",
+        0 => "⠋",
+        1 => "⠙",
+        2 => "⠹",
+        3 => "⠸",
+        4 => "⠼",
+        5 => "⠴",
+        6 => "⠦",
+        7 => "⠧",
+        8 => "⠇",
+        _ => "⠏",
     };
     let dots = match frame % 4 {
-        0 => "○ ○ ○", 1 => "● ○ ○", 2 => "● ● ○", _ => "● ● ●",
+        0 => "○ ○ ○",
+        1 => "● ○ ○",
+        2 => "● ● ○",
+        _ => "● ● ●",
     };
 
     let msg = match tool_name {
@@ -229,7 +257,12 @@ pub fn thinking_spinner(frame: usize, tool_name: Option<&str>) {
         None => "Thinking…".to_string(),
     };
 
-    eprint!("\r  {} {} {}   ", spinner.color(t.think).bold(), msg.color(t.think), dots.color(t.ai_header));
+    eprint!(
+        "\r  {} {} {}   ",
+        spinner.color(t.think).bold(),
+        msg.color(t.think),
+        dots.color(t.ai_header)
+    );
     let _ = std::io::stderr().flush();
 }
 
@@ -245,7 +278,11 @@ pub fn clear_spinner() {
 pub fn error(msg: &str) {
     let t = theme::current();
     println!();
-    println!("{} {}", "✗ Error:".color(t.error).bold(), msg.color(t.error));
+    println!(
+        "{} {}",
+        "✗ Error:".color(t.error).bold(),
+        msg.color(t.error)
+    );
     println!();
 }
 
@@ -261,19 +298,24 @@ pub fn system(msg: &str) {
 pub fn welcome(version: &str, model: &str) {
     let t = theme::current();
     println!();
-    
+
     // Use enhanced header bar (slogan is shown in header now)
     enhanced_ui::header_bar(version, Some(model), None, false);
-    
+
     if model == "not configured" {
-        println!("  {} {} Run: {} or {}",
+        println!(
+            "  {} {} Run: {} or {}",
             "⚠".to_string().yellow(),
             "LLM not configured.".to_string().yellow(),
             "rupoo config set api_key.anthropic <key>".color(t.ai_accent),
             "rupoo doctor".color(t.ai_accent),
         );
     }
-    println!("  {} Theme: {}", "│".color(t.dim), t.name.color(t.ai_accent));
+    println!(
+        "  {} Theme: {}",
+        "│".color(t.dim),
+        t.name.color(t.ai_accent)
+    );
     println!();
     println!("  {} Quick Actions:", "›".color(t.dim));
     println!("     @<path>    - Read file (e.g., @./src/main.rs)");
@@ -281,21 +323,43 @@ pub fn welcome(version: &str, model: &str) {
     println!("     ~<query>   - Web search (e.g., ~Rust async)");
     println!("     %% [path]  - List directory");
     println!();
-    println!("  {} /help for full commands │ /tools to list tools", "›".color(t.dim));
+    println!(
+        "  {} /help for full commands │ /tools to list tools",
+        "›".color(t.dim)
+    );
     println!();
     separator();
 }
 
 /// Print footer status bar with token usage
-pub fn footer(token_in: u64, token_out: u64, ctx_tokens: usize, ctx_budget: usize, model: &str, hybrid_search: bool) {
-    enhanced_ui::footer_bar(token_in, token_out, ctx_tokens, ctx_budget, model, hybrid_search);
+pub fn footer(
+    token_in: u64,
+    token_out: u64,
+    ctx_tokens: usize,
+    ctx_budget: usize,
+    model: &str,
+    hybrid_search: bool,
+) {
+    enhanced_ui::footer_bar(
+        token_in,
+        token_out,
+        ctx_tokens,
+        ctx_budget,
+        model,
+        hybrid_search,
+    );
 }
 
 /// Print plan task list
 pub fn plan_task_list(tasks: &[(String, rupoo::task::StepStatus)]) {
     let converted: Vec<(String, enhanced_ui::TaskStatus)> = tasks
         .iter()
-        .map(|(name, status)| (name.clone(), enhanced_ui::step_status_to_task_status(status)))
+        .map(|(name, status)| {
+            (
+                name.clone(),
+                enhanced_ui::step_status_to_task_status(status),
+            )
+        })
         .collect();
     enhanced_ui::task_list(&converted);
 }

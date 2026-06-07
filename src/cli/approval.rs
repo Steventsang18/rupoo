@@ -2,8 +2,8 @@
 
 use tracing::warn;
 
-use super::{AgentToTui, ChatMessage};
 use super::bridge::AgentUiBridge;
+use super::{AgentToTui, ChatMessage};
 
 // Trait to group approval-related methods
 pub(super) trait ApprovalExt {
@@ -18,8 +18,11 @@ pub(super) trait ApprovalExt {
 impl ApprovalExt for AgentUiBridge {
     async fn execute_approved_tool(&self, plan: &mut rupoo::task::Plan, step_index: usize) {
         let pid = plan.id.clone();
-        let (tool_name, params) = if let Some(rupoo::task::Step::ToolCall { ref tool_name, ref params, .. }) =
-            plan.steps.get(step_index)
+        let (tool_name, params) = if let Some(rupoo::task::Step::ToolCall {
+            ref tool_name,
+            ref params,
+            ..
+        }) = plan.steps.get(step_index)
         {
             (tool_name.clone(), params.clone())
         } else {
@@ -82,15 +85,22 @@ impl ApprovalExt for AgentUiBridge {
     /// Handle user approval (ApproveTool or ApproveAll).
     /// Shared logic for both ApproveTool and ApproveAll commands.
     async fn handle_approval(&mut self) {
-        let pending = self.pending_plan.lock().unwrap_or_else(|e| e.into_inner()).clone();
-        let step_idx = *self.pending_step_index.lock().unwrap_or_else(|e| e.into_inner());
+        let pending = self
+            .pending_plan
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        let step_idx = *self
+            .pending_step_index
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         if let (Some(mut plan), Some(step_index)) = (pending, step_idx) {
             self.execute_approved_tool(&mut plan, step_index).await;
             self.run_plan(&mut plan).await;
         } else {
-            let _ = self.ui_tx.send(AgentToTui::Message(
-                ChatMessage::assistant("No pending tool to approve.".to_string()),
-            ));
+            let _ = self.ui_tx.send(AgentToTui::Message(ChatMessage::assistant(
+                "No pending tool to approve.".to_string(),
+            )));
         }
         let _ = self.ui_tx.send(AgentToTui::Idle);
     }
@@ -99,8 +109,15 @@ impl ApprovalExt for AgentUiBridge {
     /// Mark the step as Failed, do not execute.
     async fn handle_denial(&mut self) {
         // User denied the tool call — mark the step as Failed, do not execute.
-        let pending = self.pending_plan.lock().unwrap_or_else(|e| e.into_inner()).clone();
-        let step_idx = *self.pending_step_index.lock().unwrap_or_else(|e| e.into_inner());
+        let pending = self
+            .pending_plan
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        let step_idx = *self
+            .pending_step_index
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         if let (Some(mut plan), Some(step_index)) = (pending, step_idx) {
             let pid = plan.id.clone();
 
@@ -120,9 +137,9 @@ impl ApprovalExt for AgentUiBridge {
 
             plan.updated_at = chrono::Utc::now();
 
-            let _ = self.ui_tx.send(AgentToTui::Message(
-                ChatMessage::assistant("Tool call denied by user.".to_string()),
-            ));
+            let _ = self.ui_tx.send(AgentToTui::Message(ChatMessage::assistant(
+                "Tool call denied by user.".to_string(),
+            )));
 
             // Continue running the plan — it will handle the failure
             // gracefully (agent decides how to proceed with a failed step).

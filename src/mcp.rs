@@ -12,18 +12,12 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use tokio::sync::RwLock;
 
-use crate::safety::SafetyContext;
 use crate::agent::ToolExecutor;
 use crate::error::{AgentError, AgentResult};
+use crate::safety::SafetyContext;
 use crate::task::McpToolResult;
 
-use crate::rig_tools::{
-    EchoArgs,
-    FileReadArgs,
-    FileWriteArgs,
-    ListDirArgs,
-    WebSearchArgs,
-};
+use crate::rig_tools::{EchoArgs, FileReadArgs, FileWriteArgs, ListDirArgs, WebSearchArgs};
 
 use rig::tool::Tool;
 
@@ -33,9 +27,15 @@ use rig::tool::Tool;
 
 pub(crate) enum ToolKind {
     Echo,
-    FileRead { jail_root: Option<std::path::PathBuf> },
-    FileWrite { jail_root: Option<std::path::PathBuf> },
-    ListDir { jail_root: Option<std::path::PathBuf> },
+    FileRead {
+        jail_root: Option<std::path::PathBuf>,
+    },
+    FileWrite {
+        jail_root: Option<std::path::PathBuf>,
+    },
+    ListDir {
+        jail_root: Option<std::path::PathBuf>,
+    },
     WebSearch,
     ShellExec,
     RunTests,
@@ -91,113 +91,151 @@ impl ToolKind {
     async fn execute(&self, params: serde_json::Value) -> Result<serde_json::Value, String> {
         let result = match self {
             ToolKind::Echo => {
-                let args: EchoArgs = serde_json::from_value(params)
-                    .map_err(|e| format!("bad args: {e}"))?;
-                let output = crate::rig_tools::EchoTool::new().call(args).await
+                let args: EchoArgs =
+                    serde_json::from_value(params).map_err(|e| format!("bad args: {e}"))?;
+                let output = crate::rig_tools::EchoTool::new()
+                    .call(args)
+                    .await
                     .map_err(|e| e.to_string())?;
-                McpToolResult::Success { content: output.result }
+                McpToolResult::Success {
+                    content: output.result,
+                }
             }
             ToolKind::FileRead { jail_root } => {
-                let args: FileReadArgs = serde_json::from_value(params)
-                    .map_err(|e| format!("bad args: {e}"))?;
+                let args: FileReadArgs =
+                    serde_json::from_value(params).map_err(|e| format!("bad args: {e}"))?;
                 let tool = match jail_root {
                     Some(ref root) => crate::rig_tools::FileReadTool::with_jail(root.clone()),
                     None => crate::rig_tools::FileReadTool::new(),
                 };
-                let output = tool.call(args).await
-                    .map_err(|e| e.to_string())?;
+                let output = tool.call(args).await.map_err(|e| e.to_string())?;
                 if output.success {
-                    McpToolResult::Success { content: output.content }
+                    McpToolResult::Success {
+                        content: output.content,
+                    }
                 } else {
-                    McpToolResult::Error { message: output.error.unwrap_or_else(|| "file read failed".into()) }
+                    McpToolResult::Error {
+                        message: output.error.unwrap_or_else(|| "file read failed".into()),
+                    }
                 }
             }
             ToolKind::FileWrite { jail_root } => {
-                let args: FileWriteArgs = serde_json::from_value(params)
-                    .map_err(|e| format!("bad args: {e}"))?;
+                let args: FileWriteArgs =
+                    serde_json::from_value(params).map_err(|e| format!("bad args: {e}"))?;
                 let tool = match jail_root {
                     Some(ref root) => crate::rig_tools::FileWriteTool::with_jail(root.clone()),
                     None => crate::rig_tools::FileWriteTool::new(),
                 };
-                let output = tool.call(args).await
-                    .map_err(|e| e.to_string())?;
+                let output = tool.call(args).await.map_err(|e| e.to_string())?;
                 if output.success {
-                    McpToolResult::Success { content: format!("{} bytes written", output.bytes_written) }
+                    McpToolResult::Success {
+                        content: format!("{} bytes written", output.bytes_written),
+                    }
                 } else {
-                    McpToolResult::Error { message: output.error.unwrap_or_else(|| "file write failed".into()) }
+                    McpToolResult::Error {
+                        message: output.error.unwrap_or_else(|| "file write failed".into()),
+                    }
                 }
             }
             ToolKind::ListDir { jail_root } => {
-                let args: ListDirArgs = serde_json::from_value(params)
-                    .map_err(|e| format!("bad args: {e}"))?;
+                let args: ListDirArgs =
+                    serde_json::from_value(params).map_err(|e| format!("bad args: {e}"))?;
                 let tool = match jail_root {
                     Some(ref root) => crate::rig_tools::ListDirTool::with_jail(root.clone()),
                     None => crate::rig_tools::ListDirTool::new(),
                 };
-                let output = tool.call(args).await
-                    .map_err(|e| e.to_string())?;
-                let content = output.entries.iter()
+                let output = tool.call(args).await.map_err(|e| e.to_string())?;
+                let content = output
+                    .entries
+                    .iter()
                     .map(|e| format!("{} ({})", e.name, e.kind))
                     .collect::<Vec<_>>()
                     .join("\n");
                 if output.success {
                     McpToolResult::Success { content }
                 } else {
-                    McpToolResult::Error { message: output.error.unwrap_or_else(|| "list directory failed".into()) }
+                    McpToolResult::Error {
+                        message: output
+                            .error
+                            .unwrap_or_else(|| "list directory failed".into()),
+                    }
                 }
             }
             ToolKind::WebSearch => {
-                let args: WebSearchArgs = serde_json::from_value(params)
-                    .map_err(|e| format!("bad args: {e}"))?;
+                let args: WebSearchArgs =
+                    serde_json::from_value(params).map_err(|e| format!("bad args: {e}"))?;
                 let safety = crate::safety::SafetyContext::default();
                 match crate::tools::search::web_search(&args.query, &safety).await {
                     Ok(results) => McpToolResult::Success { content: results },
-                    Err(e) => McpToolResult::Error { message: e.to_string() },
+                    Err(e) => McpToolResult::Error {
+                        message: e.to_string(),
+                    },
                 }
             }
             ToolKind::ShellExec => {
-                let args: crate::rig_tools::ShellExecArgs = serde_json::from_value(params)
-                    .map_err(|e| format!("bad args: {e}"))?;
+                let args: crate::rig_tools::ShellExecArgs =
+                    serde_json::from_value(params).map_err(|e| format!("bad args: {e}"))?;
                 let tool = crate::rig_tools::ShellExecTool::new();
-                let output = tool.call(args).await
-                    .map_err(|e| e.to_string())?;
+                let output = tool.call(args).await.map_err(|e| e.to_string())?;
                 if output.success {
-                    McpToolResult::Success { content: output.stdout }
+                    McpToolResult::Success {
+                        content: output.stdout,
+                    }
                 } else {
-                    McpToolResult::Error { message: output.error.unwrap_or_else(|| "shell exec failed".into()) }
+                    McpToolResult::Error {
+                        message: output.error.unwrap_or_else(|| "shell exec failed".into()),
+                    }
                 }
             }
             ToolKind::RunTests => {
-                let args: crate::tools::verify::RunTestsArgs = serde_json::from_value(params)
-                    .map_err(|e| format!("bad args: {e}"))?;
-                let output = crate::tools::verify::RunTestsTool.call(args).await
+                let args: crate::tools::verify::RunTestsArgs =
+                    serde_json::from_value(params).map_err(|e| format!("bad args: {e}"))?;
+                let output = crate::tools::verify::RunTestsTool
+                    .call(args)
+                    .await
                     .map_err(|e| e.to_string())?;
                 if output.success {
-                    McpToolResult::Success { content: format!("Runner: {}\n{}", output.test_runner, output.output) }
+                    McpToolResult::Success {
+                        content: format!("Runner: {}\n{}", output.test_runner, output.output),
+                    }
                 } else {
-                    McpToolResult::Error { message: output.error.unwrap_or_else(|| "run tests failed".into()) }
+                    McpToolResult::Error {
+                        message: output.error.unwrap_or_else(|| "run tests failed".into()),
+                    }
                 }
             }
             ToolKind::CheckOutput => {
-                let args: crate::tools::verify::CheckOutputArgs = serde_json::from_value(params)
-                    .map_err(|e| format!("bad args: {e}"))?;
-                let output = crate::tools::verify::CheckOutputTool.call(args).await
+                let args: crate::tools::verify::CheckOutputArgs =
+                    serde_json::from_value(params).map_err(|e| format!("bad args: {e}"))?;
+                let output = crate::tools::verify::CheckOutputTool
+                    .call(args)
+                    .await
                     .map_err(|e| e.to_string())?;
                 if output.success {
-                    McpToolResult::Success { content: output.stdout }
+                    McpToolResult::Success {
+                        content: output.stdout,
+                    }
                 } else {
-                    McpToolResult::Error { message: output.error.unwrap_or_else(|| "check output failed".into()) }
+                    McpToolResult::Error {
+                        message: output.error.unwrap_or_else(|| "check output failed".into()),
+                    }
                 }
             }
             ToolKind::DiffCheck => {
-                let args: crate::tools::verify::DiffCheckArgs = serde_json::from_value(params)
-                    .map_err(|e| format!("bad args: {e}"))?;
-                let output = crate::tools::verify::DiffCheckTool.call(args).await
+                let args: crate::tools::verify::DiffCheckArgs =
+                    serde_json::from_value(params).map_err(|e| format!("bad args: {e}"))?;
+                let output = crate::tools::verify::DiffCheckTool
+                    .call(args)
+                    .await
                     .map_err(|e| e.to_string())?;
                 if output.success {
-                    McpToolResult::Success { content: format!("{}\n\n{}", output.stats, output.diff) }
+                    McpToolResult::Success {
+                        content: format!("{}\n\n{}", output.stats, output.diff),
+                    }
                 } else {
-                    McpToolResult::Error { message: output.error.unwrap_or_else(|| "diff check failed".into()) }
+                    McpToolResult::Error {
+                        message: output.error.unwrap_or_else(|| "diff check failed".into()),
+                    }
                 }
             }
         };
@@ -247,9 +285,24 @@ impl McpToolExecutor {
     fn build_tools(jail_root: Option<std::path::PathBuf>) -> HashMap<String, Arc<ToolKind>> {
         let mut tools = HashMap::new();
         tools.insert("echo".into(), Arc::new(ToolKind::Echo));
-        tools.insert("file_read".into(), Arc::new(ToolKind::FileRead { jail_root: jail_root.clone() }));
-        tools.insert("file_write".into(), Arc::new(ToolKind::FileWrite { jail_root: jail_root.clone() }));
-        tools.insert("list_directory".into(), Arc::new(ToolKind::ListDir { jail_root: jail_root.clone() }));
+        tools.insert(
+            "file_read".into(),
+            Arc::new(ToolKind::FileRead {
+                jail_root: jail_root.clone(),
+            }),
+        );
+        tools.insert(
+            "file_write".into(),
+            Arc::new(ToolKind::FileWrite {
+                jail_root: jail_root.clone(),
+            }),
+        );
+        tools.insert(
+            "list_directory".into(),
+            Arc::new(ToolKind::ListDir {
+                jail_root: jail_root.clone(),
+            }),
+        );
         tools.insert("web_search".into(), Arc::new(ToolKind::WebSearch));
         tools.insert("shell_exec".into(), Arc::new(ToolKind::ShellExec));
         tools.insert("run_tests".into(), Arc::new(ToolKind::RunTests));
@@ -275,7 +328,11 @@ impl McpToolExecutor {
         let reg = self.registry.read().await;
         reg.values()
             .map(|t| {
-                (t.name().to_string(), t.description().to_string(), t.parameters_schema())
+                (
+                    t.name().to_string(),
+                    t.description().to_string(),
+                    t.parameters_schema(),
+                )
             })
             .collect()
     }
@@ -299,9 +356,9 @@ impl ToolExecutor for McpToolExecutor {
 
         let entry = {
             let reg = self.registry.read().await;
-            reg.get(tool_name).map(Arc::clone).ok_or_else(|| {
-                AgentError::Mcp(format!("unknown tool: '{tool_name}'"))
-            })?
+            reg.get(tool_name)
+                .map(Arc::clone)
+                .ok_or_else(|| AgentError::Mcp(format!("unknown tool: '{tool_name}'")))?
         };
 
         // Direct async call — no spawn_blocking, no nested Runtime
@@ -364,7 +421,10 @@ mod tests {
     async fn test_file_read_nonexistent() {
         let executor = McpToolExecutor::new();
         let result = executor
-            .execute_tool("file_read", serde_json::json!({"path": "target/_nonexistent_xyz_test_file"}))
+            .execute_tool(
+                "file_read",
+                serde_json::json!({"path": "target/_nonexistent_xyz_test_file"}),
+            )
             .await
             .unwrap();
         assert!(!result.is_success());
@@ -387,7 +447,11 @@ mod tests {
             .execute_tool("list_directory", serde_json::json!({"path": "."}))
             .await
             .unwrap();
-        assert!(result.is_success(), "list_directory failed: {:?}", result.error_message());
+        assert!(
+            result.is_success(),
+            "list_directory failed: {:?}",
+            result.error_message()
+        );
         assert!(!result.content().is_empty());
     }
 

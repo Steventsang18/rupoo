@@ -92,7 +92,9 @@ impl<W: Write + 'static> tracing_subscriber::fmt::MakeWriter<'_> for RedactingWr
     type Writer = Self;
 
     fn make_writer(&self) -> Self::Writer {
-        Self { inner: Arc::clone(&self.inner) }
+        Self {
+            inner: Arc::clone(&self.inner),
+        }
     }
 }
 
@@ -130,13 +132,23 @@ pub fn init_logging(verbose: bool) {
             .with_thread_ids(true);
         if verbose {
             builder
-                .with_env_filter(EnvFilter::from_default_env()
-                    .add_directive("debug".parse().unwrap_or_else(|_| tracing::Level::DEBUG.into())))
+                .with_env_filter(
+                    EnvFilter::from_default_env().add_directive(
+                        "debug"
+                            .parse()
+                            .unwrap_or_else(|_| tracing::Level::DEBUG.into()),
+                    ),
+                )
                 .init();
         } else {
             builder
-                .with_env_filter(EnvFilter::from_default_env()
-                    .add_directive("info".parse().unwrap_or_else(|_| tracing::Level::INFO.into())))
+                .with_env_filter(
+                    EnvFilter::from_default_env().add_directive(
+                        "info"
+                            .parse()
+                            .unwrap_or_else(|_| tracing::Level::INFO.into()),
+                    ),
+                )
                 .init();
         }
     };
@@ -158,19 +170,32 @@ pub fn init_logging(verbose: bool) {
 
             if verbose {
                 builder
-                    .with_env_filter(EnvFilter::from_default_env()
-                        .add_directive("debug".parse().unwrap_or_else(|_| tracing::Level::DEBUG.into())))
+                    .with_env_filter(
+                        EnvFilter::from_default_env().add_directive(
+                            "debug"
+                                .parse()
+                                .unwrap_or_else(|_| tracing::Level::DEBUG.into()),
+                        ),
+                    )
                     .init();
                 eprintln!("[rupoo] verbose logging enabled");
             } else {
                 builder
-                    .with_env_filter(EnvFilter::from_default_env()
-                        .add_directive("info".parse().unwrap_or_else(|_| tracing::Level::INFO.into())))
+                    .with_env_filter(
+                        EnvFilter::from_default_env().add_directive(
+                            "info"
+                                .parse()
+                                .unwrap_or_else(|_| tracing::Level::INFO.into()),
+                        ),
+                    )
                     .init();
             }
         }
         Err(e) => {
-            eprintln!("[rupoo] warning: cannot create log file at {}: {e}, logging to stderr only", log_path.display());
+            eprintln!(
+                "[rupoo] warning: cannot create log file at {}: {e}, logging to stderr only",
+                log_path.display()
+            );
             log_to_stderr(verbose);
         }
     }

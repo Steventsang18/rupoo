@@ -92,12 +92,12 @@ fn is_retryable_error(err: &AgentError, config: &RetryConfig) -> bool {
 }
 
 /// Execute an operation with retry logic.
-/// 
+///
 /// # Examples
-/// 
+///
 /// ```rust,no_run
 /// use rupoo::retry::{retry, RetryConfig};
-/// 
+///
 /// #[tokio::main]
 /// async fn main() {
 ///     // Successful operation
@@ -111,7 +111,7 @@ where
     F: Fn() -> crate::error::AgentResult<T>,
 {
     let mut delay = config.initial_delay;
-    
+
     for attempt in 0..=config.max_retries {
         match operation() {
             Ok(result) => return Ok(result),
@@ -119,7 +119,7 @@ where
                 if attempt == config.max_retries || !is_retryable_error(&err, &config) {
                     return Err(err);
                 }
-                
+
                 tracing::warn!(
                     attempt = attempt,
                     max_retries = config.max_retries,
@@ -127,26 +127,29 @@ where
                     error = %err,
                     "Retrying operation"
                 );
-                
+
                 sleep(delay).await;
-                
+
                 delay = Duration::from_millis(
-                    (delay.as_millis() as f64 * config.backoff_multiplier) as u64
-                ).min(config.max_delay);
+                    (delay.as_millis() as f64 * config.backoff_multiplier) as u64,
+                )
+                .min(config.max_delay);
             }
         }
     }
-    
+
     unreachable!("Should have returned before reaching here")
 }
 
 /// Execute an async operation with retry logic.
 pub async fn retry_async<T, F>(operation: F, config: RetryConfig) -> crate::error::AgentResult<T>
 where
-    F: Fn() -> std::pin::Pin<Box<dyn std::future::Future<Output = crate::error::AgentResult<T>> + Send>>,
+    F: Fn() -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = crate::error::AgentResult<T>> + Send>,
+    >,
 {
     let mut delay = config.initial_delay;
-    
+
     for attempt in 0..=config.max_retries {
         match operation().await {
             Ok(result) => return Ok(result),
@@ -154,7 +157,7 @@ where
                 if attempt == config.max_retries || !is_retryable_error(&err, &config) {
                     return Err(err);
                 }
-                
+
                 tracing::warn!(
                     attempt = attempt,
                     max_retries = config.max_retries,
@@ -162,16 +165,17 @@ where
                     error = %err,
                     "Retrying async operation"
                 );
-                
+
                 sleep(delay).await;
-                
+
                 delay = Duration::from_millis(
-                    (delay.as_millis() as f64 * config.backoff_multiplier) as u64
-                ).min(config.max_delay);
+                    (delay.as_millis() as f64 * config.backoff_multiplier) as u64,
+                )
+                .min(config.max_delay);
             }
         }
     }
-    
+
     unreachable!("Should have returned before reaching here")
 }
 
@@ -179,7 +183,7 @@ where
 pub trait RetryExt<T> {
     /// Retry this operation with default configuration.
     fn retry(self) -> crate::error::AgentResult<T>;
-    
+
     /// Retry this operation with custom configuration.
     fn retry_with(self, config: RetryConfig) -> crate::error::AgentResult<T>;
 }
@@ -193,7 +197,7 @@ where
             .expect("Failed to create runtime")
             .block_on(retry(self, RetryConfig::default()))
     }
-    
+
     fn retry_with(self, config: RetryConfig) -> crate::error::AgentResult<T> {
         tokio::runtime::Runtime::new()
             .expect("Failed to create runtime")

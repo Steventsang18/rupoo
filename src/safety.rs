@@ -13,9 +13,8 @@ use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
-
-use tracing::warn;
 use lru::LruCache;
+use tracing::warn;
 
 use crate::error::{AgentError, AgentResult};
 
@@ -38,7 +37,7 @@ impl DnsCacheEntry {
             expires_at: Instant::now() + DNS_CACHE_TTL,
         }
     }
-    
+
     /// Check if the cache entry is still valid (not expired).
     fn is_valid(&self) -> bool {
         Instant::now() < self.expires_at
@@ -47,7 +46,7 @@ impl DnsCacheEntry {
 
 /// LRU cache for DNS resolution results to prevent repeated lookups.
 /// This mitigates DNS cache poisoning attacks and improves performance.
-/// 
+///
 /// # Security
 /// - Uses TTL-based cache invalidation to prevent stale entries
 /// - Default TTL of 5 minutes provides balance between security and performance
@@ -81,18 +80,17 @@ impl Default for SafetyContext {
     fn default() -> Self {
         Self {
             forbidden_commands: [
-                "sudo", "su", "passwd",
-                "mkfs", "fdisk", "dd", "format",
-                "shutdown", "reboot", "halt", "poweroff",
-                "iptables", "ufw",
-                "mount", "umount",
+                "sudo", "su", "passwd", "mkfs", "fdisk", "dd", "format", "shutdown", "reboot",
+                "halt", "poweroff", "iptables", "ufw", "mount",
+                "umount",
                 // File-modifying commands (rm/chmod/kill/chown) moved to
                 // needs_approval() so they require user confirmation but can
                 // still be used when explicitly approved.
-            ].iter().map(|s| s.to_string()).collect(),
-            allowed_paths: vec![
-                std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
-            ],
+            ]
+            .iter()
+            .map(|s| s.to_string())
+            .collect(),
+            allowed_paths: vec![std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))],
             default_timeout: Duration::from_secs(30),
             browser_path: None,
         }
@@ -158,19 +156,14 @@ impl SafetyContext {
         }
         // Use the first allowed path as the jail root
         let root = &self.allowed_paths[0];
-        let root_canonical = std::fs::canonicalize(root)
-            .unwrap_or_else(|e| {
-                warn!(error = %e, path = %root.display(), "failed to canonicalize jail root");
-                root.to_path_buf()
-            });
+        let root_canonical = std::fs::canonicalize(root).unwrap_or_else(|e| {
+            warn!(error = %e, path = %root.display(), "failed to canonicalize jail root");
+            root.to_path_buf()
+        });
 
         // path_jail::join validates the path against traversal attacks
-        path_jail::join(&root_canonical, path).map_err(|e| {
-            AgentError::Safety(format!(
-                "Access denied to '{}': {e}",
-                path.display()
-            ))
-        })
+        path_jail::join(&root_canonical, path)
+            .map_err(|e| AgentError::Safety(format!("Access denied to '{}': {e}", path.display())))
     }
 
     /// Check if a URL points to localhost (SSRF protection).
@@ -271,11 +264,12 @@ impl SafetyContext {
                     let ip = addr.ip();
                     let is_private = match ip {
                         std::net::IpAddr::V4(v4) => {
-                            v4.is_loopback() || v4.is_private() || v4.is_link_local() || v4.is_unspecified()
+                            v4.is_loopback()
+                                || v4.is_private()
+                                || v4.is_link_local()
+                                || v4.is_unspecified()
                         }
-                        std::net::IpAddr::V6(v6) => {
-                            v6.is_loopback() || v6.is_unspecified()
-                        }
+                        std::net::IpAddr::V6(v6) => v6.is_loopback() || v6.is_unspecified(),
                     };
                     if is_private {
                         warn!(
@@ -283,7 +277,9 @@ impl SafetyContext {
                             ip = %ip,
                             "host resolves to private IP — SSRF blocked"
                         );
-                        let _ = dns_cache().lock().map(|mut c| c.put(lower, DnsCacheEntry::new(true)));
+                        let _ = dns_cache()
+                            .lock()
+                            .map(|mut c| c.put(lower, DnsCacheEntry::new(true)));
                         return true;
                     }
                 }
@@ -292,13 +288,17 @@ impl SafetyContext {
             Err(e) => {
                 // If DNS resolution fails, be conservative and block
                 warn!(host = %host, error = %e, "DNS resolution failed — blocking for safety");
-                let _ = dns_cache().lock().map(|mut c| c.put(lower, DnsCacheEntry::new(true)));
+                let _ = dns_cache()
+                    .lock()
+                    .map(|mut c| c.put(lower, DnsCacheEntry::new(true)));
                 return true;
             }
         };
 
         // Cache the successful non-private result
-        let _ = dns_cache().lock().map(|mut c| c.put(lower, DnsCacheEntry::new(result)));
+        let _ = dns_cache()
+            .lock()
+            .map(|mut c| c.put(lower, DnsCacheEntry::new(result)));
         result
     }
 
@@ -310,24 +310,51 @@ impl SafetyContext {
     /// Environment variables that are safe to forward to child processes.
     /// These are considered non-sensitive and essential for basic operation.
     const SAFE_ENV_VARS: &[&str] = &[
-        "PATH", "HOME", "USER", "SHELL", "LANG", "LC_ALL", "TERM",
-        "PWD", "LOGNAME", "SUDO_UID", "SUDO_GID", "SUDO_USER",
-        "RUST_LOG", "CARGO_TARGET_DIR",
-        "TERM_PROGRAM", "TERM_PROGRAM_VERSION",
+        "PATH",
+        "HOME",
+        "USER",
+        "SHELL",
+        "LANG",
+        "LC_ALL",
+        "TERM",
+        "PWD",
+        "LOGNAME",
+        "SUDO_UID",
+        "SUDO_GID",
+        "SUDO_USER",
+        "RUST_LOG",
+        "CARGO_TARGET_DIR",
+        "TERM_PROGRAM",
+        "TERM_PROGRAM_VERSION",
     ];
 
     /// Patterns for sensitive environment variables that must be blocked.
     /// These are checked against variable names (case-insensitive).
     const SENSITIVE_PATTERNS: &[&str] = &[
-        "AWS_", "GITHUB_", "TOKEN", "SECRET", "PASSWORD", "KEY", "DOCKER_AUTH",
-        "API_KEY", "ACCESS_KEY", "SECRET_KEY", "BEARER_TOKEN",
-        "SSH_AUTH_SOCK", "PGPASSWORD", "MYSQL_PWD", "MONGODB_URI",
-        "OPENAI_", "ANTHROPIC_", "DEEPSEEK_", "OLLAMA_",
+        "AWS_",
+        "GITHUB_",
+        "TOKEN",
+        "SECRET",
+        "PASSWORD",
+        "KEY",
+        "DOCKER_AUTH",
+        "API_KEY",
+        "ACCESS_KEY",
+        "SECRET_KEY",
+        "BEARER_TOKEN",
+        "SSH_AUTH_SOCK",
+        "PGPASSWORD",
+        "MYSQL_PWD",
+        "MONGODB_URI",
+        "OPENAI_",
+        "ANTHROPIC_",
+        "DEEPSEEK_",
+        "OLLAMA_",
     ];
 
     /// Forward safe environment variables to a child process after clearing.
     /// Only essential, non-sensitive vars are preserved.
-    /// 
+    ///
     /// # Security
     /// - Clears all environment variables first (defense in depth)
     /// - Only forwards variables in the SAFE_ENV_VARS whitelist
@@ -335,20 +362,21 @@ impl SafetyContext {
     pub fn forward_safe_env(cmd: &mut std::process::Command) {
         // Clear all environment variables first
         cmd.env_clear();
-        
+
         // Track sensitive variables for auditing
         let mut blocked_sensitive = Vec::new();
-        
+
         // Check for sensitive variables and log them (for auditing)
         for (key, _) in std::env::vars() {
             let key_upper = key.to_ascii_uppercase();
-            if Self::SENSITIVE_PATTERNS.iter().any(|pattern| {
-                key_upper.starts_with(pattern) || key_upper.contains(pattern)
-            }) {
+            if Self::SENSITIVE_PATTERNS
+                .iter()
+                .any(|pattern| key_upper.starts_with(pattern) || key_upper.contains(pattern))
+            {
                 blocked_sensitive.push(key);
             }
         }
-        
+
         // Log blocked sensitive variables for security auditing
         if !blocked_sensitive.is_empty() {
             tracing::debug!(
@@ -356,7 +384,7 @@ impl SafetyContext {
                 "blocked sensitive environment variables from child process"
             );
         }
-        
+
         // Forward safe variables
         for &var in Self::SAFE_ENV_VARS {
             if let Ok(val) = std::env::var(var) {
@@ -369,20 +397,21 @@ impl SafetyContext {
     pub fn forward_safe_env_async(cmd: &mut tokio::process::Command) {
         // Clear all environment variables first
         cmd.env_clear();
-        
+
         // Track sensitive variables for auditing
         let mut blocked_sensitive = Vec::new();
-        
+
         // Check for sensitive variables and log them (for auditing)
         for (key, _) in std::env::vars() {
             let key_upper = key.to_ascii_uppercase();
-            if Self::SENSITIVE_PATTERNS.iter().any(|pattern| {
-                key_upper.starts_with(pattern) || key_upper.contains(pattern)
-            }) {
+            if Self::SENSITIVE_PATTERNS
+                .iter()
+                .any(|pattern| key_upper.starts_with(pattern) || key_upper.contains(pattern))
+            {
                 blocked_sensitive.push(key);
             }
         }
-        
+
         // Log blocked sensitive variables for security auditing
         if !blocked_sensitive.is_empty() {
             tracing::debug!(
@@ -390,7 +419,7 @@ impl SafetyContext {
                 "blocked sensitive environment variables from async child process"
             );
         }
-        
+
         // Forward safe variables
         for &var in Self::SAFE_ENV_VARS {
             if let Ok(val) = std::env::var(var) {
@@ -521,9 +550,15 @@ mod tests {
         assert!(SafetyContext::is_localhost_url("http://[0:0:0:0:0:0:0:1]/"));
 
         // IPv4-mapped IPv6
-        assert!(SafetyContext::is_localhost_url("http://[::ffff:127.0.0.1]/"));
-        assert!(SafetyContext::is_localhost_url("https://[::ffff:127.0.0.1]:80/"));
-        assert!(SafetyContext::is_localhost_url("http://[0:0:0:0:0:ffff:127.0.0.1]/"));
+        assert!(SafetyContext::is_localhost_url(
+            "http://[::ffff:127.0.0.1]/"
+        ));
+        assert!(SafetyContext::is_localhost_url(
+            "https://[::ffff:127.0.0.1]:80/"
+        ));
+        assert!(SafetyContext::is_localhost_url(
+            "http://[0:0:0:0:0:ffff:127.0.0.1]/"
+        ));
         assert!(SafetyContext::is_localhost_url("http://[::ffff:7f00:1]/"));
 
         // IPv6 unspecified
@@ -544,7 +579,9 @@ mod tests {
 
         // Should NOT be blocked
         assert!(!SafetyContext::is_localhost_url("http://example.com"));
-        assert!(!SafetyContext::is_localhost_url("https://github.com/user/repo"));
+        assert!(!SafetyContext::is_localhost_url(
+            "https://github.com/user/repo"
+        ));
         assert!(!SafetyContext::is_localhost_url("http://192.168.1.100/")); // private but not localhost
     }
 

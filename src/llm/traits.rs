@@ -43,7 +43,9 @@ pub trait LlmAgent: Send + Sync {
     async fn chat_stream(
         &self,
         history: &ConversationHistory,
-    ) -> AgentResult<std::pin::Pin<Box<dyn Stream<Item = Result<AgentEvent, AgentError>> + Send + Sync>>>;
+    ) -> AgentResult<
+        std::pin::Pin<Box<dyn Stream<Item = Result<AgentEvent, AgentError>> + Send + Sync>>,
+    >;
 
     /// Get the name of the provider.
     fn provider_name(&self) -> &str;
@@ -70,7 +72,11 @@ pub trait LlmGatewayBackend: Send + Sync {
     /// # Returns
     ///
     /// A result containing the executed plan text.
-    async fn run_plan(&self, plan: &str, history: Option<&ConversationHistory>) -> AgentResult<String>;
+    async fn run_plan(
+        &self,
+        plan: &str,
+        history: Option<&ConversationHistory>,
+    ) -> AgentResult<String>;
 
     /// Generate a response based on context.
     ///
@@ -87,7 +93,7 @@ pub trait LlmGatewayBackend: Send + Sync {
     fn config(&self) -> crate::llm::LlmConfig;
 
     /// Validate that a path is within the allowed jail root.
-    fn validate_path(&self, path: &std::path::PathBuf) -> AgentResult<std::path::PathBuf>;
+    fn validate_path(&self, path: &std::path::Path) -> AgentResult<std::path::PathBuf>;
 }
 
 /// Helper type for Arc-wrapped LlmAgent.
@@ -121,7 +127,8 @@ impl MockLlmAgent {
     }
 
     pub fn with_responses(mut self, responses: &[&str]) -> Self {
-        self.responses.extend(responses.iter().map(|s| s.to_string()));
+        self.responses
+            .extend(responses.iter().map(|s| s.to_string()));
         self
     }
 }
@@ -143,7 +150,9 @@ impl LlmAgent for MockLlmAgent {
     async fn chat_stream(
         &self,
         _history: &ConversationHistory,
-    ) -> AgentResult<std::pin::Pin<Box<dyn Stream<Item = Result<AgentEvent, AgentError>> + Send + Sync>>> {
+    ) -> AgentResult<
+        std::pin::Pin<Box<dyn Stream<Item = Result<AgentEvent, AgentError>> + Send + Sync>>,
+    > {
         let response = self.chat(_history).await?;
         let stream = futures::stream::once(async move { Ok(AgentEvent::TextDelta(response.0)) });
         Ok(Box::pin(stream))
@@ -181,14 +190,19 @@ impl MockLlmGateway {
     }
 
     pub fn with_responses(mut self, responses: &[&str]) -> Self {
-        self.responses.extend(responses.iter().map(|s| s.to_string()));
+        self.responses
+            .extend(responses.iter().map(|s| s.to_string()));
         self
     }
 }
 
 #[async_trait]
 impl LlmGatewayBackend for MockLlmGateway {
-    async fn run_plan(&self, _plan: &str, _history: Option<&ConversationHistory>) -> AgentResult<String> {
+    async fn run_plan(
+        &self,
+        _plan: &str,
+        _history: Option<&ConversationHistory>,
+    ) -> AgentResult<String> {
         let mut index = self.response_index.lock().unwrap();
         let response = if self.responses.is_empty() {
             "Mock plan response".to_string()
@@ -216,7 +230,7 @@ impl LlmGatewayBackend for MockLlmGateway {
         self.config.clone()
     }
 
-    fn validate_path(&self, path: &std::path::PathBuf) -> AgentResult<std::path::PathBuf> {
-        Ok(path.clone())
+    fn validate_path(&self, path: &std::path::Path) -> AgentResult<std::path::PathBuf> {
+        Ok(path.to_path_buf())
     }
 }
