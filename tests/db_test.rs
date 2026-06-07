@@ -2,12 +2,15 @@
 //!
 //! Run with: cargo test --test db_test
 
-use std::sync::Arc;
-use tempfile;
 use rupoo::db::TaskRepo;
 use rupoo::error::AgentError;
-use rupoo::task::{finish_step, think_step, tool_call_step, Checkpoint, CheckpointStatus, Plan, PlanStatus, Step, StepStatus};
 use rupoo::shared::{ChatMessage, MessageRole};
+use rupoo::task::{
+    finish_step, think_step, tool_call_step, Checkpoint, CheckpointStatus, Plan, PlanStatus, Step,
+    StepStatus,
+};
+use std::sync::Arc;
+use tempfile::tempdir;
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
@@ -26,7 +29,7 @@ fn in_memory_repo() -> Arc<TaskRepo> {
 fn temp_file_repo() -> Arc<TaskRepo> {
     // Use a persistent temp path (not NamedTempFile which auto-deletes on drop,
     // breaking read-only connections that try to re-open the file).
-    let dir = tempfile::tempdir().expect("tempdir failed");
+    let dir = tempdir().expect("tempdir failed");
     let db_path = dir.path().join("test.db");
     let db_path_str = db_path.to_str().unwrap().to_string();
     // Leak the TempDir so it stays alive for the test duration — acceptable in tests
@@ -70,14 +73,18 @@ async fn load_nonexistent_plan_returns_error() -> Result<()> {
 #[tokio::test]
 async fn record_step_completion_advances_step_index() -> Result<()> {
     let repo = in_memory_repo();
-    let plan = new_plan("step test", vec![
-        think_step("step one"),
-        tool_call_step("echo", serde_json::json!({"text":"hi"})),
-        finish_step("done"),
-    ]);
+    let plan = new_plan(
+        "step test",
+        vec![
+            think_step("step one"),
+            tool_call_step("echo", serde_json::json!({"text":"hi"})),
+            finish_step("done"),
+        ],
+    );
 
     repo.save_plan(&plan).await?;
-    repo.record_step_completion(&plan.id, 0, StepStatus::Completed, Some("ok".into())).await?;
+    repo.record_step_completion(&plan.id, 0, StepStatus::Completed, Some("ok".into()))
+        .await?;
 
     let loaded = repo.load_plan(&plan.id).await?;
     assert_eq!(loaded.current_step_index, 1);
@@ -91,7 +98,8 @@ async fn last_step_completion_marks_plan_completed() -> Result<()> {
     let plan = new_plan("last step", vec![think_step("only step")]);
 
     repo.save_plan(&plan).await?;
-    repo.record_step_completion(&plan.id, 0, StepStatus::Completed, Some("done".into())).await?;
+    repo.record_step_completion(&plan.id, 0, StepStatus::Completed, Some("done".into()))
+        .await?;
 
     let loaded = repo.load_plan(&plan.id).await?;
     assert_eq!(loaded.status, PlanStatus::Completed);
@@ -104,7 +112,8 @@ async fn failed_step_marks_plan_failed() -> Result<()> {
     let plan = new_plan("fail plan", vec![think_step("will fail")]);
 
     repo.save_plan(&plan).await?;
-    repo.record_step_completion(&plan.id, 0, StepStatus::Failed, Some("__FAILED__".into())).await?;
+    repo.record_step_completion(&plan.id, 0, StepStatus::Failed, Some("__FAILED__".into()))
+        .await?;
 
     let loaded = repo.load_plan(&plan.id).await?;
     assert_eq!(loaded.status, PlanStatus::Failed);
@@ -114,13 +123,17 @@ async fn failed_step_marks_plan_failed() -> Result<()> {
 #[tokio::test]
 async fn waiting_for_input_preserves_plan_state() -> Result<()> {
     let repo = in_memory_repo();
-    let plan = new_plan("wait plan", vec![
-        think_step("start"),
-        tool_call_step("file_read", serde_json::json!({"path":"/tmp/x"})),
-    ]);
+    let plan = new_plan(
+        "wait plan",
+        vec![
+            think_step("start"),
+            tool_call_step("file_read", serde_json::json!({"path":"/tmp/x"})),
+        ],
+    );
 
     repo.save_plan(&plan).await?;
-    repo.record_step_completion(&plan.id, 1, StepStatus::WaitingForInput, None).await?;
+    repo.record_step_completion(&plan.id, 1, StepStatus::WaitingForInput, None)
+        .await?;
 
     let loaded = repo.load_plan(&plan.id).await?;
     assert_eq!(loaded.status, PlanStatus::WaitingForInput);
@@ -133,7 +146,8 @@ async fn record_step_completion_inserts_checkpoint() -> Result<()> {
     let plan = new_plan("ckpt test", vec![think_step("a"), finish_step("done")]);
 
     repo.save_plan(&plan).await?;
-    repo.record_step_completion(&plan.id, 0, StepStatus::Completed, Some("output A".into())).await?;
+    repo.record_step_completion(&plan.id, 0, StepStatus::Completed, Some("output A".into()))
+        .await?;
 
     let ckpt = repo.get_last_checkpoint(&plan.id).await?;
     assert!(ckpt.is_some());
@@ -172,7 +186,10 @@ async fn save_checkpoint_standalone_works() -> Result<()> {
 
     repo.save_checkpoint(&ckpt).await?;
 
-    let loaded = repo.get_last_checkpoint(&plan.id).await?.expect("missing checkpoint");
+    let loaded = repo
+        .get_last_checkpoint(&plan.id)
+        .await?
+        .expect("missing checkpoint");
     assert_eq!(loaded.output.as_deref(), Some("manual output"));
     Ok(())
 }
@@ -184,9 +201,10 @@ async fn save_checkpoint_standalone_works() -> Result<()> {
 #[tokio::test]
 async fn set_setting_upserts_value() -> Result<()> {
     let repo = in_memory_repo();
-    repo.set_setting("model.anthropic", "claude-sonnet-4-20250514").await?;
+    repo.set_setting("model.anthropic", "claude-sonnet-4-20250514")
+        .await?;
     repo.set_setting("model.anthropic", "claude-3").await?; // overwrite
-    // Verify via a second save — if it didn't upsert, second would error
+                                                            // Verify via a second save — if it didn't upsert, second would error
     repo.set_setting("model.anthropic", "claude-3.5").await?;
     Ok(())
 }
@@ -199,11 +217,14 @@ async fn set_setting_upserts_value() -> Result<()> {
 async fn save_and_load_ui_sessions() -> Result<()> {
     let repo = in_memory_repo();
 
-    let msgs = serde_json::to_string(&[
-        ChatMessage { role: MessageRole::User, content: "hello".into(), is_command_output: false },
-    ])?;
+    let msgs = serde_json::to_string(&[ChatMessage {
+        role: MessageRole::User,
+        content: "hello".into(),
+        is_command_output: false,
+    }])?;
 
-    repo.save_ui_session("sess-1", "Test Session", &msgs, true).await?;
+    repo.save_ui_session("sess-1", "Test Session", &msgs, true)
+        .await?;
 
     let sessions = repo.load_ui_sessions().await?;
     assert_eq!(sessions.len(), 1);
@@ -240,7 +261,8 @@ async fn reset_running_plans_to_pending_recovery() -> Result<()> {
     repo.save_plan(&plan).await?;
 
     // Directly set it to Running via record_step_completion
-    repo.record_step_completion(&plan.id, 0, StepStatus::Running, None).await?;
+    repo.record_step_completion(&plan.id, 0, StepStatus::Running, None)
+        .await?;
 
     // Now reset
     let recovered = repo.reset_running_plans_to_pending().await?;

@@ -157,33 +157,31 @@ pub async fn run_cmd(cmd: super::Commands) -> anyhow::Result<()> {
             let (repo, agent, _tool_executor) = crate::build_engine::build_engine(&db).await?;
             crate::executor::execute_plan(&repo, &agent, &task, input.as_deref()).await?;
         }
-        super::Commands::Git { action } => {
-            match action {
-                GitAction::Status => {
-                    let repo = rupoo::git::GitRepo::open(".")?;
-                    let branch = repo.current_branch()?;
-                    let statuses = repo.status()?;
-                    println!("Branch: {branch}");
-                    println!("Status ({} files):", statuses.len());
-                    for s in &statuses {
-                        println!("  [{:>15}] {}", s.status, s.path);
-                    }
-                }
-                GitAction::Commit { message, task } => {
-                    let repo = rupoo::git::GitRepo::open(".")?;
-                    let hash = if let Some(task_id) = task {
-                        repo.commit_with_task_ref(&message, &task_id)?
-                    } else {
-                        repo.commit_all(&message)?
-                    };
-                    println!("Committed {hash}: {message}");
-                }
-                GitAction::Pr { title, body } => {
-                    let url = rupoo::git::create_gh_pr(&title, &body)?;
-                    println!("PR created: {url}");
+        super::Commands::Git { action } => match action {
+            GitAction::Status => {
+                let repo = rupoo::git::GitRepo::open(".")?;
+                let branch = repo.current_branch()?;
+                let statuses = repo.status()?;
+                println!("Branch: {branch}");
+                println!("Status ({} files):", statuses.len());
+                for s in &statuses {
+                    println!("  [{:>15}] {}", s.status, s.path);
                 }
             }
-        }
+            GitAction::Commit { message, task } => {
+                let repo = rupoo::git::GitRepo::open(".")?;
+                let hash = if let Some(task_id) = task {
+                    repo.commit_with_task_ref(&message, &task_id)?
+                } else {
+                    repo.commit_all(&message)?
+                };
+                println!("Committed {hash}: {message}");
+            }
+            GitAction::Pr { title, body } => {
+                let url = rupoo::git::create_gh_pr(&title, &body)?;
+                println!("PR created: {url}");
+            }
+        },
         super::Commands::Config { action } => match action {
             ConfigAction::Set { key, value, db } => {
                 let db = resolve_db(db);
@@ -192,7 +190,7 @@ pub async fn run_cmd(cmd: super::Commands) -> anyhow::Result<()> {
                 info!(key = %key, "configuration saved");
                 if key.starts_with("api_key") {
                     let display: String = value.chars().take(8).collect();
-                    println!("Set {key} = {display}...", );
+                    println!("Set {key} = {display}...",);
                 } else {
                     println!("Set {key} = {value}");
                 }
@@ -270,8 +268,7 @@ pub async fn run_cmd(cmd: super::Commands) -> anyhow::Result<()> {
                 let db = resolve_db(db);
                 let repo = Arc::new(TaskRepo::new(&db)?);
                 let plan = repo.load_plan(&plan_id).await?;
-                let skill =
-                    SkillManager::plan_to_skill(&plan, &name, &description);
+                let skill = SkillManager::plan_to_skill(&plan, &name, &description);
                 let manager = SkillManager::new(SkillManager::default_dir());
                 manager.save_skill(&skill)?;
                 println!(
@@ -290,16 +287,10 @@ pub async fn run_cmd(cmd: super::Commands) -> anyhow::Result<()> {
                 "Demo Plan",
                 vec![
                     think_step("Analyze the current project structure"),
-                    tool_call_step(
-                        "list_directory",
-                        serde_json::json!({"path": "."}),
-                    ),
+                    tool_call_step("list_directory", serde_json::json!({"path": "."})),
                     think_step("Evaluate the directory listing results"),
                     wait_for_input_step("Do you want to continue with file reading?"),
-                    tool_call_step(
-                        "file_read",
-                        serde_json::json!({"path": "Cargo.toml"}),
-                    ),
+                    tool_call_step("file_read", serde_json::json!({"path": "Cargo.toml"})),
                     think_step("Summarize findings from the Cargo.toml"),
                     tool_call_step(
                         "echo",
@@ -319,8 +310,14 @@ pub async fn run_cmd(cmd: super::Commands) -> anyhow::Result<()> {
             rupoo::mcp_server::run_mcp_server().await?;
         }
         super::Commands::Serve { db: _, port } => {
-            println!("  {} Server mode (port {port}) — development only. Not for production use.", console::style("⚠").yellow());
-            println!("  {} Must bind to 127.0.0.1 and add auth before exposing.", console::style("→").dim());
+            println!(
+                "  {} Server mode (port {port}) — development only. Not for production use.",
+                console::style("⚠").yellow()
+            );
+            println!(
+                "  {} Must bind to 127.0.0.1 and add auth before exposing.",
+                console::style("→").dim()
+            );
             tokio::signal::ctrl_c().await?;
         }
         super::Commands::Completions { shell } => {
@@ -333,10 +330,18 @@ pub async fn run_cmd(cmd: super::Commands) -> anyhow::Result<()> {
                 "elvish" => clap_complete::Shell::Elvish,
                 "powershell" => clap_complete::Shell::PowerShell,
                 _ => {
-                    anyhow::bail!("unsupported shell '{}'. Supported: bash, zsh, fish, elvish, powershell", shell);
+                    anyhow::bail!(
+                        "unsupported shell '{}'. Supported: bash, zsh, fish, elvish, powershell",
+                        shell
+                    );
                 }
             };
-            clap_complete::generate(shell_type, &mut super::Cli::command(), "rupoo", &mut std::io::stdout());
+            clap_complete::generate(
+                shell_type,
+                &mut super::Cli::command(),
+                "rupoo",
+                &mut std::io::stdout(),
+            );
         }
         super::Commands::Status { short, db } => {
             let db = resolve_db(db);
@@ -353,7 +358,12 @@ pub async fn run_cmd(cmd: super::Commands) -> anyhow::Result<()> {
         super::Commands::Doctor { fix } => {
             crate::cli::cmds::doctor::run(fix).await?;
         }
-        super::Commands::Logs { follow, lines, level, prev } => {
+        super::Commands::Logs {
+            follow,
+            lines,
+            level,
+            prev,
+        } => {
             crate::cli::cmds::logs::run(follow, lines, level.as_deref(), prev).await?;
         }
     }
@@ -378,7 +388,9 @@ fn print_plan_summary(plan: &Plan) {
     for (i, step) in plan.steps.iter().enumerate() {
         let label = match step {
             rupoo::task::Step::Think { instruction, .. } => format!("THINK: {instruction}"),
-            rupoo::task::Step::ToolCall { tool_name, params, .. } => {
+            rupoo::task::Step::ToolCall {
+                tool_name, params, ..
+            } => {
                 format!("TOOL: {tool_name} ({})", params)
             }
             rupoo::task::Step::WaitForInput { prompt, .. } => format!("WAIT: {prompt}"),

@@ -3,9 +3,9 @@ use clap::{Parser, Subcommand};
 mod cli;
 mod tracing_setup;
 
-mod main_cli;
 mod build_engine;
 mod executor;
+mod main_cli;
 
 /// Rupoo — AI-powered assistant for your terminal.
 /// Run without subcommands to enter interactive mode.

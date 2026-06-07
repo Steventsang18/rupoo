@@ -35,19 +35,27 @@ fn validate_config_key(key: &str) -> AgentResult<()> {
         return Ok(());
     }
     // Find the closest match using simple edit distance
-    let best = VALID_CONFIG_KEYS.iter()
+    let best = VALID_CONFIG_KEYS
+        .iter()
         .filter_map(|valid| {
             let dist = levenshtein_distance(key, valid);
-            if dist <= 3 { Some((dist, *valid)) } else { None }
+            if dist <= 3 {
+                Some((dist, *valid))
+            } else {
+                None
+            }
         })
         .min_by_key(|(d, _)| *d);
 
     match best {
         Some((_, suggestion)) => Err(AgentError::Config(format!(
-            "unknown config key '{}'. Did you mean '{}'?", key, suggestion
+            "unknown config key '{}'. Did you mean '{}'?",
+            key, suggestion
         ))),
         None => Err(AgentError::Config(format!(
-            "unknown config key '{}'. Valid keys: {}", key, VALID_CONFIG_KEYS.join(", ")
+            "unknown config key '{}'. Valid keys: {}",
+            key,
+            VALID_CONFIG_KEYS.join(", ")
         ))),
     }
 }
@@ -56,8 +64,12 @@ fn validate_config_key(key: &str) -> AgentResult<()> {
 fn levenshtein_distance(a: &str, b: &str) -> usize {
     let a_len = a.chars().count();
     let b_len = b.chars().count();
-    if a_len == 0 { return b_len; }
-    if b_len == 0 { return a_len; }
+    if a_len == 0 {
+        return b_len;
+    }
+    if b_len == 0 {
+        return a_len;
+    }
 
     let mut prev: Vec<usize> = (0..=b_len).collect();
     let mut curr: Vec<usize> = vec![0; b_len + 1];
@@ -129,14 +141,11 @@ impl TaskRepo {
     ) -> AgentResult<Option<ConversationHistory>> {
         let sid = session_id.to_string();
         self.with_read_conn(move |conn| {
-            let mut stmt = conn.prepare(
-                "SELECT history_json FROM conversation_histories WHERE session_id = ?1",
-            )?;
+            let mut stmt = conn
+                .prepare("SELECT history_json FROM conversation_histories WHERE session_id = ?1")?;
 
             let result = stmt
-                .query_row(rusqlite::params![sid], |row| {
-                    row.get::<_, String>(0)
-                })
+                .query_row(rusqlite::params![sid], |row| row.get::<_, String>(0))
                 .ok();
 
             match result {
@@ -158,14 +167,19 @@ impl TaskRepo {
         // Try versioned format first
         if let Ok(wrapper) = serde_json::from_str::<serde_json::Value>(json) {
             if let Some(version) = wrapper.get("v").and_then(|v| v.as_u64()) {
-                let data = wrapper.get("data")
-                    .ok_or_else(|| AgentError::Other("history_json: missing 'data' field".into()))?;
+                let data = wrapper.get("data").ok_or_else(|| {
+                    AgentError::Other("history_json: missing 'data' field".into())
+                })?;
                 match version {
-                    1 => return serde_json::from_value(data.clone())
-                        .map_err(|e| AgentError::Other(format!("parse history v1: {e}"))),
-                    v => return Err(AgentError::Other(
-                        format!("history_json: unsupported schema version {v}")
-                    )),
+                    1 => {
+                        return serde_json::from_value(data.clone())
+                            .map_err(|e| AgentError::Other(format!("parse history v1: {e}")))
+                    }
+                    v => {
+                        return Err(AgentError::Other(format!(
+                            "history_json: unsupported schema version {v}"
+                        )))
+                    }
                 }
             }
             // No "v" field → legacy format, fall through to direct deserialization
@@ -228,7 +242,10 @@ impl TaskRepo {
     pub async fn delete_setting(&self, key: &str) -> AgentResult<()> {
         let key = key.to_string();
         self.with_conn(move |conn| {
-            conn.execute("DELETE FROM settings WHERE key = ?1", rusqlite::params![key])?;
+            conn.execute(
+                "DELETE FROM settings WHERE key = ?1",
+                rusqlite::params![key],
+            )?;
             Ok(())
         })
         .await
@@ -269,9 +286,7 @@ impl TaskRepo {
     }
 
     /// Load all UI sessions.
-    pub async fn load_ui_sessions(
-        &self,
-    ) -> AgentResult<Vec<(String, String, String, bool)>> {
+    pub async fn load_ui_sessions(&self) -> AgentResult<Vec<(String, String, String, bool)>> {
         self.with_read_conn(move |conn| {
             let mut stmt = conn.prepare(
                 "SELECT id, label, messages_json, is_active FROM ui_sessions ORDER BY updated_at DESC",
@@ -296,7 +311,10 @@ impl TaskRepo {
     pub async fn delete_ui_session(&self, id: &str) -> AgentResult<()> {
         let id = id.to_string();
         self.with_conn(move |conn| {
-            conn.execute("DELETE FROM ui_sessions WHERE id = ?", rusqlite::params![id])?;
+            conn.execute(
+                "DELETE FROM ui_sessions WHERE id = ?",
+                rusqlite::params![id],
+            )?;
             Ok(())
         })
         .await
@@ -413,11 +431,8 @@ impl TaskRepo {
     /// Count total memory entries.
     pub async fn count_memories(&self) -> AgentResult<usize> {
         self.with_read_conn(move |conn| {
-            let count: i64 = conn.query_row(
-                "SELECT COUNT(*) FROM memories",
-                [],
-                |row| row.get(0),
-            )?;
+            let count: i64 =
+                conn.query_row("SELECT COUNT(*) FROM memories", [], |row| row.get(0))?;
             Ok(count as usize)
         })
         .await
@@ -474,9 +489,15 @@ mod tests {
         history.push_user("Hello");
         history.push_assistant("Hi there!");
 
-        repo.save_conversation_history("session-1", &history).await.unwrap();
+        repo.save_conversation_history("session-1", &history)
+            .await
+            .unwrap();
 
-        let loaded = repo.load_conversation_history("session-1").await.unwrap().unwrap();
+        let loaded = repo
+            .load_conversation_history("session-1")
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(loaded.message_count(), 2);
 
         // Non-existent session returns None
@@ -491,22 +512,32 @@ mod tests {
         // Save — should produce versioned JSON {"v":1,"data":{...}}
         let mut history = ConversationHistory::new(5);
         history.push_user("test");
-        repo.save_conversation_history("vtest", &history).await.unwrap();
+        repo.save_conversation_history("vtest", &history)
+            .await
+            .unwrap();
 
         // Verify the stored JSON has the wrapper
-        let json: String = repo.with_read_conn(move |conn| {
-            conn.query_row(
-                "SELECT history_json FROM conversation_histories WHERE session_id = ?1",
-                rusqlite::params!["vtest"],
-                |row| row.get(0),
-            ).map_err(|e| AgentError::Other(e.to_string()))
-        }).await.unwrap();
+        let json: String = repo
+            .with_read_conn(move |conn| {
+                conn.query_row(
+                    "SELECT history_json FROM conversation_histories WHERE session_id = ?1",
+                    rusqlite::params!["vtest"],
+                    |row| row.get(0),
+                )
+                .map_err(|e| AgentError::Other(e.to_string()))
+            })
+            .await
+            .unwrap();
         let val: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert_eq!(val["v"], 1);
         assert!(val.get("data").is_some());
 
         // Load — should parse versioned format correctly
-        let loaded = repo.load_conversation_history("vtest").await.unwrap().unwrap();
+        let loaded = repo
+            .load_conversation_history("vtest")
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(loaded.message_count(), 1);
     }
 
@@ -521,11 +552,18 @@ mod tests {
                 "INSERT INTO conversation_histories (session_id, history_json, updated_at)
                  VALUES (?1, ?2, '2026-01-01T00:00:00Z')",
                 rusqlite::params!["legacy-session", raw_json],
-            ).map_err(|e| AgentError::Other(e.to_string()))
-        }).await.unwrap();
+            )
+            .map_err(|e| AgentError::Other(e.to_string()))
+        })
+        .await
+        .unwrap();
 
         // Load — should fall back to direct deserialization
-        let loaded = repo.load_conversation_history("legacy-session").await.unwrap().unwrap();
+        let loaded = repo
+            .load_conversation_history("legacy-session")
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(loaded.message_count(), 0);
     }
 }

@@ -8,8 +8,8 @@ use tracing::{info, warn};
 use crate::error::{AgentError, AgentResult};
 use crate::llm::history::{ConversationHistory, LlmChatMessage};
 use crate::llm::providers::{
-    build_anthropic_agent, build_anthropic_agent_streaming, build_openai_agent,
-    build_openai_agent_streaming, build_ollama_agent, build_ollama_agent_streaming,
+    build_anthropic_agent, build_anthropic_agent_streaming, build_ollama_agent,
+    build_ollama_agent_streaming, build_openai_agent, build_openai_agent_streaming,
 };
 use crate::llm::{AgentEvent, LlmConfig, LlmProvider, TokenUsage};
 
@@ -31,12 +31,12 @@ impl LlmGateway {
         let jail_root = std::env::current_dir()
             .ok()
             .map(|p| Self::normalize_path(&p));
-        
+
         info!(
             jail_root = ?jail_root.as_ref().map(|p| p.as_os_str()),
             "Created LlmGateway with jail_root from CWD"
         );
-        
+
         Self {
             jail_root,
             http_client: crate::http_client::HTTP_CLIENT.clone(),
@@ -46,12 +46,12 @@ impl LlmGateway {
 
     pub fn with_jail(config: LlmConfig, jail_root: PathBuf) -> Self {
         let normalized = Self::normalize_path(&jail_root);
-        
+
         info!(
             jail_root = ?normalized.as_os_str(),
             "Created LlmGateway with explicit jail_root"
         );
-        
+
         Self {
             config,
             jail_root: Some(normalized),
@@ -60,21 +60,29 @@ impl LlmGateway {
     }
 
     /// Create a gateway with a pre-built shared HTTP client.
-    pub fn with_http_client(config: LlmConfig, jail_root: Option<PathBuf>, http_client: Arc<reqwest::Client>) -> Self {
+    pub fn with_http_client(
+        config: LlmConfig,
+        jail_root: Option<PathBuf>,
+        http_client: Arc<reqwest::Client>,
+    ) -> Self {
         let jail_root = jail_root.map(|p| Self::normalize_path(&p));
-        
+
         info!(
             jail_root = ?jail_root.as_ref().map(|p| p.as_os_str()),
             "Created LlmGateway with custom HTTP client"
         );
-        
-        Self { config, jail_root, http_client }
+
+        Self {
+            config,
+            jail_root,
+            http_client,
+        }
     }
-    
+
     /// Normalize a path to an absolute, canonical path.
     /// This prevents path traversal attacks by resolving all symlinks and
     /// converting to an absolute path.
-    fn normalize_path(path: &PathBuf) -> PathBuf {
+    fn normalize_path(path: &std::path::Path) -> PathBuf {
         match path.canonicalize() {
             Ok(canonical) => canonical,
             Err(e) => {
@@ -85,22 +93,22 @@ impl LlmGateway {
                 );
                 // Fall back to absolute path if canonicalization fails
                 if path.is_absolute() {
-                    path.clone()
+                    path.to_path_buf()
                 } else {
                     match std::env::current_dir() {
                         Ok(cwd) => cwd.join(path),
-                        Err(_) => path.clone(),
+                        Err(_) => path.to_path_buf(),
                     }
                 }
             }
         }
     }
-    
+
     /// Validate that a path is within the jail_root.
     /// Returns Ok(path) if valid, Err if path traversal is detected.
-    pub fn validate_path(&self, path: &PathBuf) -> AgentResult<PathBuf> {
+    pub fn validate_path(&self, path: &std::path::Path) -> AgentResult<PathBuf> {
         let normalized = Self::normalize_path(path);
-        
+
         if let Some(ref jail) = self.jail_root {
             // Check if the normalized path starts with the jail_root
             if !normalized.starts_with(jail) {
@@ -110,10 +118,10 @@ impl LlmGateway {
                 });
             }
         }
-        
+
         Ok(normalized)
     }
-    
+
     /// Get the jail_root as an absolute path.
     pub fn jail_root_absolute(&self) -> Option<&PathBuf> {
         self.jail_root.as_ref()
@@ -127,8 +135,9 @@ impl LlmGateway {
     pub async fn chat(&self, messages: &[LlmChatMessage]) -> AgentResult<(String, TokenUsage)> {
         use rig::completion::Prompt;
 
-        let (system, rest): (Vec<_>, Vec<_>) =
-            messages.iter().partition(|m| m.role == crate::llm::LlmChatRole::System);
+        let (system, rest): (Vec<_>, Vec<_>) = messages
+            .iter()
+            .partition(|m| m.role == crate::llm::LlmChatRole::System);
 
         let preamble = system
             .first()
@@ -139,38 +148,75 @@ impl LlmGateway {
             "Continue.".to_string()
         } else {
             rest.iter()
-                .map(|m| format!("{}: {}", crate::llm::providers::role_label(&m.role), m.content))
+                .map(|m| {
+                    format!(
+                        "{}: {}",
+                        crate::llm::providers::role_label(&m.role),
+                        m.content
+                    )
+                })
                 .collect::<Vec<_>>()
                 .join("\n")
         };
 
         let jail_root = self.jail_root.clone();
-        let (text, prompt_tokens, completion_tokens): (String, u64, u64) = match &self.config.provider {
-            LlmProvider::Anthropic => {
-                let agent = build_anthropic_agent(&self.config, preamble, jail_root.as_deref(), &self.http_client)?;
-                let response = agent.prompt(&prompt)
-                    .extended_details()
-                    .await
-                    .map_err(|e| AgentError::Llm(format!("LLM request failed: {e}")))?;
-                (response.output, response.total_usage.input_tokens, response.total_usage.output_tokens)
-            }
-            LlmProvider::OpenAI => {
-                let agent = build_openai_agent(&self.config, preamble, jail_root.as_deref(), &self.http_client)?;
-                let response = agent.prompt(&prompt)
-                    .extended_details()
-                    .await
-                    .map_err(|e| AgentError::Llm(format!("LLM request failed: {e}")))?;
-                (response.output, response.total_usage.input_tokens, response.total_usage.output_tokens)
-            }
-            LlmProvider::Ollama => {
-                let agent = build_ollama_agent(&self.config, preamble, jail_root.as_deref(), &self.http_client)?;
-                let response = agent.prompt(&prompt)
-                    .extended_details()
-                    .await
-                    .map_err(|e| AgentError::Llm(format!("LLM request failed: {e}")))?;
-                (response.output, response.total_usage.input_tokens, response.total_usage.output_tokens)
-            }
-        };
+        let (text, prompt_tokens, completion_tokens): (String, u64, u64) =
+            match &self.config.provider {
+                LlmProvider::Anthropic => {
+                    let agent = build_anthropic_agent(
+                        &self.config,
+                        preamble,
+                        jail_root.as_deref(),
+                        &self.http_client,
+                    )?;
+                    let response = agent
+                        .prompt(&prompt)
+                        .extended_details()
+                        .await
+                        .map_err(|e| AgentError::Llm(format!("LLM request failed: {e}")))?;
+                    (
+                        response.output,
+                        response.total_usage.input_tokens,
+                        response.total_usage.output_tokens,
+                    )
+                }
+                LlmProvider::OpenAI => {
+                    let agent = build_openai_agent(
+                        &self.config,
+                        preamble,
+                        jail_root.as_deref(),
+                        &self.http_client,
+                    )?;
+                    let response = agent
+                        .prompt(&prompt)
+                        .extended_details()
+                        .await
+                        .map_err(|e| AgentError::Llm(format!("LLM request failed: {e}")))?;
+                    (
+                        response.output,
+                        response.total_usage.input_tokens,
+                        response.total_usage.output_tokens,
+                    )
+                }
+                LlmProvider::Ollama => {
+                    let agent = build_ollama_agent(
+                        &self.config,
+                        preamble,
+                        jail_root.as_deref(),
+                        &self.http_client,
+                    )?;
+                    let response = agent
+                        .prompt(&prompt)
+                        .extended_details()
+                        .await
+                        .map_err(|e| AgentError::Llm(format!("LLM request failed: {e}")))?;
+                    (
+                        response.output,
+                        response.total_usage.input_tokens,
+                        response.total_usage.output_tokens,
+                    )
+                }
+            };
 
         let usage = TokenUsage {
             prompt_tokens: prompt_tokens as u32,
@@ -189,6 +235,7 @@ impl LlmGateway {
     }
 
     /// Multi-turn agent chat loop with memory context and streaming.
+    #[allow(clippy::too_many_arguments)]
     pub async fn chat_agent_loop<F>(
         &self,
         user_message: &str,
@@ -235,28 +282,34 @@ impl LlmGateway {
             // compress_history_with_intent works on rig::Message directly,
             // but for now we use the LlmChatMessage path.
             let llm_messages = history.messages();
-            let compressed = crate::signal::compress_history_with_intent(llm_messages, intent_state);
-            compressed.iter().map(|m| {
-                use rig::message::{Message, UserContent, AssistantContent, Text};
-                use rig::OneOrMany;
-                match m.role {
-                    crate::llm::LlmChatRole::System | crate::llm::LlmChatRole::User => {
-                        Message::User {
-                            content: OneOrMany::one(UserContent::Text(Text { text: m.content.clone() }))
+            let compressed =
+                crate::signal::compress_history_with_intent(llm_messages, intent_state);
+            compressed
+                .iter()
+                .map(|m| {
+                    use rig::message::{AssistantContent, Message, Text, UserContent};
+                    use rig::OneOrMany;
+                    match m.role {
+                        crate::llm::LlmChatRole::System | crate::llm::LlmChatRole::User => {
+                            Message::User {
+                                content: OneOrMany::one(UserContent::Text(Text {
+                                    text: m.content.clone(),
+                                })),
+                            }
                         }
-                    }
-                    crate::llm::LlmChatRole::Assistant => {
-                        Message::Assistant {
+                        crate::llm::LlmChatRole::Assistant => Message::Assistant {
                             id: None,
-                            content: OneOrMany::one(AssistantContent::Text(Text { text: m.content.clone() }))
-                        }
+                            content: OneOrMany::one(AssistantContent::Text(Text {
+                                text: m.content.clone(),
+                            })),
+                        },
                     }
-                }
-            }).collect::<Vec<_>>()
+                })
+                .collect::<Vec<_>>()
         } else {
             raw_messages
         };
-        use rig::message::{Message, UserContent, Text};
+        use rig::message::{Message, Text, UserContent};
         use rig::OneOrMany;
         let mut messages = messages;
 
@@ -264,46 +317,78 @@ impl LlmGateway {
         // This keeps the preamble (static) separate from per-turn context (dynamic),
         // enabling prompt caching on the static prefix.
         if let Some(ctx) = dynamic_context {
-            messages.insert(0, Message::User {
-                content: OneOrMany::one(UserContent::Text(Text {
-                    text: format!("[System Context — updated this turn]\n{}", ctx),
-                })),
-            });
+            messages.insert(
+                0,
+                Message::User {
+                    content: OneOrMany::one(UserContent::Text(Text {
+                        text: format!("[System Context — updated this turn]\n{}", ctx),
+                    })),
+                },
+            );
         }
 
         messages.push(Message::User {
-            content: OneOrMany::one(UserContent::Text(Text { text: user_message.to_string() }))
+            content: OneOrMany::one(UserContent::Text(Text {
+                text: user_message.to_string(),
+            })),
         });
 
         match &self.config.provider {
             LlmProvider::Anthropic => {
-                let agent = build_anthropic_agent_streaming(&self.config, &preamble, self.jail_root.as_deref(), safe_mode, &self.http_client)?;
-                self.chat_stream_generic("Anthropic", agent, messages, max_turns, &mut on_event).await
+                let agent = build_anthropic_agent_streaming(
+                    &self.config,
+                    &preamble,
+                    self.jail_root.as_deref(),
+                    safe_mode,
+                    &self.http_client,
+                )?;
+                self.chat_stream_generic("Anthropic", agent, messages, max_turns, &mut on_event)
+                    .await
             }
             LlmProvider::OpenAI => {
-                let agent = build_openai_agent_streaming(&self.config, &preamble, self.jail_root.as_deref(), safe_mode, &self.http_client)?;
-                self.chat_stream_generic("OpenAI", agent, messages, max_turns, &mut on_event).await
+                let agent = build_openai_agent_streaming(
+                    &self.config,
+                    &preamble,
+                    self.jail_root.as_deref(),
+                    safe_mode,
+                    &self.http_client,
+                )?;
+                self.chat_stream_generic("OpenAI", agent, messages, max_turns, &mut on_event)
+                    .await
             }
             LlmProvider::Ollama => {
-                let agent = build_ollama_agent_streaming(&self.config, &preamble, self.jail_root.as_deref(), safe_mode, &self.http_client)?;
-                self.chat_stream_generic("Ollama", agent, messages, max_turns, &mut on_event).await
+                let agent = build_ollama_agent_streaming(
+                    &self.config,
+                    &preamble,
+                    self.jail_root.as_deref(),
+                    safe_mode,
+                    &self.http_client,
+                )?;
+                self.chat_stream_generic("Ollama", agent, messages, max_turns, &mut on_event)
+                    .await
             }
         }
     }
 
     /// Extract text from ToolResultContent.
-    fn extract_tool_result_text(content: &rig::OneOrMany<rig::message::ToolResultContent>) -> String {
-        content.iter().map(|item| {
-            match item {
+    fn extract_tool_result_text(
+        content: &rig::OneOrMany<rig::message::ToolResultContent>,
+    ) -> String {
+        content
+            .iter()
+            .map(|item| match item {
                 rig::message::ToolResultContent::Text(text) => text.text.clone(),
                 rig::message::ToolResultContent::Image(_) => "[Image]".to_string(),
-            }
-        }).collect::<Vec<_>>().join("\n")
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 
     /// Extract tool name and args from StreamedAssistantContent.
     /// Only emits from complete ToolCall; ToolCallDelta is partial (Name or Delta only).
-    fn extract_tool_info<R>(content: &rig::streaming::StreamedAssistantContent<R>) -> Option<(String, String)> {
+    fn extract_tool_info<R>(
+        content: &rig::streaming::StreamedAssistantContent<R>,
+    ) -> Option<(String, String)> {
         use rig::streaming::StreamedAssistantContent;
         match content {
             StreamedAssistantContent::ToolCall { tool_call, .. } => {
@@ -346,7 +431,8 @@ impl LlmGateway {
         use futures::StreamExt;
         use rig::streaming::StreamingPrompt;
 
-        let mut stream = agent.stream_prompt("")
+        let mut stream = agent
+            .stream_prompt("")
             .with_history(messages)
             .multi_turn(max_turns)
             .await;
@@ -357,29 +443,31 @@ impl LlmGateway {
         while let Some(result) = stream.next().await {
             let chunk = match result {
                 Ok(c) => c,
-                Err(e) => return Err(AgentError::Llm(format!("{provider_name} stream error: {e}"))),
+                Err(e) => {
+                    return Err(AgentError::Llm(format!(
+                        "{provider_name} stream error: {e}"
+                    )))
+                }
             };
             match chunk {
-                rig::agent::MultiTurnStreamItem::StreamAssistantItem(content) => {
-                    match content {
-                        rig::streaming::StreamedAssistantContent::Text(text) => {
-                            let t = text.text.clone();
-                            full_text.push_str(&t);
-                            on_event(AgentEvent::TextDelta(t));
-                        }
-                        _ => {
-                            if let Some((tool_name, args)) = Self::extract_tool_info(&content) {
-                                on_event(AgentEvent::ToolCall {
-                                    tool_name,
-                                    args,
-                                });
-                            }
+                rig::agent::MultiTurnStreamItem::StreamAssistantItem(content) => match content {
+                    rig::streaming::StreamedAssistantContent::Text(text) => {
+                        let t = text.text.clone();
+                        full_text.push_str(&t);
+                        on_event(AgentEvent::TextDelta(t));
+                    }
+                    _ => {
+                        if let Some((tool_name, args)) = Self::extract_tool_info(&content) {
+                            on_event(AgentEvent::ToolCall { tool_name, args });
                         }
                     }
-                }
+                },
                 rig::agent::MultiTurnStreamItem::StreamUserItem(user_item) => {
-                    let rig::streaming::StreamedUserContent::ToolResult { tool_result, .. } = user_item;
-                    let tool_name = tool_result.call_id.clone()
+                    let rig::streaming::StreamedUserContent::ToolResult { tool_result, .. } =
+                        user_item;
+                    let tool_name = tool_result
+                        .call_id
+                        .clone()
                         .unwrap_or_else(|| tool_result.id.clone());
                     let result_text = Self::extract_tool_result_text(&tool_result.content);
                     on_event(AgentEvent::ToolResult {
@@ -413,23 +501,28 @@ For each step, specify:
 
 Respond with a JSON array of steps."#;
 
-        use rig::message::{Message, UserContent, Text};
+        use rig::message::{Message, Text, UserContent};
         use rig::OneOrMany;
 
         let messages = vec![
             Message::User {
-                content: OneOrMany::one(UserContent::Text(Text { text: preamble.to_string() }))
+                content: OneOrMany::one(UserContent::Text(Text {
+                    text: preamble.to_string(),
+                })),
             },
             Message::User {
-                content: OneOrMany::one(UserContent::Text(Text { text: format!("Task: {}", task) }))
+                content: OneOrMany::one(UserContent::Text(Text {
+                    text: format!("Task: {}", task),
+                })),
             },
         ];
 
         let (response, _usage) = self.chat_with_messages(&messages).await?;
 
         // Parse JSON response
-        let steps: Vec<crate::llm::StepSpec> = serde_json::from_str(&response)
-            .map_err(|e| AgentError::Llm(format!("Failed to parse plan: {e}. Response: {}", response)))?;
+        let steps: Vec<crate::llm::StepSpec> = serde_json::from_str(&response).map_err(|e| {
+            AgentError::Llm(format!("Failed to parse plan: {e}. Response: {}", response))
+        })?;
 
         Ok(steps)
     }
@@ -442,8 +535,9 @@ Respond with a JSON array of steps."#;
         use rig::completion::Prompt;
 
         let jail_root = self.jail_root.clone();
-        let prompt_text = messages.iter().map(|m| {
-            match m {
+        let prompt_text = messages
+            .iter()
+            .map(|m| match m {
                 rig::message::Message::User { content } => {
                     let text = crate::llm::providers::extract_text_from_user_content(content);
                     format!("User: {}", text)
@@ -452,33 +546,59 @@ Respond with a JSON array of steps."#;
                     let text = crate::llm::providers::extract_text_from_assistant_content(content);
                     format!("Assistant: {}", text)
                 }
-            }
-        }).collect::<Vec<_>>().join("\n\n");
+            })
+            .collect::<Vec<_>>()
+            .join("\n\n");
 
-        let (text, prompt_tokens, completion_tokens): (String, u64, u64) = match &self.config.provider {
+        let (text, prompt_tokens, completion_tokens): (String, u64, u64) = match &self
+            .config
+            .provider
+        {
             LlmProvider::Anthropic => {
-                let agent = build_anthropic_agent(&self.config, "", jail_root.as_deref(), &self.http_client)?;
-                let response = agent.prompt(&prompt_text)
+                let agent = build_anthropic_agent(
+                    &self.config,
+                    "",
+                    jail_root.as_deref(),
+                    &self.http_client,
+                )?;
+                let response = agent
+                    .prompt(&prompt_text)
                     .extended_details()
                     .await
                     .map_err(|e| AgentError::Llm(format!("LLM request failed: {e}")))?;
-                (response.output, response.total_usage.input_tokens, response.total_usage.output_tokens)
+                (
+                    response.output,
+                    response.total_usage.input_tokens,
+                    response.total_usage.output_tokens,
+                )
             }
             LlmProvider::OpenAI => {
-                let agent = build_openai_agent(&self.config, "", jail_root.as_deref(), &self.http_client)?;
-                let response = agent.prompt(&prompt_text)
+                let agent =
+                    build_openai_agent(&self.config, "", jail_root.as_deref(), &self.http_client)?;
+                let response = agent
+                    .prompt(&prompt_text)
                     .extended_details()
                     .await
                     .map_err(|e| AgentError::Llm(format!("LLM request failed: {e}")))?;
-                (response.output, response.total_usage.input_tokens, response.total_usage.output_tokens)
+                (
+                    response.output,
+                    response.total_usage.input_tokens,
+                    response.total_usage.output_tokens,
+                )
             }
             LlmProvider::Ollama => {
-                let agent = build_ollama_agent(&self.config, "", jail_root.as_deref(), &self.http_client)?;
-                let response = agent.prompt(&prompt_text)
+                let agent =
+                    build_ollama_agent(&self.config, "", jail_root.as_deref(), &self.http_client)?;
+                let response = agent
+                    .prompt(&prompt_text)
                     .extended_details()
                     .await
                     .map_err(|e| AgentError::Llm(format!("LLM request failed: {e}")))?;
-                (response.output, response.total_usage.input_tokens, response.total_usage.output_tokens)
+                (
+                    response.output,
+                    response.total_usage.input_tokens,
+                    response.total_usage.output_tokens,
+                )
             }
         };
 
@@ -510,14 +630,118 @@ You help with software development, file operations, and system tasks.
 - Git: status, commit, create PR
 - MCP Server: exposes tools via JSON-RPC over stdio
 
+## Demand Clarification Flow
+When the user provides a vague or ambiguous demand, follow this structured flow:
+1. Start at clarification_state=core_confirm - ask 2-3 core questions with A/B choices
+2. Then move to clarification_state=detail_drill - ask follow-up questions based on choices
+3. Then move to clarification_state=summary - generate a need summary and ask for confirmation
+4. After user confirms, move to clarification_state=completed - generate and execute development plan
+
+Clarification Principles:
+- Keep questions focused and concise
+- Provide multiple-choice answers (A/B/C) whenever possible
+- Limit to 2-3 questions per turn to avoid overwhelming user
+- Goal is to get to actionable clarity in 3-5 turns max
+- After each user response, store their choices in collected_choices
+
+## Development Execution Mode (When clarification_state=completed)
+When clarification is completed and you start executing, you MUST:
+
+### Step 1: Show Development Plan
+Before writing any code, present a structured development plan:
+
+```
+## 🚀 Development Plan
+
+**Phase 1: 项目初始化**
+- [ ] 创建项目结构
+- [ ] 配置开发环境
+
+**Phase 2: 核心功能实现**
+- [ ] 实现功能 A
+- [ ] 实现功能 B
+
+**Phase 3: 测试验证**
+- [ ] 编写测试用例
+- [ ] 运行测试
+
+**Phase 4: 交付完成**
+- [ ] 代码审查
+- [ ] 交付文档
+```
+
+### Step 2: Execute with Progress Updates
+When executing each step:
+- Say what you're doing: "【Phase 1 - 1/4】正在创建项目结构..."
+- Explain why: "因为 [reason]"
+- Show the result: "✅ 完成！创建了 index.html"
+
+### Step 3: Show Progress After Each Step
+After completing each task, show:
+```
+【进度】Phase 1 - 1/4 ✅
+【总体进度】25% ████░░░░░░
+```
+
+## Transparent Execution
+When executing tasks, ALWAYS be transparent about your process:
+
+### Before Tool Calls - MANDATORY
+Before EVERY tool call, you MUST output a clear explanation in this format:
+```
+## 🔧 工具调用准备
+**即将执行**: [tool_name]
+**执行原因**: [详细说明为什么要调用这个工具]
+**输入参数**: 
+- [参数名1]: [参数值1]
+- [参数名2]: [参数值2]
+**预期结果**: [这个调用应该返回什么]
+```
+Example:
+```
+## 🔧 工具调用准备
+**即将执行**: file_write
+**执行原因**: 需要创建扫雷游戏的HTML骨架文件
+**输入参数**: 
+- path: "minesweeper/index.html"
+- content: "<!DOCTYPE html>..."
+**预期结果**: 文件创建成功，返回文件大小确认
+```
+
+### During Execution
+- Show your thinking process clearly: explain what you're about to do and why
+- When modifying code, show before/after context with explanations
+- Provide step-by-step explanations of what you are doing
+- Be open about your decision-making process and trade-offs you considered
+- If you make mistakes, acknowledge them and explain how you're fixing them
+
 ## Communication Style
-- When the user's request is ambiguous or unclear, ask clarifying questions before proceeding.
-- Before making irreversible changes (file writes, command execution), briefly confirm your plan.
-- Show your reasoning: explain what you are about to do and why, especially for multi-step tasks.
-- If a task requires multiple tool calls, describe the overall plan first, then execute step by step.
+- When the user's request is ambiguous or unclear, start the demand clarification flow
+- Before making irreversible changes (file writes, command execution), briefly confirm your plan
+- Show your reasoning: explain what you are about to do and why, especially for multi-step tasks
+- If a task requires multiple tool calls, describe the overall plan first, then execute step by step
+- Be transparent about every action you take - the user should understand exactly what you're doing
 
 ## Output Format
 Be concise and structured.
+
+### Development Progress Format:
+```
+## 📋 当前状态
+
+**阶段**: Phase X/Y
+**任务**: 具体任务名称
+**进度**: ████░░░░░░ 40%
+
+---
+
+## 🔍 正在执行
+
+[具体执行内容]
+
+**原因**: [为什么这么做]
+**预期**: [预期结果]
+```
 
 ### Reading files:
 Show the file path, then the relevant content or summary.
@@ -533,6 +757,9 @@ Be specific about what you find. Show relevant snippets.
 
 ### Errors:
 Be specific about the problem and the fix.
+
+### Making changes:
+Show before/after context and explain the changes.
 
 Keep responses tight. Use Markdown naturally for structure.
 "#.to_string()

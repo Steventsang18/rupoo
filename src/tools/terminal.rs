@@ -26,7 +26,14 @@ pub async fn execute_command(
     timeout_secs: Option<u64>,
     safety: &SafetyContext,
 ) -> AgentResult<String> {
-    execute_command_with_max_output(command, args, timeout_secs, safety, DEFAULT_MAX_OUTPUT_CHARS).await
+    execute_command_with_max_output(
+        command,
+        args,
+        timeout_secs,
+        safety,
+        DEFAULT_MAX_OUTPUT_CHARS,
+    )
+    .await
 }
 
 /// Execute a command with safety checks and custom max output length.
@@ -57,9 +64,9 @@ pub async fn execute_command_with_max_output(
     // NOTE: The following are explicitly NOT forwarded:
     // AWS_*, GITHUB_*, TOKEN, SECRET, PASSWORD, KEY, DOCKER_AUTH
 
-    let child = cmd.spawn().map_err(|e| {
-        AgentError::Tool(format!("failed to start '{}': {e}", command))
-    })?;
+    let child = cmd
+        .spawn()
+        .map_err(|e| AgentError::Tool(format!("failed to start '{}': {e}", command)))?;
 
     // Use wait_with_output which captures stdout/stderr and waits for exit
     let result = tokio::time::timeout(timeout, child.wait_with_output()).await;
@@ -106,7 +113,8 @@ mod tests {
     #[tokio::test]
     async fn test_forbidden_command() {
         let safety = SafetyContext::default();
-        let result = execute_command("sudo", &["echo".into(), "test".into()], Some(5), &safety).await;
+        let result =
+            execute_command("sudo", &["echo".into(), "test".into()], Some(5), &safety).await;
         assert!(result.is_err());
     }
 

@@ -1,7 +1,7 @@
-use std::sync::Arc;
 use anyhow::Result;
 use console::style;
 use rupoo::db::TaskRepo;
+use std::sync::Arc;
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -19,52 +19,84 @@ pub async fn output(db_path: &str, short: bool) -> Result<String> {
     let plan_counts = repo.count_plans_by_status().await?;
     let total_plans: i64 = plan_counts.iter().map(|(_, c)| c).sum();
 
-    let provider = repo.get_setting("active_provider").await?
+    let provider = repo
+        .get_setting("active_provider")
+        .await?
         .unwrap_or_else(|| "none".into());
     let model_key = format!("model.{provider}");
-    let model = repo.get_setting(&model_key).await?
+    let model = repo
+        .get_setting(&model_key)
+        .await?
         .unwrap_or_else(|| "(default)".into());
     let key_key = format!("api_key.{provider}");
-    let has_key = repo.get_setting(&key_key).await?
-        .map(|k| k.len() > 4).unwrap_or(false);
+    let has_key = repo
+        .get_setting(&key_key)
+        .await?
+        .map(|k| k.len() > 4)
+        .unwrap_or(false);
 
-    let skills = rupoo::skill::SkillManager::new(
-        rupoo::skill::SkillManager::default_dir(),
-    ).list_skills().unwrap_or_default();
+    let skills = rupoo::skill::SkillManager::new(rupoo::skill::SkillManager::default_dir())
+        .list_skills()
+        .unwrap_or_default();
 
     if short {
-        writeln!(out, "{}", format_short_line(
-            VERSION, total_plans as usize, &provider, &model, skills.len(),
-        ))?;
+        writeln!(
+            out,
+            "{}",
+            format_short_line(
+                VERSION,
+                total_plans as usize,
+                &provider,
+                &model,
+                skills.len(),
+            )
+        )?;
     } else {
         writeln!(out, "{} {}", style("Rupoo").bold(), style(VERSION).dim())?;
 
-        writeln!(out, "  {}  {:<12} {}     {}",
+        writeln!(
+            out,
+            "  {}  {:<12} {}     {}",
             style("├──").dim(),
             style("Data").cyan(),
             style(db_path).white(),
             style("(WAL mode)").dim(),
         )?;
-        writeln!(out, "  {}  {:<12} {}",
+        writeln!(
+            out,
+            "  {}  {:<12} {}",
             style("├──").dim(),
             style("Plans").cyan(),
             build_status_counts(&plan_counts),
         )?;
-        writeln!(out, "  {}  {:<12} {}  {} / {}",
+        writeln!(
+            out,
+            "  {}  {:<12} {}  {} / {}",
             style("├──").dim(),
             style("LLM").cyan(),
-            if has_key { style("●").green() } else { style("○").yellow() },
+            if has_key {
+                style("●").green()
+            } else {
+                style("○").yellow()
+            },
             style(&provider).white(),
             style(&model).dim(),
         )?;
-        writeln!(out, "  {}  {:<12} {} installed {}",
+        writeln!(
+            out,
+            "  {}  {:<12} {} installed {}",
             style("├──").dim(),
             style("Skills").cyan(),
             skills.len(),
-            if skills.is_empty() { String::new() }
-            else { format!("({})", skills.join(", ")) },
+            if skills.is_empty() {
+                String::new()
+            } else {
+                format!("({})", skills.join(", "))
+            },
         )?;
-        writeln!(out, "  {}  {:<12} {} {}",
+        writeln!(
+            out,
+            "  {}  {:<12} {} {}",
             style("├──").dim(),
             style("Memory").cyan(),
             style("●").green(),
@@ -82,17 +114,26 @@ fn build_status_counts(counts: &[(String, i64)]) -> String {
     for (status, count) in counts {
         let styled = match status.as_str() {
             "Completed" => style(format!("{} completed", count)).green(),
-            "Running"   => style(format!("{} running", count)).yellow(),
-            "Failed"    => style(format!("{} failed", count)).red(),
-            _           => style(format!("{} {}", count, status.to_lowercase())).dim(),
+            "Running" => style(format!("{} running", count)).yellow(),
+            "Failed" => style(format!("{} failed", count)).red(),
+            _ => style(format!("{} {}", count, status.to_lowercase())).dim(),
         };
         parts.push(styled.to_string());
     }
     parts.join("  ")
 }
 
-fn format_short_line(ver: &str, plans: usize, provider: &str, model: &str, skills: usize) -> String {
-    format!("Rupoo {} | {} plans | {}/{} | {} skills", ver, plans, provider, model, skills)
+fn format_short_line(
+    ver: &str,
+    plans: usize,
+    provider: &str,
+    model: &str,
+    skills: usize,
+) -> String {
+    format!(
+        "Rupoo {} | {} plans | {}/{} | {} skills",
+        ver, plans, provider, model, skills
+    )
 }
 
 fn git_status_line() -> Result<String> {
@@ -107,14 +148,21 @@ fn git_status_line() -> Result<String> {
             } else {
                 format!("{} uncommitted", files.len())
             };
-            writeln!(out, "  {}  {:<12} {}  {}",
-                style("├──").dim(), style("Git").cyan(),
-                style(branch).green(), style(status).dim(),
+            writeln!(
+                out,
+                "  {}  {:<12} {}  {}",
+                style("├──").dim(),
+                style("Git").cyan(),
+                style(branch).green(),
+                style(status).dim(),
             )?;
         }
         Err(_) => {
-            writeln!(out, "  {}  {:<12} {}",
-                style("├──").dim(), style("Git").cyan(),
+            writeln!(
+                out,
+                "  {}  {:<12} {}",
+                style("├──").dim(),
+                style("Git").cyan(),
                 style("(not a git repository)").dim(),
             )?;
         }
@@ -136,9 +184,13 @@ fn log_info_line() -> Result<String> {
     } else {
         "none".into()
     };
-    writeln!(out, "  {}  {:<12} {}  ({})",
-        style("└──").dim(), style("Log").cyan(),
-        style(log_path.display()).dim(), style(size).dim(),
+    writeln!(
+        out,
+        "  {}  {:<12} {}  ({})",
+        style("└──").dim(),
+        style("Log").cyan(),
+        style(log_path.display()).dim(),
+        style(size).dim(),
     )?;
     Ok(out)
 }

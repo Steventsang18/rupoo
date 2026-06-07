@@ -10,10 +10,10 @@
 //! they constrain *whether the output is correct*. This is the sustainable
 //! kind of external constraint — it scales with model capability.
 
-use serde::{Deserialize, Serialize};
 use rig::completion::ToolDefinition;
 use rig::tool::Tool;
 use rig::wasm_compat::{WasmCompatSend, WasmCompatSync};
+use serde::{Deserialize, Serialize};
 
 use crate::signal;
 
@@ -64,7 +64,9 @@ impl Tool for RunTestsTool {
     fn call(
         &self,
         args: RunTestsArgs,
-    ) -> impl std::future::Future<Output = Result<RunTestsOutput, Self::Error>> + WasmCompatSend + WasmCompatSync {
+    ) -> impl std::future::Future<Output = Result<RunTestsOutput, Self::Error>>
+           + WasmCompatSend
+           + WasmCompatSync {
         async move {
             let dir = args.path.unwrap_or_else(|| ".".to_string());
             let dir_path = std::path::Path::new(&dir);
@@ -80,7 +82,13 @@ impl Tool for RunTestsTool {
                 || dir_path.join("pyproject.toml").exists()
                 || std::fs::read_dir(dir_path)
                     .ok()
-                    .map(|d| d.take(100).any(|e| e.ok().map(|e| e.file_name().to_string_lossy().ends_with("_test.py")).unwrap_or(false)))
+                    .map(|d| {
+                        d.take(100).any(|e| {
+                            e.ok()
+                                .map(|e| e.file_name().to_string_lossy().ends_with("_test.py"))
+                                .unwrap_or(false)
+                        })
+                    })
                     .unwrap_or(false)
             {
                 (vec!["pytest"], "pytest")
@@ -99,7 +107,8 @@ impl Tool for RunTestsTool {
                     .args(&cmd[1..])
                     .current_dir(&dir)
                     .output(),
-            ).await;
+            )
+            .await;
 
             match result {
                 Ok(Ok(output)) => {
@@ -118,7 +127,14 @@ impl Tool for RunTestsTool {
                         success,
                         output: compressed,
                         test_runner: runner.into(),
-                        error: if success { None } else { Some(format!("Test runner exited with code {}", output.status.code().unwrap_or(-1))) },
+                        error: if success {
+                            None
+                        } else {
+                            Some(format!(
+                                "Test runner exited with code {}",
+                                output.status.code().unwrap_or(-1)
+                            ))
+                        },
                     })
                 }
                 Err(_) => {
@@ -130,14 +146,12 @@ impl Tool for RunTestsTool {
                         error: Some("Test runner timed out after 120 seconds".into()),
                     })
                 }
-                Ok(Err(e)) => {
-                    Ok(RunTestsOutput {
-                        success: false,
-                        output: String::new(),
-                        test_runner: runner.into(),
-                        error: Some(format!("Failed to run test command: {e}")),
-                    })
-                }
+                Ok(Err(e)) => Ok(RunTestsOutput {
+                    success: false,
+                    output: String::new(),
+                    test_runner: runner.into(),
+                    error: Some(format!("Failed to run test command: {e}")),
+                }),
             }
         }
     }
@@ -196,7 +210,9 @@ impl Tool for CheckOutputTool {
     fn call(
         &self,
         args: CheckOutputArgs,
-    ) -> impl std::future::Future<Output = Result<CheckOutputOutput, Self::Error>> + WasmCompatSend + WasmCompatSync {
+    ) -> impl std::future::Future<Output = Result<CheckOutputOutput, Self::Error>>
+           + WasmCompatSend
+           + WasmCompatSync {
         async move {
             let timeout_secs = args.timeout.unwrap_or(30).min(120);
             let safety = crate::safety::SafetyContext::default();
@@ -212,7 +228,8 @@ impl Tool for CheckOutputTool {
             }
 
             // Parse args
-            let arg_list: Vec<&str> = args.args
+            let arg_list: Vec<&str> = args
+                .args
                 .as_deref()
                 .map(|a| a.split_whitespace().collect())
                 .unwrap_or_default();
@@ -226,10 +243,9 @@ impl Tool for CheckOutputTool {
                 cmd.current_dir(cwd);
             }
 
-            let result = tokio::time::timeout(
-                std::time::Duration::from_secs(timeout_secs),
-                cmd.output(),
-            ).await;
+            let result =
+                tokio::time::timeout(std::time::Duration::from_secs(timeout_secs), cmd.output())
+                    .await;
 
             match result {
                 Ok(Ok(output)) => {
@@ -248,7 +264,14 @@ impl Tool for CheckOutputTool {
                         success,
                         stdout: compressed,
                         exit_code: output.status.code(),
-                        error: if success { None } else { Some(format!("Command exited with code {}", output.status.code().unwrap_or(-1))) },
+                        error: if success {
+                            None
+                        } else {
+                            Some(format!(
+                                "Command exited with code {}",
+                                output.status.code().unwrap_or(-1)
+                            ))
+                        },
                     })
                 }
                 Err(_) => {
@@ -260,14 +283,12 @@ impl Tool for CheckOutputTool {
                         error: Some(format!("Command timed out after {} seconds", timeout_secs)),
                     })
                 }
-                Ok(Err(e)) => {
-                    Ok(CheckOutputOutput {
-                        success: false,
-                        stdout: String::new(),
-                        exit_code: None,
-                        error: Some(format!("Failed to run command: {e}")),
-                    })
-                }
+                Ok(Err(e)) => Ok(CheckOutputOutput {
+                    success: false,
+                    stdout: String::new(),
+                    exit_code: None,
+                    error: Some(format!("Failed to run command: {e}")),
+                }),
             }
         }
     }
@@ -322,7 +343,9 @@ impl Tool for DiffCheckTool {
     fn call(
         &self,
         args: DiffCheckArgs,
-    ) -> impl std::future::Future<Output = Result<DiffCheckOutput, Self::Error>> + WasmCompatSend + WasmCompatSync {
+    ) -> impl std::future::Future<Output = Result<DiffCheckOutput, Self::Error>>
+           + WasmCompatSend
+           + WasmCompatSync {
         async move {
             let dir = args.path.unwrap_or_else(|| ".".to_string());
             let scope = args.scope.unwrap_or_else(|| "all".to_string());
@@ -342,12 +365,14 @@ impl Tool for DiffCheckTool {
 
             let stats = match stats_result {
                 Ok(o) => String::from_utf8_lossy(&o.stdout).trim().to_string(),
-                Err(e) => return Ok(DiffCheckOutput {
-                    success: false,
-                    diff: String::new(),
-                    stats: String::new(),
-                    error: Some(format!("Failed to run git diff: {e}")),
-                }),
+                Err(e) => {
+                    return Ok(DiffCheckOutput {
+                        success: false,
+                        diff: String::new(),
+                        stats: String::new(),
+                        error: Some(format!("Failed to run git diff: {e}")),
+                    })
+                }
             };
 
             // Get the actual diff content (without stat)
@@ -368,12 +393,14 @@ impl Tool for DiffCheckTool {
                     let raw = String::from_utf8_lossy(&o.stdout);
                     signal::compress_output(&raw, Some(8000))
                 }
-                Err(e) => return Ok(DiffCheckOutput {
-                    success: false,
-                    diff: String::new(),
-                    stats: String::new(),
-                    error: Some(format!("Failed to run git diff: {e}")),
-                }),
+                Err(e) => {
+                    return Ok(DiffCheckOutput {
+                        success: false,
+                        diff: String::new(),
+                        stats: String::new(),
+                        error: Some(format!("Failed to run git diff: {e}")),
+                    })
+                }
             };
 
             let has_changes = !stats.is_empty() && !stats.is_empty();
@@ -381,8 +408,16 @@ impl Tool for DiffCheckTool {
             Ok(DiffCheckOutput {
                 success: true,
                 diff,
-                stats: if has_changes { stats } else { "No changes detected".into() },
-                error: if has_changes { None } else { Some("No changes to diff".into()) },
+                stats: if has_changes {
+                    stats
+                } else {
+                    "No changes detected".into()
+                },
+                error: if has_changes {
+                    None
+                } else {
+                    Some("No changes to diff".into())
+                },
             })
         }
     }
@@ -419,7 +454,12 @@ mod tests {
     async fn test_run_tests_no_project() {
         let tmp = tempfile::tempdir().unwrap();
         let tool = RunTestsTool;
-        let result = tool.call(RunTestsArgs { path: Some(tmp.path().to_string_lossy().to_string()) }).await.unwrap();
+        let result = tool
+            .call(RunTestsArgs {
+                path: Some(tmp.path().to_string_lossy().to_string()),
+            })
+            .await
+            .unwrap();
         assert!(!result.success);
         assert!(result.error.unwrap().contains("No recognized project type"));
     }
@@ -429,7 +469,12 @@ mod tests {
         let tool = RunTestsTool;
         // Use CARGO_MANIFEST_DIR to get the project root directory
         // Use cargo check instead of cargo test for faster testing
-        let result = tool.call(RunTestsArgs { path: Some(env!("CARGO_MANIFEST_DIR").into()) }).await.unwrap();
+        let result = tool
+            .call(RunTestsArgs {
+                path: Some(env!("CARGO_MANIFEST_DIR").into()),
+            })
+            .await
+            .unwrap();
         // The tool may fail if cargo test takes too long or has issues
         // We just verify it correctly detected the project type
         assert_eq!(result.test_runner, "cargo test");
@@ -438,12 +483,15 @@ mod tests {
     #[tokio::test]
     async fn test_check_output_echo() {
         let tool = CheckOutputTool;
-        let result = tool.call(CheckOutputArgs {
-            command: "echo".into(),
-            args: Some("hello world".into()),
-            cwd: None,
-            timeout: Some(5),
-        }).await.unwrap();
+        let result = tool
+            .call(CheckOutputArgs {
+                command: "echo".into(),
+                args: Some("hello world".into()),
+                cwd: None,
+                timeout: Some(5),
+            })
+            .await
+            .unwrap();
         assert!(result.success);
         assert!(result.stdout.contains("hello world"));
     }
@@ -451,22 +499,28 @@ mod tests {
     #[tokio::test]
     async fn test_check_output_nonexistent() {
         let tool = CheckOutputTool;
-        let result = tool.call(CheckOutputArgs {
-            command: "nonexistent_command_xyz".into(),
-            args: None,
-            cwd: None,
-            timeout: Some(5),
-        }).await.unwrap();
+        let result = tool
+            .call(CheckOutputArgs {
+                command: "nonexistent_command_xyz".into(),
+                args: None,
+                cwd: None,
+                timeout: Some(5),
+            })
+            .await
+            .unwrap();
         assert!(!result.success);
     }
 
     #[tokio::test]
     async fn test_diff_check_in_git_repo() {
         let tool = DiffCheckTool;
-        let result = tool.call(DiffCheckArgs {
-            scope: Some("all".into()),
-            path: Some(env!("CARGO_MANIFEST_DIR").into()),
-        }).await.unwrap();
+        let result = tool
+            .call(DiffCheckArgs {
+                scope: Some("all".into()),
+                path: Some(env!("CARGO_MANIFEST_DIR").into()),
+            })
+            .await
+            .unwrap();
         assert!(result.success);
     }
 }

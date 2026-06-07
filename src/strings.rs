@@ -44,7 +44,7 @@ pub fn normalize_whitespace(s: &str) -> Cow<'_, str> {
     if trimmed.contains("\n\n") || trimmed.contains("\r\n") {
         let mut result = String::with_capacity(trimmed.len());
         let mut last_was_newline = false;
-        
+
         for c in trimmed.chars() {
             if c == '\r' {
                 continue;
@@ -85,15 +85,15 @@ pub fn truncate(s: &str, max_len: usize) -> Cow<'_, str> {
     if char_count <= max_len {
         return Cow::Borrowed(s);
     }
-    
+
     if max_len == 0 {
         return Cow::Borrowed("");
     }
-    
+
     if max_len == 1 {
         return Cow::Owned("…".to_string());
     }
-    
+
     let mut result: String = s.chars().take(max_len).collect();
     result.push('…');
     Cow::Owned(result)
@@ -103,7 +103,8 @@ pub fn truncate(s: &str, max_len: usize) -> Cow<'_, str> {
 ///
 /// Returns an iterator over the lines.
 pub fn split_lines(s: &str) -> impl Iterator<Item = &str> {
-    s.split_inclusive(&['\n', '\r']).filter(|line| !line.is_empty())
+    s.split_inclusive(&['\n', '\r'])
+        .filter(|line| !line.is_empty())
 }
 
 /// Escape special characters in a string for use in JSON or similar contexts.
@@ -117,12 +118,12 @@ pub fn split_lines(s: &str) -> impl Iterator<Item = &str> {
 /// assert_eq!(escape_json("Line1\nLine2"), "Line1\\nLine2");
 /// ```
 pub fn escape_json(s: &str) -> Cow<'_, str> {
-    let needs_escape = s.contains(|c| matches!(c, '"' | '\\' | '\n' | '\r' | '\t'));
-    
+    let needs_escape = s.contains(['"', '\\', '\n', '\r', '\t']);
+
     if !needs_escape {
         return Cow::Borrowed(s);
     }
-    
+
     let mut result = String::with_capacity(s.len() * 2);
     for c in s.chars() {
         match c {
@@ -148,30 +149,30 @@ pub fn escape_json(s: &str) -> Cow<'_, str> {
 /// ```
 pub fn strip_ansi(s: &str) -> Cow<'_, str> {
     const ESC: u8 = 0x1b;
-    
+
     if !s.as_bytes().contains(&ESC) {
         return Cow::Borrowed(s);
     }
-    
+
     let mut result = String::with_capacity(s.len());
     let mut in_escape = false;
-    
+
     for c in s.chars() {
         if c == ESC as char {
             in_escape = true;
             continue;
         }
-        
+
         if in_escape {
             if c == 'm' {
                 in_escape = false;
             }
             continue;
         }
-        
+
         result.push(c);
     }
-    
+
     Cow::Owned(result)
 }
 
@@ -182,10 +183,10 @@ pub fn replace_all<'a>(s: &'a str, from: &str, to: &str) -> Cow<'a, str> {
     if !s.contains(from) {
         return Cow::Borrowed(s);
     }
-    
+
     let from_len = from.len();
     let to_len = to.len();
-    
+
     // Estimate capacity: worst case if every character is replaced
     let estimated_capacity = if to_len > from_len {
         s.len() + (s.len() / from_len) * (to_len - from_len)
@@ -193,7 +194,7 @@ pub fn replace_all<'a>(s: &'a str, from: &str, to: &str) -> Cow<'a, str> {
         s.len()
     };
     let mut result = String::with_capacity(estimated_capacity.max(s.len()));
-    
+
     let mut start = 0;
     while let Some(pos) = s[start..].find(from) {
         let abs_pos = start + pos;
@@ -202,7 +203,7 @@ pub fn replace_all<'a>(s: &'a str, from: &str, to: &str) -> Cow<'a, str> {
         start = abs_pos + from_len;
     }
     result.push_str(&s[start..]);
-    
+
     Cow::Owned(result)
 }
 

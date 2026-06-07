@@ -1,10 +1,15 @@
-use std::sync::Arc;
 use anyhow::Result;
 use console::style;
 use rupoo::db::TaskRepo;
+use std::sync::Arc;
 
 const PROVIDER_KEYS: &[(&str, &str, &str, &str)] = &[
-    ("anthropic", "claude-sonnet-4-20250514", "api_key.anthropic", ""),
+    (
+        "anthropic",
+        "claude-sonnet-4-20250514",
+        "api_key.anthropic",
+        "",
+    ),
     ("openai", "gpt-4o", "api_key.openai", "base_url.openai"),
     ("ollama", "llama3.2", "", ""),
 ];
@@ -22,15 +27,21 @@ pub async fn output(db_path: &str, action: Option<crate::main_cli::ModelAction>)
     match action {
         crate::main_cli::ModelAction::Show => cmd_show_string(&repo).await,
         crate::main_cli::ModelAction::List => cmd_list_string(&repo).await,
-        crate::main_cli::ModelAction::Set { target } => cmd_set_string(&repo, target.as_deref()).await,
+        crate::main_cli::ModelAction::Set { target } => {
+            cmd_set_string(&repo, target.as_deref()).await
+        }
     }
 }
 
 async fn cmd_show_string(repo: &TaskRepo) -> Result<String> {
     use std::fmt::Write;
-    let provider = repo.get_setting("active_provider").await?
+    let provider = repo
+        .get_setting("active_provider")
+        .await?
         .unwrap_or_else(|| "none".into());
-    let model = repo.get_setting(&format!("model.{provider}")).await?
+    let model = repo
+        .get_setting(&format!("model.{provider}"))
+        .await?
         .or_else(|| provider_default_model(&provider).map(|s| s.to_string()))
         .unwrap_or_else(|| "(unknown)".into());
     let api_key = repo.get_setting(&format!("api_key.{provider}")).await?;
@@ -39,13 +50,17 @@ async fn cmd_show_string(repo: &TaskRepo) -> Result<String> {
     writeln!(out, "{}", style("Current LLM Configuration:").bold())?;
     let icon = if api_key.is_some() { "●" } else { "○" };
     let key_display = render_key_status(api_key.as_deref());
-    writeln!(out, "  {}  {}  {} / {}",
+    writeln!(
+        out,
+        "  {}  {}  {} / {}",
         icon,
         style("Provider:").cyan(),
         style(&provider).white(),
         style(&model).dim(),
     )?;
-    writeln!(out, "  {}  {}  {}",
+    writeln!(
+        out,
+        "  {}  {}  {}",
         style("      "),
         style("API Key:").cyan(),
         key_display,
@@ -56,7 +71,9 @@ async fn cmd_show_string(repo: &TaskRepo) -> Result<String> {
 async fn cmd_list_string(repo: &TaskRepo) -> Result<String> {
     use std::fmt::Write;
     let mut out = String::new();
-    writeln!(out, "{:<12} {:<30} {:<22}  Status",
+    writeln!(
+        out,
+        "{:<12} {:<30} {:<22}  Status",
         style("Provider").bold(),
         style("Default Model").bold(),
         style("Config Key").bold(),
@@ -72,9 +89,7 @@ async fn cmd_list_string(repo: &TaskRepo) -> Result<String> {
         } else {
             style("○ not set").yellow().to_string()
         };
-        writeln!(out, "{:<12} {:<30} {:<22}  {}",
-            name, model, key, status,
-        )?;
+        writeln!(out, "{:<12} {:<30} {:<22}  {}", name, model, key, status,)?;
     }
     Ok(out)
 }
@@ -83,15 +98,25 @@ async fn cmd_set_string(repo: &TaskRepo, target: Option<&str>) -> Result<String>
     use std::fmt::Write;
     let target = match target {
         Some(t) => t.to_owned(),
-        None => return Ok("  Usage: /model set <provider> (interactive picker not available in TUI)".into()),
+        None => {
+            return Ok(
+                "  Usage: /model set <provider> (interactive picker not available in TUI)".into(),
+            )
+        }
     };
 
     let (provider, model) = parse_target(&target)
         .ok_or_else(|| anyhow::anyhow!("Invalid format. Use: <provider> or <provider>/<model>"))?;
 
     if !PROVIDER_KEYS.iter().any(|(n, _, _, _)| *n == provider) {
-        anyhow::bail!("Unknown provider '{provider}'. Valid: {}",
-            PROVIDER_KEYS.iter().map(|(n,_,_,_)| *n).collect::<Vec<_>>().join(", "));
+        anyhow::bail!(
+            "Unknown provider '{provider}'. Valid: {}",
+            PROVIDER_KEYS
+                .iter()
+                .map(|(n, _, _, _)| *n)
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
     }
 
     repo.set_setting("active_provider", provider).await?;
@@ -100,19 +125,32 @@ async fn cmd_set_string(repo: &TaskRepo, target: Option<&str>) -> Result<String>
     match model {
         Some(m) => {
             repo.set_setting(&format!("model.{provider}"), m).await?;
-            writeln!(out, "{} Provider switched to: {}", style("✓").green(), provider)?;
+            writeln!(
+                out,
+                "{} Provider switched to: {}",
+                style("✓").green(),
+                provider
+            )?;
             writeln!(out, "{} Model set to: {}", style("✓").green(), m)?;
         }
         None => {
             let default_model = provider_default_model(provider)
                 .ok_or_else(|| anyhow::anyhow!("No default model for {provider}"))?;
-            writeln!(out, "{} Provider switched to: {} ({})", style("✓").green(), provider, default_model)?;
+            writeln!(
+                out,
+                "{} Provider switched to: {} ({})",
+                style("✓").green(),
+                provider,
+                default_model
+            )?;
         }
     }
 
     let key_name = format!("api_key.{provider}");
     if repo.get_setting(&key_name).await?.is_none() {
-        writeln!(out, "  {} Tip: set API key with: rupoo config set {} <key>",
+        writeln!(
+            out,
+            "  {} Tip: set API key with: rupoo config set {} <key>",
             style("ℹ").yellow(),
             key_name,
         )?;
@@ -123,7 +161,8 @@ async fn cmd_set_string(repo: &TaskRepo, target: Option<&str>) -> Result<String>
 // -- Pure helpers --
 
 fn provider_default_model(name: &str) -> Option<&'static str> {
-    PROVIDER_KEYS.iter()
+    PROVIDER_KEYS
+        .iter()
         .find(|(n, _, _, _)| *n == name)
         .map(|(_, m, _, _)| *m)
 }
@@ -132,7 +171,12 @@ fn render_key_status(key: Option<&str>) -> String {
     match key {
         Some(k) if k.len() > 8 => {
             let prefix: String = k.chars().take(8).collect();
-            format!("{} {} ({})", style("●").green(), style(prefix).dim(), style("set").dim())
+            format!(
+                "{} {} ({})",
+                style("●").green(),
+                style(prefix).dim(),
+                style("set").dim()
+            )
         }
         Some(_) => format!("{} set", style("●").green()),
         None => format!("{} not set", style("○").yellow()),
@@ -143,7 +187,9 @@ fn parse_target(target: &str) -> Option<(&str, Option<&str>)> {
     let parts: Vec<&str> = target.splitn(2, '/').collect();
     match parts.len() {
         1 if !parts[0].is_empty() => Some((parts[0], None)),
-        2 if !parts[0].is_empty() && !parts[1].is_empty() && !parts[1].contains('/') => Some((parts[0], Some(parts[1]))),
+        2 if !parts[0].is_empty() && !parts[1].is_empty() && !parts[1].contains('/') => {
+            Some((parts[0], Some(parts[1])))
+        }
         _ => None,
     }
 }
@@ -156,7 +202,11 @@ mod tests {
     fn test_provider_default_model_exists() {
         for (name, default_model, _, _) in PROVIDER_KEYS {
             let found = provider_default_model(name);
-            assert_eq!(found, Some(*default_model), "model for {name} should match PROVIDER_KEYS");
+            assert_eq!(
+                found,
+                Some(*default_model),
+                "model for {name} should match PROVIDER_KEYS"
+            );
         }
     }
 

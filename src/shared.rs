@@ -29,19 +29,39 @@ pub enum MessageRole {
 
 impl ChatMessage {
     pub fn user(text: String) -> Self {
-        Self { role: MessageRole::User, content: text, is_command_output: false }
+        Self {
+            role: MessageRole::User,
+            content: text,
+            is_command_output: false,
+        }
     }
     pub fn assistant(text: String) -> Self {
-        Self { role: MessageRole::Assistant, content: text, is_command_output: false }
+        Self {
+            role: MessageRole::Assistant,
+            content: text,
+            is_command_output: false,
+        }
     }
     pub fn system(text: String) -> Self {
-        Self { role: MessageRole::System, content: text, is_command_output: false }
+        Self {
+            role: MessageRole::System,
+            content: text,
+            is_command_output: false,
+        }
     }
     pub fn command_output(text: String) -> Self {
-        Self { role: MessageRole::System, content: text, is_command_output: true }
+        Self {
+            role: MessageRole::System,
+            content: text,
+            is_command_output: true,
+        }
     }
     pub fn error(text: String) -> Self {
-        Self { role: MessageRole::Error, content: text, is_command_output: false }
+        Self {
+            role: MessageRole::Error,
+            content: text,
+            is_command_output: false,
+        }
     }
 }
 
@@ -100,9 +120,17 @@ pub enum AgentToTui {
     /// Streaming text chunk for incremental display.
     StreamChunk { text: String },
     /// LLM configuration status update.
-    LlmStatus { configured: bool, provider: String, model_label: String },
+    LlmStatus {
+        configured: bool,
+        provider: String,
+        model_label: String,
+    },
     /// Step progress update for Plan Mode.
-    StepProgress { step_index: usize, total: usize, step_name: String },
+    StepProgress {
+        step_index: usize,
+        total: usize,
+        step_name: String,
+    },
     /// Tool call status update for Chat Mode progress display.
     ToolStatus { tool_name: String, phase: ToolPhase },
     /// Plan task list for display in Plan Mode.
@@ -123,10 +151,16 @@ pub enum ToolPhase {
 impl AgentToTui {
     /// Check if this is a state event (triggers UI state change).
     pub fn is_event(&self) -> bool {
-        matches!(self,
-            Self::Message(_) | Self::Thinking | Self::Idle |
-            Self::StreamChunk { .. } | Self::RequestApproval(_) |
-            Self::StepProgress { .. } | Self::ToolStatus { .. })
+        matches!(
+            self,
+            Self::Message(_)
+                | Self::Thinking
+                | Self::Idle
+                | Self::StreamChunk { .. }
+                | Self::RequestApproval(_)
+                | Self::StepProgress { .. }
+                | Self::ToolStatus { .. }
+        )
     }
 
     /// Check if this is a data update (informational, non-UI-state).

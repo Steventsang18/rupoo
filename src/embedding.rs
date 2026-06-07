@@ -59,7 +59,9 @@ impl EmbeddingService {
                     ))?;
 
                 // Use text-embedding-3-small by default (good balance of quality and cost)
-                let model = config.embedding_model.clone()
+                let model = config
+                    .embedding_model
+                    .clone()
                     .unwrap_or_else(|| "text-embedding-3-small".to_string());
 
                 let dimension = Self::get_openai_dimension(&model);
@@ -82,11 +84,15 @@ impl EmbeddingService {
             }
 
             LlmProvider::Ollama => {
-                let base_url = config.base_url.clone()
+                let base_url = config
+                    .base_url
+                    .clone()
                     .unwrap_or_else(|| "http://localhost:11434".to_string());
 
                 // Use nomic-embed-text by default (good quality, small footprint)
-                let model = config.embedding_model.clone()
+                let model = config
+                    .embedding_model
+                    .clone()
                     .unwrap_or_else(|| "nomic-embed-text".to_string());
 
                 let dimension = Self::get_ollama_dimension(&model);
@@ -109,7 +115,9 @@ impl EmbeddingService {
             }
 
             LlmProvider::Anthropic => {
-                warn!("Anthropic does not support embeddings. Using fallback: hash-based embedding.");
+                warn!(
+                    "Anthropic does not support embeddings. Using fallback: hash-based embedding."
+                );
 
                 // For Anthropic, we'll use a simple hash-based embedding
                 // This is not ideal but provides a fallback
@@ -165,23 +173,29 @@ impl EmbeddingService {
             "openai" => self.embed_openai(text).await?,
             "ollama" => self.embed_ollama(text).await?,
             "anthropic-fallback" => self.embed_fallback(text).await?,
-            _ => return Err(AgentError::Other(format!("Unknown embedding provider: {}", self.provider))),
+            _ => {
+                return Err(AgentError::Other(format!(
+                    "Unknown embedding provider: {}",
+                    self.provider
+                )))
+            }
         };
 
-        debug!(
-            dimension = embedding.len(),
-            "embedding generated"
-        );
+        debug!(dimension = embedding.len(), "embedding generated");
 
         Ok(embedding)
     }
 
     /// Generate embedding using OpenAI API
     async fn embed_openai(&self, text: &str) -> AgentResult<Vec<f32>> {
-        let api_key = self.api_key.as_ref()
+        let api_key = self
+            .api_key
+            .as_ref()
             .ok_or_else(|| AgentError::Config("OpenAI API key not set".into()))?;
 
-        let base_url = self.base_url.as_deref()
+        let base_url = self
+            .base_url
+            .as_deref()
             .unwrap_or("https://api.openai.com/v1");
 
         let url = format!("{}/embeddings", base_url);
@@ -191,7 +205,8 @@ impl EmbeddingService {
             "input": text,
         });
 
-        let response = self.http_client
+        let response = self
+            .http_client
             .post(&url)
             .header("Authorization", format!("Bearer {}", api_key))
             .json(&request)
@@ -202,10 +217,15 @@ impl EmbeddingService {
         if !response.status().is_success() {
             let status = response.status();
             let body = response.text().await.unwrap_or_default();
-            return Err(AgentError::Llm(format!("OpenAI embedding failed: {} - {}", status, body)));
+            return Err(AgentError::Llm(format!(
+                "OpenAI embedding failed: {} - {}",
+                status, body
+            )));
         }
 
-        let json: serde_json::Value = response.json().await
+        let json: serde_json::Value = response
+            .json()
+            .await
             .map_err(|e| AgentError::Llm(format!("Failed to parse OpenAI response: {}", e)))?;
 
         // Extract embedding from response
@@ -221,7 +241,9 @@ impl EmbeddingService {
 
     /// Generate embedding using Ollama API
     async fn embed_ollama(&self, text: &str) -> AgentResult<Vec<f32>> {
-        let base_url = self.base_url.as_ref()
+        let base_url = self
+            .base_url
+            .as_ref()
             .ok_or_else(|| AgentError::Config("Ollama base URL not set".into()))?;
 
         let url = format!("{}/api/embeddings", base_url);
@@ -231,7 +253,8 @@ impl EmbeddingService {
             "prompt": text,
         });
 
-        let response = self.http_client
+        let response = self
+            .http_client
             .post(&url)
             .json(&request)
             .send()
@@ -241,10 +264,15 @@ impl EmbeddingService {
         if !response.status().is_success() {
             let status = response.status();
             let body = response.text().await.unwrap_or_default();
-            return Err(AgentError::Llm(format!("Ollama embedding failed: {} - {}", status, body)));
+            return Err(AgentError::Llm(format!(
+                "Ollama embedding failed: {} - {}",
+                status, body
+            )));
         }
 
-        let json: serde_json::Value = response.json().await
+        let json: serde_json::Value = response
+            .json()
+            .await
             .map_err(|e| AgentError::Llm(format!("Failed to parse Ollama response: {}", e)))?;
 
         // Extract embedding from response
@@ -272,7 +300,9 @@ impl EmbeddingService {
         let mut embedding = Vec::with_capacity(self.dimension);
         let mut state = hash;
         for _ in 0..self.dimension {
-            state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
             embedding.push((state as f32 / u64::MAX as f32 - 0.5) * 2.0);
         }
 
@@ -329,14 +359,26 @@ mod tests {
 
     #[test]
     fn test_openai_dimensions() {
-        assert_eq!(EmbeddingService::get_openai_dimension("text-embedding-3-small"), 1536);
-        assert_eq!(EmbeddingService::get_openai_dimension("text-embedding-3-large"), 3072);
-        assert_eq!(EmbeddingService::get_openai_dimension("text-embedding-ada-002"), 1536);
+        assert_eq!(
+            EmbeddingService::get_openai_dimension("text-embedding-3-small"),
+            1536
+        );
+        assert_eq!(
+            EmbeddingService::get_openai_dimension("text-embedding-3-large"),
+            3072
+        );
+        assert_eq!(
+            EmbeddingService::get_openai_dimension("text-embedding-ada-002"),
+            1536
+        );
     }
 
     #[test]
     fn test_ollama_dimensions() {
-        assert_eq!(EmbeddingService::get_ollama_dimension("nomic-embed-text"), 768);
+        assert_eq!(
+            EmbeddingService::get_ollama_dimension("nomic-embed-text"),
+            768
+        );
         assert_eq!(EmbeddingService::get_ollama_dimension("all-minilm"), 384);
     }
 }

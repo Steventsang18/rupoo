@@ -37,7 +37,9 @@ async fn test_count_memories() {
     assert_eq!(repo.count_memories().await.unwrap(), 0);
 
     // Store a memory
-    repo.store_memory("test content", &["test"], "cli_test").await.unwrap();
+    repo.store_memory("test content", &["test"], "cli_test")
+        .await
+        .unwrap();
     assert_eq!(repo.count_memories().await.unwrap(), 1);
 }
 
@@ -61,11 +63,11 @@ async fn test_prune_plans() {
     assert_eq!(deleted, 0); // not completed yet
 
     // Create a completed plan by saving and then completing
-    let plan2 = Plan::new("Old Completed", vec![
-        rupoo::task::finish_step("done"),
-    ]);
+    let plan2 = Plan::new("Old Completed", vec![rupoo::task::finish_step("done")]);
     repo.save_plan(&plan2).await.unwrap();
-    repo.record_step_completion(&plan2.id, 0, rupoo::task::StepStatus::Completed, None).await.unwrap();
+    repo.record_step_completion(&plan2.id, 0, rupoo::task::StepStatus::Completed, None)
+        .await
+        .unwrap();
 
     tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
     let before2 = chrono::Utc::now().to_rfc3339();

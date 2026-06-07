@@ -1,7 +1,9 @@
 //! Command completion for Rupoo CLI
-//! 
+//!
 //! Provides intelligent tab completion for commands, file paths, and tools.
 
+use rustyline::highlight::CmdKind;
+use rustyline::history::FileHistory;
 use rustyline::{
     completion::{Completer, Pair},
     error::ReadlineError,
@@ -10,8 +12,6 @@ use rustyline::{
     validate::Validator,
     Context, Helper,
 };
-use rustyline::highlight::CmdKind;
-use rustyline::history::FileHistory;
 use std::path::Path;
 
 /// Combined helper struct implementing all required traits
@@ -31,9 +31,8 @@ impl Completer for RupooHelper {
             // Command completion
             let cmd_part = &line[1..pos];
             let commands = [
-                "help", "h", "?", "tools", "ts", "new", "sessions", "ls", 
-                "switch", "s", "model", "m", "theme", "t", "plan", 
-                "clear", "cls", "quit", "q", "exit", "history", "alias"
+                "help", "h", "?", "tools", "ts", "new", "sessions", "ls", "switch", "s", "model",
+                "m", "theme", "t", "plan", "clear", "cls", "quit", "q", "exit", "history", "alias",
             ];
             let matches: Vec<_> = commands
                 .iter()
@@ -76,7 +75,13 @@ impl RupooHelper {
         let path = Path::new(path_part);
         let (dir, prefix) = if path.has_root() {
             if let Some(parent) = path.parent() {
-                (parent.to_path_buf(), path.file_name().and_then(|s| s.to_str()).unwrap_or("").to_string())
+                (
+                    parent.to_path_buf(),
+                    path.file_name()
+                        .and_then(|s| s.to_str())
+                        .unwrap_or("")
+                        .to_string(),
+                )
             } else {
                 (path.to_path_buf(), "".to_string())
             }
@@ -91,7 +96,11 @@ impl RupooHelper {
             } else {
                 cwd.clone()
             };
-            let prefix = full_path.file_name().and_then(|s| s.to_str()).unwrap_or(path_part).to_string();
+            let prefix = full_path
+                .file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or(path_part)
+                .to_string();
             (dir, prefix)
         };
 
@@ -132,7 +141,7 @@ impl Highlighter for RupooHelper {
 
     fn highlight<'b>(&self, line: &'b str, _pos: usize) -> std::borrow::Cow<'b, str> {
         use owo_colors::OwoColorize;
-        
+
         if line.starts_with('/') {
             std::borrow::Cow::Owned(line.cyan().to_string())
         } else if line.starts_with('@') {
@@ -144,19 +153,14 @@ impl Highlighter for RupooHelper {
         }
     }
 
-    fn highlight_char<'l>(
-        &self,
-        _line: &'l str,
-        _pos: usize,
-        _ctx: CmdKind,
-    ) -> bool {
+    fn highlight_char(&self, _line: &str, _pos: usize, _ctx: CmdKind) -> bool {
         true
     }
 }
 
 impl Hinter for RupooHelper {
     type Hint = String;
-    
+
     fn hint(&self, _line: &str, _pos: usize, _ctx: &Context<'_>) -> Option<String> {
         None
     }
@@ -169,19 +173,19 @@ impl Helper for RupooHelper {}
 /// Helper function to create a configured editor with completion
 pub fn create_editor() -> Result<rustyline::Editor<RupooHelper, FileHistory>, ReadlineError> {
     use rustyline::config::Behavior;
-    
+
     // Create editor with config that properly handles SIGINT
     let config = rustyline::Config::builder()
-        .behavior(Behavior::PreferTerm)  // Use terminal mode for better signal handling
+        .behavior(Behavior::PreferTerm) // Use terminal mode for better signal handling
         .edit_mode(rustyline::EditMode::Emacs)
         .max_history_size(1000)?
         .build();
-    
+
     let mut rl = rustyline::Editor::with_config(config)?;
-    
+
     // Configure completion
     let helper = RupooHelper;
     rl.set_helper(Some(helper));
-    
+
     Ok(rl)
 }

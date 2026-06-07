@@ -1,15 +1,15 @@
 //! High-level memory operations for the long-term memory system.
 //!
 //! Wraps TaskRepo's FTS5-backed memory methods with hybrid search support.
-//! 
+//!
 //! # Architecture
-//! 
+//!
 //! - **FTS5 Search**: Full-text search using SQLite FTS5 (keyword matching)
 //! - **Vector Search**: Semantic search using embeddings (new)
 //! - **Hybrid Search**: Combines both for optimal relevance
 //!
 //! # Hybrid Search Design
-//! 
+//!
 //! ```text
 //! User Query
 //!     |
@@ -20,7 +20,7 @@
 //!     +---> Vector Search (semantic)
 //!               |
 //!               +---> Similar meanings, intent understanding
-//! 
+//!
 //! Combined Results (RRF ranking)
 //! ```
 //!
@@ -41,8 +41,8 @@
 //! let results = memory.recall("programming language", 10).await?;
 //! ```
 
-use std::sync::Arc;
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use tokio::sync::RwLock;
 use tracing::{debug, info, warn};
@@ -156,9 +156,13 @@ impl MemoryStore {
         embedding_service: Option<Arc<EmbeddingService>>,
         config: HybridSearchConfig,
     ) -> Self {
-        let vector_store = if config.enable_vector_search && embedding_service.is_some() {
-            let dim = embedding_service.as_ref().unwrap().dimension();
-            Some(Arc::new(RwLock::new(VectorStore::new(dim))))
+        let vector_store = if config.enable_vector_search {
+            if let Some(ref svc) = embedding_service {
+                let dim = svc.dimension();
+                Some(Arc::new(RwLock::new(VectorStore::new(dim))))
+            } else {
+                None
+            }
         } else {
             None
         };
@@ -175,9 +179,11 @@ impl MemoryStore {
     /// Enable or disable vector search at runtime.
     pub async fn set_vector_search_enabled(&mut self, enabled: bool) {
         self.config.enable_vector_search = enabled;
-        if enabled && self.vector_store.is_none() && self.embedding_service.is_some() {
-            let dim = self.embedding_service.as_ref().unwrap().dimension();
-            self.vector_store = Some(Arc::new(RwLock::new(VectorStore::new(dim))));
+        if enabled && self.vector_store.is_none() {
+            if let Some(ref svc) = self.embedding_service {
+                let dim = svc.dimension();
+                self.vector_store = Some(Arc::new(RwLock::new(VectorStore::new(dim))));
+            }
         } else if !enabled {
             self.vector_store = None;
         }
@@ -192,9 +198,12 @@ impl MemoryStore {
             .store_memory(content, tags, &self.default_source)
             .await?;
 
+        // Use floor_char_boundary to safely cut at character boundary for UTF-8
+        let preview_len = content.len().min(60);
+        let preview_end = content.floor_char_boundary(preview_len);
         info!(
             memory_id = %id,
-            content_preview = &content[..content.len().min(60)],
+            content_preview = &content[..preview_end],
             "memory stored (FTS5 indexed)"
         );
 
@@ -231,10 +240,7 @@ impl MemoryStore {
         tags: &[&str],
         source: &str,
     ) -> AgentResult<String> {
-        let id = self
-            .repo
-            .store_memory(content, tags, source)
-            .await?;
+        let id = self.repo.store_memory(content, tags, source).await?;
 
         info!(
             memory_id = %id,
@@ -284,7 +290,10 @@ impl MemoryStore {
     /// ```
     pub async fn recall(&self, query: &str, limit: usize) -> AgentResult<Vec<MemoryEntry>> {
         // If vector search is disabled or not available, use FTS5 only
-        if !self.config.enable_vector_search || self.vector_store.is_none() || self.embedding_service.is_none() {
+        if !self.config.enable_vector_search
+            || self.vector_store.is_none()
+            || self.embedding_service.is_none()
+        {
             debug!("using FTS5 search only");
             return self.repo.search_memories(query, limit).await;
         }
@@ -344,7 +353,10 @@ impl MemoryStore {
 
         // Fetch full entries
         let mut results: Vec<MemoryEntry> = Vec::new();
-        let fts_map: HashMap<String, MemoryEntry> = fts_results.iter().map(|e| (e.id.clone(), e.clone())).collect();
+        let fts_map: HashMap<String, MemoryEntry> = fts_results
+            .iter()
+            .map(|e| (e.id.clone(), e.clone()))
+            .collect();
 
         for (id, _score) in sorted_ids.into_iter().take(limit) {
             if let Some(entry) = fts_map.get(&id) {
@@ -404,7 +416,10 @@ mod tests {
     async fn test_store_and_search_memory() {
         let (_, store) = setup();
         store
-            .remember("The user prefers Rust over Python for system programming", &["language", "preference"])
+            .remember(
+                "The user prefers Rust over Python for system programming",
+                &["language", "preference"],
+            )
             .await
             .unwrap();
 

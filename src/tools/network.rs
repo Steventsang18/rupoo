@@ -101,18 +101,17 @@ pub async fn execute_http_request(
     let status_code = resp.status();
 
     // Body size limit
-    let content = resp.bytes().await.map_err(|e| {
-        AgentError::Network(format!("failed to read response body: {e}"))
-    })?;
+    let content = resp
+        .bytes()
+        .await
+        .map_err(|e| AgentError::Network(format!("failed to read response body: {e}")))?;
 
     if content.len() > MAX_RESPONSE_BYTES {
-        return Err(AgentError::Network(
-            format!(
-                "Response body too large: {} bytes (max {})",
-                content.len(),
-                MAX_RESPONSE_BYTES
-            ),
-        ));
+        return Err(AgentError::Network(format!(
+            "Response body too large: {} bytes (max {})",
+            content.len(),
+            MAX_RESPONSE_BYTES
+        )));
     }
 
     let text = String::from_utf8_lossy(&content);
@@ -127,39 +126,38 @@ mod tests {
 
     #[tokio::test]
     async fn test_localhost_blocked() {
-        let result = execute_http_request(
-            "http://localhost:8080/test",
-            &HttpMethod::GET,
-            None,
-            None,
-        )
-        .await;
+        let result =
+            execute_http_request("http://localhost:8080/test", &HttpMethod::GET, None, None).await;
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("localhost"));
     }
 
     #[tokio::test]
     async fn test_127_blocked() {
-        let result = execute_http_request(
-            "http://127.0.0.1/api",
-            &HttpMethod::GET,
-            None,
-            None,
-        )
-        .await;
+        let result =
+            execute_http_request("http://127.0.0.1/api", &HttpMethod::GET, None, None).await;
         assert!(result.is_err());
     }
 }
 
-    #[test]
-    fn test_extract_host() {
-        assert_eq!(extract_host("https://example.com/path"), Some("example.com".to_string()));
-        assert_eq!(extract_host("http://example.com:8080/path"), Some("example.com".to_string()));
-        assert_eq!(extract_host("https://user:pass@host.com/path"), Some("host.com".to_string()));
-        assert_eq!(extract_host("ftp://invalid"), None);
-    }
+#[test]
+fn test_extract_host() {
+    assert_eq!(
+        extract_host("https://example.com/path"),
+        Some("example.com".to_string())
+    );
+    assert_eq!(
+        extract_host("http://example.com:8080/path"),
+        Some("example.com".to_string())
+    );
+    assert_eq!(
+        extract_host("https://user:pass@host.com/path"),
+        Some("host.com".to_string())
+    );
+    assert_eq!(extract_host("ftp://invalid"), None);
+}
 
-    #[test]
-    fn test_extract_host_ipv6() {
-        assert_eq!(extract_host("http://[::1]/path"), Some("[::1]".to_string()));
-    }
+#[test]
+fn test_extract_host_ipv6() {
+    assert_eq!(extract_host("http://[::1]/path"), Some("[::1]".to_string()));
+}

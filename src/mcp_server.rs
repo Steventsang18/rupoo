@@ -19,10 +19,10 @@ use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, BufWriter};
 use tracing::{error, info};
 
-use crate::safety::SafetyContext;
 use crate::agent::ToolExecutor;
 use crate::error::{AgentError, AgentResult};
 use crate::mcp::McpToolExecutor;
+use crate::safety::SafetyContext;
 use crate::task::McpToolResult;
 
 // ---------------------------------------------------------------------------
@@ -231,9 +231,11 @@ pub async fn run_mcp_server() -> AgentResult<()> {
 
     let mut server = McpServer::new(safety_ctx);
 
-    while let Some(line) = lines.next_line().await.map_err(|e| {
-        AgentError::Mcp(format!("stdin read error: {e}"))
-    })? {
+    while let Some(line) = lines
+        .next_line()
+        .await
+        .map_err(|e| AgentError::Mcp(format!("stdin read error: {e}")))?
+    {
         if line.trim().is_empty() {
             continue;
         }
@@ -333,11 +335,13 @@ mod tests {
     async fn test_tool_call_echo() {
         let mut server = make_server();
 
-        server.handle_request(JsonRpcRequest {
-            id: Some(serde_json::json!(1)),
-            method: "initialize".into(),
-            params: None,
-        }).await;
+        server
+            .handle_request(JsonRpcRequest {
+                id: Some(serde_json::json!(1)),
+                method: "initialize".into(),
+                params: None,
+            })
+            .await;
 
         let call = JsonRpcRequest {
             id: Some(serde_json::json!(2)),
@@ -372,11 +376,13 @@ mod tests {
     async fn test_file_jail_applied() {
         let mut server = make_server();
 
-        server.handle_request(JsonRpcRequest {
-            id: Some(serde_json::json!(1)),
-            method: "initialize".into(),
-            params: None,
-        }).await;
+        server
+            .handle_request(JsonRpcRequest {
+                id: Some(serde_json::json!(1)),
+                method: "initialize".into(),
+                params: None,
+            })
+            .await;
 
         // file_read with path traversal should be rejected
         let call = JsonRpcRequest {
@@ -394,7 +400,9 @@ mod tests {
         let result_val = r.result.unwrap();
         let content = result_val["content"].as_array().unwrap();
         let text = content[0]["text"].as_str().unwrap();
-        assert!(text.contains("blocked") || text.contains("denied") || text.contains("Error"),
-            "expected path to be blocked, got: {text}");
+        assert!(
+            text.contains("blocked") || text.contains("denied") || text.contains("Error"),
+            "expected path to be blocked, got: {text}"
+        );
     }
 }

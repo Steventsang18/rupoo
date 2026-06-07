@@ -16,7 +16,9 @@ use serde::{Deserialize, Serialize};
 // Re-export public types for convenience
 pub use gateway::LlmGateway;
 pub use history::{ConversationHistory, LlmChatMessage, LlmChatRole};
-pub use providers::{extract_text_from_assistant_content, extract_text_from_user_content, role_label};
+pub use providers::{
+    extract_text_from_assistant_content, extract_text_from_user_content, role_label,
+};
 pub use traits::{LlmAgent, LlmGatewayBackend, MockLlmAgent, MockLlmGateway};
 
 // Re-export config and types
@@ -112,9 +114,7 @@ impl LlmConfig {
         let (model, base_url) = match &provider {
             LlmProvider::Anthropic => ("claude-sonnet-4-20250514".into(), None),
             LlmProvider::OpenAI => ("gpt-4o".into(), None),
-            LlmProvider::Ollama => {
-                ("llama3.2".into(), Some("http://localhost:11434".into()))
-            }
+            LlmProvider::Ollama => ("llama3.2".into(), Some("http://localhost:11434".into())),
         };
         Self {
             provider,

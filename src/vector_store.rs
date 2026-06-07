@@ -118,7 +118,7 @@ impl VectorStore {
     }
 
     /// Default vector store with 384 dimensions (lightweight, fast)
-    pub fn default() -> Self {
+    pub fn with_default_dim() -> Self {
         Self::new(384)
     }
 
@@ -240,7 +240,7 @@ impl VectorStore {
 
 impl Default for VectorStore {
     fn default() -> Self {
-        Self::default()
+        Self::with_default_dim()
     }
 }
 
@@ -250,7 +250,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_vector_store_insert() {
-        let mut store = VectorStore::default();
+        let mut store = VectorStore::with_default_dim();
 
         let doc = VectorMemoryDoc {
             id: "test-1".to_string(),
@@ -270,7 +270,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_vector_store_search() {
-        let mut store = VectorStore::default();
+        let mut store = VectorStore::with_default_dim();
 
         // Insert test document
         let doc = VectorMemoryDoc {

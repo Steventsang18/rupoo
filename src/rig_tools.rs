@@ -31,7 +31,9 @@ impl Default for EchoTool {
 }
 
 impl EchoTool {
-    pub fn new() -> Self { Self }
+    pub fn new() -> Self {
+        Self
+    }
 }
 
 #[allow(clippy::manual_async_fn)]
@@ -127,13 +129,21 @@ impl rig::tool::Tool for FileReadTool {
         async move {
             let safe_path = match resolve_path(&self.jail_root, &args.path) {
                 Ok(p) => p,
-                Err(e) => return async move { Ok(FileReadOutput { content: String::new(), success: false, error: Some(e) }) }.await,
+                Err(e) => {
+                    return async move {
+                        Ok(FileReadOutput {
+                            content: String::new(),
+                            success: false,
+                            error: Some(e),
+                        })
+                    }
+                    .await
+                }
             };
             match tokio::fs::read_to_string(&safe_path).await {
                 Ok(content) => {
-                    let compressed = crate::signal::compress_file_content(
-                        &content, &args.path, None,
-                    );
+                    let compressed =
+                        crate::signal::compress_file_content(&content, &args.path, None);
                     Ok(FileReadOutput {
                         content: compressed,
                         success: true,
@@ -205,7 +215,16 @@ impl rig::tool::Tool for FileWriteTool {
         async move {
             let safe_path = match resolve_path(&self.jail_root, &args.path) {
                 Ok(p) => p,
-                Err(e) => return async move { Ok(FileWriteOutput { bytes_written: 0, success: false, error: Some(e) }) }.await,
+                Err(e) => {
+                    return async move {
+                        Ok(FileWriteOutput {
+                            bytes_written: 0,
+                            success: false,
+                            error: Some(e),
+                        })
+                    }
+                    .await
+                }
             };
             match tokio::fs::write(&safe_path, &args.content).await {
                 Ok(()) => Ok(FileWriteOutput {
@@ -283,7 +302,16 @@ impl rig::tool::Tool for ListDirTool {
         async move {
             let safe_path = match resolve_path(&self.jail_root, &args.path) {
                 Ok(p) => p,
-                Err(e) => return async move { Ok(ListDirOutput { entries: vec![], success: false, error: Some(e) }) }.await,
+                Err(e) => {
+                    return async move {
+                        Ok(ListDirOutput {
+                            entries: vec![],
+                            success: false,
+                            error: Some(e),
+                        })
+                    }
+                    .await
+                }
             };
             let mut entries = Vec::new();
             match tokio::fs::read_dir(&safe_path).await {
@@ -339,7 +367,9 @@ impl Default for WebSearchTool {
 }
 
 impl WebSearchTool {
-    pub fn new() -> Self { Self }
+    pub fn new() -> Self {
+        Self
+    }
 }
 
 #[allow(clippy::manual_async_fn)]
@@ -419,7 +449,9 @@ impl Default for ShellExecTool {
 }
 
 impl ShellExecTool {
-    pub fn new() -> Self { Self }
+    pub fn new() -> Self {
+        Self
+    }
 }
 
 #[allow(clippy::manual_async_fn)]
@@ -469,25 +501,23 @@ impl rig::tool::Tool for ShellExecTool {
 
             // Execute via shell for full pipeline/glob support
             let timeout = args.timeout.unwrap_or(30);
-            let result = tokio::time::timeout(
-                std::time::Duration::from_secs(timeout),
-                async {
-                    let mut cmd = tokio::process::Command::new("sh");
-                    cmd.args(["-c", &args.command])
-                        .stdout(std::process::Stdio::piped())
-                        .stderr(std::process::Stdio::piped())
-                        .kill_on_drop(true);
+            let result = tokio::time::timeout(std::time::Duration::from_secs(timeout), async {
+                let mut cmd = tokio::process::Command::new("sh");
+                cmd.args(["-c", &args.command])
+                    .stdout(std::process::Stdio::piped())
+                    .stderr(std::process::Stdio::piped())
+                    .kill_on_drop(true);
 
-                    // Strip sensitive env vars
-                    crate::safety::SafetyContext::forward_safe_env_async(&mut cmd);
+                // Strip sensitive env vars
+                crate::safety::SafetyContext::forward_safe_env_async(&mut cmd);
 
-                    let child = cmd.spawn();
-                    match child {
-                        Ok(c) => c.wait_with_output().await,
-                        Err(e) => Err(std::io::Error::other(e)),
-                    }
+                let child = cmd.spawn();
+                match child {
+                    Ok(c) => c.wait_with_output().await,
+                    Err(e) => Err(std::io::Error::other(e)),
                 }
-            ).await;
+            })
+            .await;
 
             match result {
                 Ok(Ok(output)) => {
@@ -501,7 +531,11 @@ impl rig::tool::Tool for ShellExecTool {
 
                     // Truncate if too long
                     let truncated = if combined.len() > 10_000 {
-                        format!("{}...[truncated, {} chars total]", &combined[..10_000], combined.len())
+                        format!(
+                            "{}...[truncated, {} chars total]",
+                            &combined[..10_000],
+                            combined.len()
+                        )
                     } else {
                         combined
                     };
@@ -513,7 +547,11 @@ impl rig::tool::Tool for ShellExecTool {
                         stdout: truncated,
                         exit_code,
                         success,
-                        error: if !success { Some(format!("Exit code: {}", exit_code.unwrap_or(-1))) } else { None },
+                        error: if !success {
+                            Some(format!("Exit code: {}", exit_code.unwrap_or(-1)))
+                        } else {
+                            None
+                        },
                     })
                 }
                 Ok(Err(e)) => Ok(ShellExecOutput {
@@ -558,7 +596,9 @@ impl From<std::io::Error> for ToolCallError {
 fn resolve_path(jail_root: &Option<PathBuf>, path: &str) -> Result<String, String> {
     let root = match jail_root {
         Some(ref root) => root.clone(),
-        None => std::env::current_dir().map_err(|e| format!("Cannot determine CWD for sandbox: {e}"))?,
+        None => {
+            std::env::current_dir().map_err(|e| format!("Cannot determine CWD for sandbox: {e}"))?
+        }
     };
     path_jail::join(&root, path)
         .map(|p| p.to_string_lossy().to_string())
@@ -570,22 +610,52 @@ fn resolve_path(jail_root: &Option<PathBuf>, path: &str) -> Result<String, Strin
 // ---------------------------------------------------------------------------
 
 impl FileReadTool {
-    pub fn new() -> Self { Self { jail_root: None } }
-    pub fn with_jail(root: PathBuf) -> Self { Self { jail_root: Some(root) } }
+    pub fn new() -> Self {
+        Self { jail_root: None }
+    }
+    pub fn with_jail(root: PathBuf) -> Self {
+        Self {
+            jail_root: Some(root),
+        }
+    }
 }
-impl Default for FileReadTool { fn default() -> Self { Self::new() } }
+impl Default for FileReadTool {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 impl FileWriteTool {
-    pub fn new() -> Self { Self { jail_root: None } }
-    pub fn with_jail(root: PathBuf) -> Self { Self { jail_root: Some(root) } }
+    pub fn new() -> Self {
+        Self { jail_root: None }
+    }
+    pub fn with_jail(root: PathBuf) -> Self {
+        Self {
+            jail_root: Some(root),
+        }
+    }
 }
-impl Default for FileWriteTool { fn default() -> Self { Self::new() } }
+impl Default for FileWriteTool {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 impl ListDirTool {
-    pub fn new() -> Self { Self { jail_root: None } }
-    pub fn with_jail(root: PathBuf) -> Self { Self { jail_root: Some(root) } }
+    pub fn new() -> Self {
+        Self { jail_root: None }
+    }
+    pub fn with_jail(root: PathBuf) -> Self {
+        Self {
+            jail_root: Some(root),
+        }
+    }
 }
-impl Default for ListDirTool { fn default() -> Self { Self::new() } }
+impl Default for ListDirTool {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Helper: build a ToolSet with all available tools
@@ -626,7 +696,12 @@ mod tests {
     #[tokio::test]
     async fn test_echo_tool() {
         let tool = EchoTool::new();
-        let output = tool.call(EchoArgs { message: "hello".into() }).await.unwrap();
+        let output = tool
+            .call(EchoArgs {
+                message: "hello".into(),
+            })
+            .await
+            .unwrap();
         assert_eq!(output.result, "echo: hello");
     }
 
@@ -660,10 +735,13 @@ mod tests {
     #[tokio::test]
     async fn test_shell_exec_echo() {
         let tool = ShellExecTool::new();
-        let output = tool.call(ShellExecArgs {
-            command: "echo hello rupoo".into(),
-            timeout: None,
-        }).await.unwrap();
+        let output = tool
+            .call(ShellExecArgs {
+                command: "echo hello rupoo".into(),
+                timeout: None,
+            })
+            .await
+            .unwrap();
         assert!(output.success);
         assert!(output.stdout.contains("hello rupoo"));
     }
@@ -671,10 +749,13 @@ mod tests {
     #[tokio::test]
     async fn test_shell_exec_blocked() {
         let tool = ShellExecTool::new();
-        let output = tool.call(ShellExecArgs {
-            command: "sudo echo test".into(),
-            timeout: None,
-        }).await.unwrap();
+        let output = tool
+            .call(ShellExecArgs {
+                command: "sudo echo test".into(),
+                timeout: None,
+            })
+            .await
+            .unwrap();
         assert!(!output.success);
         assert!(output.error.unwrap().contains("blocked"));
     }

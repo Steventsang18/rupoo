@@ -16,7 +16,7 @@
 
 use std::path::Path;
 
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 
 // ---------------------------------------------------------------------------
 // Output compression
@@ -129,7 +129,11 @@ pub fn compress_file_content(content: &str, path: &str, target: Option<&str>) ->
             let shown = end - start;
             let mut out = format!(
                 "[file_read: {} — {} lines total, showing lines {}-{} near \"{}\"]\n",
-                path, total_lines, start + 1, end, target_str
+                path,
+                total_lines,
+                start + 1,
+                end,
+                target_str
             );
             out.push_str(&format_line_numbered(path, &lines, start, end, total_lines));
             out.push_str(&format!(
@@ -161,7 +165,13 @@ pub fn compress_file_content(content: &str, path: &str, target: Option<&str>) ->
             "\n...[{} lines omitted]...\n",
             tail_start - head_n
         ));
-        out.push_str(&format_line_numbered(path, &lines, tail_start, total_lines, total_lines));
+        out.push_str(&format_line_numbered(
+            path,
+            &lines,
+            tail_start,
+            total_lines,
+            total_lines,
+        ));
     }
 
     out.push_str("\n[use file_read with offset/limit to read specific sections]");
@@ -174,7 +184,13 @@ pub fn compress_file_content(content: &str, path: &str, target: Option<&str>) ->
 }
 
 /// Format lines with line numbers (1-indexed, right-aligned).
-fn format_line_numbered(_path: &str, lines: &[&str], start: usize, end: usize, _total: usize) -> String {
+fn format_line_numbered(
+    _path: &str,
+    lines: &[&str],
+    start: usize,
+    end: usize,
+    _total: usize,
+) -> String {
     let width = format!("{}", end).len().max(3);
     lines[start..end]
         .iter()
@@ -193,10 +209,10 @@ fn format_line_numbered(_path: &str, lines: &[&str], start: usize, end: usize, _
 pub struct EnvironmentSignals {
     pub pwd: String,
     pub git_branch: Option<String>,
-    pub git_status: Option<String>,     // e.g. "2 modified, 1 untracked"
-    pub project_type: Option<String>,   // e.g. "Rust (Cargo.toml)"
-    pub recent_files: Vec<String>,      // files modified in last 24h
-    pub dir_summary: Option<String>,    // e.g. "src/ (12 files), tests/ (1 file)"
+    pub git_status: Option<String>,   // e.g. "2 modified, 1 untracked"
+    pub project_type: Option<String>, // e.g. "Rust (Cargo.toml)"
+    pub recent_files: Vec<String>,    // files modified in last 24h
+    pub dir_summary: Option<String>,  // e.g. "src/ (12 files), tests/ (1 file)"
 }
 
 impl EnvironmentSignals {
@@ -221,8 +237,8 @@ impl EnvironmentSignals {
 
         // Git info
         signals.git_branch = run_git_command(&["branch", "--show-current"]);
-        signals.git_status = run_git_command(&["status", "--short"])
-            .map(|s| summarize_git_status(&s));
+        signals.git_status =
+            run_git_command(&["status", "--short"]).map(|s| summarize_git_status(&s));
 
         signals
     }
@@ -243,7 +259,13 @@ impl EnvironmentSignals {
             parts.push(format!("- Project: {}", ptype));
         }
         if !self.recent_files.is_empty() {
-            let files_str = self.recent_files.iter().take(5).cloned().collect::<Vec<_>>().join(", ");
+            let files_str = self
+                .recent_files
+                .iter()
+                .take(5)
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(", ");
             parts.push(format!("- Recent files (24h): {}", files_str));
         }
         if let Some(ref summary) = self.dir_summary {
@@ -310,8 +332,7 @@ fn build_dir_summary(dir: &Path) -> Option<String> {
 
 /// Find files modified in the last N hours (depth=2 max for performance).
 fn find_recent_files(dir: &Path, hours: u64) -> Vec<String> {
-    let cutoff = std::time::SystemTime::now()
-        - std::time::Duration::from_secs(hours * 3600);
+    let cutoff = std::time::SystemTime::now() - std::time::Duration::from_secs(hours * 3600);
 
     let mut recent = Vec::new();
     collect_recent_recursive(dir, &cutoff, 0, 2, &mut recent);
@@ -370,14 +391,26 @@ fn summarize_git_status(status: &str) -> String {
         return "clean".into();
     }
 
-    let modified = lines.iter().filter(|l| l.starts_with(" M") || l.starts_with('M')).count();
+    let modified = lines
+        .iter()
+        .filter(|l| l.starts_with(" M") || l.starts_with('M'))
+        .count();
     let untracked = lines.iter().filter(|l| l.starts_with("??")).count();
-    let staged = lines.iter().filter(|l| l.starts_with('A') || (l.starts_with('M') && !l.starts_with(" M"))).count();
+    let staged = lines
+        .iter()
+        .filter(|l| l.starts_with('A') || (l.starts_with('M') && !l.starts_with(" M")))
+        .count();
 
     let mut parts = Vec::new();
-    if modified > 0 { parts.push(format!("{} modified", modified)); }
-    if untracked > 0 { parts.push(format!("{} untracked", untracked)); }
-    if staged > 0 { parts.push(format!("{} staged", staged)); }
+    if modified > 0 {
+        parts.push(format!("{} modified", modified));
+    }
+    if untracked > 0 {
+        parts.push(format!("{} untracked", untracked));
+    }
+    if staged > 0 {
+        parts.push(format!("{} staged", staged));
+    }
 
     parts.join(", ")
 }
@@ -402,6 +435,35 @@ pub enum IntentPrecision {
     Actionable,
 }
 
+/// Demand clarification state - tracks where we are in the clarification process.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+#[derive(Default)]
+pub enum ClarificationState {
+    /// No clarification in progress
+    #[default]
+    NotStarted,
+    /// First round - confirm core aspects
+    CoreConfirm,
+    /// Second round - drill into details based on first round choice
+    DetailDrill,
+    /// Generate summary and ask for final confirmation
+    Summary,
+    /// Completed - ready to proceed
+    Completed,
+}
+
+impl ClarificationState {
+    fn as_str(&self) -> &'static str {
+        match self {
+            Self::NotStarted => "not_started",
+            Self::CoreConfirm => "core_confirm",
+            Self::DetailDrill => "detail_drill",
+            Self::Summary => "summary",
+            Self::Completed => "completed",
+        }
+    }
+}
 
 impl IntentPrecision {
     fn as_str(&self) -> &'static str {
@@ -436,6 +498,14 @@ pub struct IntentState {
     pub artifacts: Vec<String>,
     /// Turn number (incremented each update)
     pub turn: usize,
+    /// Clarification state - where we are in clarifying the demand
+    pub clarification_state: ClarificationState,
+    /// Raw user demand for clarification
+    pub user_demand: String,
+    /// Need summary for final confirmation
+    pub need_summary: String,
+    /// Collected choices from user
+    pub collected_choices: Vec<String>,
 }
 
 impl IntentState {
@@ -449,6 +519,82 @@ impl IntentState {
         self.precision == IntentPrecision::Actionable
     }
 
+    /// Whether clarification is in progress.
+    pub fn is_clarifying(&self) -> bool {
+        matches!(
+            self.clarification_state,
+            ClarificationState::CoreConfirm
+                | ClarificationState::DetailDrill
+                | ClarificationState::Summary
+        )
+    }
+
+    /// Whether clarification is completed.
+    pub fn is_clarification_completed(&self) -> bool {
+        self.clarification_state == ClarificationState::Completed
+    }
+
+    /// Start clarification process for a user demand.
+    pub fn start_clarification(&mut self, demand: &str) {
+        self.user_demand = demand.to_string();
+        self.clarification_state = ClarificationState::CoreConfirm;
+        self.collected_choices.clear();
+        self.need_summary.clear();
+    }
+
+    /// Advance to next clarification state.
+    pub fn advance_clarification(&mut self) {
+        self.clarification_state = match self.clarification_state {
+            ClarificationState::CoreConfirm => ClarificationState::DetailDrill,
+            ClarificationState::DetailDrill => ClarificationState::Summary,
+            ClarificationState::Summary => ClarificationState::Completed,
+            ClarificationState::Completed | ClarificationState::NotStarted => {
+                ClarificationState::Completed
+            }
+        };
+    }
+
+    /// Check if the user's message looks like a development demand that needs clarification.
+    pub fn looks_like_development_demand(message: &str) -> bool {
+        let demand_keywords = [
+            "开发",
+            "创建",
+            "制作",
+            "实现",
+            "写一个",
+            "做一个",
+            "build",
+            "create",
+            "develop",
+            "implement",
+            "make",
+        ];
+
+        let development_keywords = [
+            "游戏",
+            "网站",
+            "网页",
+            "应用",
+            "系统",
+            "工具",
+            "game",
+            "website",
+            "app",
+            "application",
+            "system",
+            "tool",
+        ];
+
+        let has_demand = demand_keywords
+            .iter()
+            .any(|k| message.to_lowercase().contains(k));
+        let has_dev = development_keywords
+            .iter()
+            .any(|k| message.to_lowercase().contains(k));
+
+        has_demand && has_dev
+    }
+
     /// Get the current intent precision level.
     pub fn precision(&self) -> &IntentPrecision {
         &self.precision
@@ -456,7 +602,10 @@ impl IntentState {
 
     /// Format as a compact prompt block (< 200 tokens typically).
     pub fn to_prompt_block(&self) -> String {
-        if self.summary.is_empty() && self.turn == 0 {
+        if self.summary.is_empty()
+            && self.turn == 0
+            && self.clarification_state == ClarificationState::NotStarted
+        {
             return String::new();
         }
 
@@ -482,6 +631,25 @@ impl IntentState {
             parts.push(format!("Artifacts: {}", self.artifacts.join(", ")));
         }
 
+        if self.clarification_state != ClarificationState::NotStarted {
+            parts.push(format!(
+                "Clarification state: {}",
+                self.clarification_state.as_str()
+            ));
+            if !self.user_demand.is_empty() {
+                parts.push(format!("User demand: {}", self.user_demand));
+            }
+            if !self.collected_choices.is_empty() {
+                parts.push(format!(
+                    "Collected choices: {}",
+                    self.collected_choices.join(", ")
+                ));
+            }
+            if !self.need_summary.is_empty() {
+                parts.push(format!("Need summary: {}", self.need_summary));
+            }
+        }
+
         parts.join("\n")
     }
 
@@ -497,6 +665,10 @@ precision: <vague|directional|structured|actionable>
 confirmed: <comma-separated confirmed aspects, or none>
 pending: <comma-separated open questions, or none>
 artifacts: <comma-separated files/paths created, or none>
+clarification_state: <not_started|core_confirm|detail_drill|summary|completed>
+user_demand: <raw user demand text, or none>
+need_summary: <need summary text, or none>
+collected_choices: <comma-separated user choices, or none>
 [/INTENT_UPDATE]
 
 Rules:
@@ -505,7 +677,30 @@ Rules:
 - precision=structured: key decisions confirmed, some details open
 - precision=actionable: clear enough to execute
 - Only change precision when the user provides new confirming signal
-- Keep summary under 20 words".to_string()
+- Keep summary under 20 words
+
+## Demand Clarification Flow
+When the user provides a vague or ambiguous demand, follow this flow:
+1. Start at clarification_state=core_confirm - ask 2-3 core questions with A/B choices
+2. Then move to clarification_state=detail_drill - ask follow-up questions based on choices
+3. Then move to clarification_state=summary - generate a need summary and ask for confirmation
+4. After user confirms, move to clarification_state=completed - start executing
+
+Clarification Principles:
+- Keep questions focused and concise
+- Provide multiple-choice answers (A/B/C) whenever possible
+- Limit to 2-3 questions per turn to avoid overwhelming user
+- Goal is to get to actionable clarity in 3-5 turns max
+- After each user response, store their choices in collected_choices
+
+## Transparent Execution
+When executing tasks:
+- Show your thinking process clearly
+- Explain what tool you are about to use and why
+- Show code changes with before/after context
+- Provide step-by-step explanations of what you are doing
+- Be open about your decision-making process"
+            .to_string()
     }
 
     /// Parse an INTENT_UPDATE block from an LLM response.
@@ -523,7 +718,8 @@ Rules:
         };
 
         let block = &response[start + start_tag.len()..end];
-        let cleaned_response = format!("{}{}", &response[..start], &response[end + end_tag.len()..]);
+        let cleaned_response =
+            format!("{}{}", &response[..start], &response[end + end_tag.len()..]);
 
         let mut new_state = current.clone();
         new_state.turn += 1;
@@ -548,17 +744,58 @@ Rules:
             } else if let Some(val) = line.strip_prefix("confirmed:") {
                 let v = val.trim();
                 if v != "none" && !v.is_empty() {
-                    new_state.confirmed = v.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
+                    new_state.confirmed = v
+                        .split(',')
+                        .map(|s| s.trim().to_string())
+                        .filter(|s| !s.is_empty())
+                        .collect();
                 }
             } else if let Some(val) = line.strip_prefix("pending:") {
                 let v = val.trim();
                 if v != "none" && !v.is_empty() {
-                    new_state.pending = v.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
+                    new_state.pending = v
+                        .split(',')
+                        .map(|s| s.trim().to_string())
+                        .filter(|s| !s.is_empty())
+                        .collect();
                 }
             } else if let Some(val) = line.strip_prefix("artifacts:") {
                 let v = val.trim();
                 if v != "none" && !v.is_empty() {
-                    new_state.artifacts = v.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
+                    new_state.artifacts = v
+                        .split(',')
+                        .map(|s| s.trim().to_string())
+                        .filter(|s| !s.is_empty())
+                        .collect();
+                }
+            } else if let Some(val) = line.strip_prefix("clarification_state:") {
+                let v = val.trim();
+                new_state.clarification_state = match v {
+                    "not_started" => ClarificationState::NotStarted,
+                    "core_confirm" => ClarificationState::CoreConfirm,
+                    "detail_drill" => ClarificationState::DetailDrill,
+                    "summary" => ClarificationState::Summary,
+                    "completed" => ClarificationState::Completed,
+                    _ => new_state.clarification_state.clone(),
+                };
+            } else if let Some(val) = line.strip_prefix("user_demand:") {
+                let v = val.trim();
+                if v != "none" && !v.is_empty() {
+                    new_state.user_demand = v.to_string();
+                }
+            } else if let Some(val) = line.strip_prefix("need_summary:") {
+                let v = val.trim();
+                if v != "none" && !v.is_empty() {
+                    new_state.need_summary = v.to_string();
+                }
+            } else if let Some(val) = line.strip_prefix("collected_choices:") {
+                let v = val.trim();
+                if v != "none" && !v.is_empty() {
+                    new_state.collected_choices = v
+                        .split(',')
+                        .map(|s| s.trim().to_string())
+                        .filter(|s| !s.is_empty())
+                        .collect();
                 }
             }
         }
@@ -645,7 +882,9 @@ mod tests {
 
     #[test]
     fn test_compress_output_many_lines() {
-        let lines: Vec<String> = (0..200).map(|i| format!("line {} {}", i, "x".repeat(30))).collect();
+        let lines: Vec<String> = (0..200)
+            .map(|i| format!("line {} {}", i, "x".repeat(30)))
+            .collect();
         let input = lines.join("\n");
         let result = compress_output(&input, Some(1000));
         assert!(result.contains("lines omitted"));
@@ -674,7 +913,10 @@ mod tests {
     fn test_detect_project_type_rust() {
         let tmp = tempfile::tempdir().unwrap();
         std::fs::write(tmp.path().join("Cargo.toml"), "").unwrap();
-        assert_eq!(detect_project_type(tmp.path()), Some("Rust (Cargo.toml)".into()));
+        assert_eq!(
+            detect_project_type(tmp.path()),
+            Some("Rust (Cargo.toml)".into())
+        );
     }
 
     #[test]
@@ -713,89 +955,102 @@ mod tests {
     }
 }
 
-    #[test]
-    fn test_intent_state_parse_from_response() {
-        let response = "I'll help you with that!\n[INTENT_UPDATE]\nsummary: Build a file organizer CLI tool\nprecision: structured\nconfirmed: CLI, Rust, by-type classification\npending: exact file types to handle\nartifacts: none\n[/INTENT_UPDATE]\nLet me start by creating the project structure.";
-        let current = IntentState::default();
-        let (cleaned, new_state) = IntentState::parse_from_response(response, &current);
+#[test]
+fn test_intent_state_parse_from_response() {
+    let response = "I'll help you with that!\n[INTENT_UPDATE]\nsummary: Build a file organizer CLI tool\nprecision: structured\nconfirmed: CLI, Rust, by-type classification\npending: exact file types to handle\nartifacts: none\n[/INTENT_UPDATE]\nLet me start by creating the project structure.";
+    let current = IntentState::default();
+    let (cleaned, new_state) = IntentState::parse_from_response(response, &current);
 
-        assert!(!cleaned.contains("[INTENT_UPDATE]"));
-        assert!(!cleaned.contains("[/INTENT_UPDATE]"));
-        assert_eq!(new_state.summary, "Build a file organizer CLI tool");
-        assert_eq!(new_state.precision, IntentPrecision::Structured);
-        assert!(new_state.confirmed.contains(&"CLI".to_string()));
-        assert!(new_state.confirmed.contains(&"Rust".to_string()));
-        assert!(new_state.pending.contains(&"exact file types to handle".to_string()));
-        assert_eq!(new_state.turn, 1);
+    assert!(!cleaned.contains("[INTENT_UPDATE]"));
+    assert!(!cleaned.contains("[/INTENT_UPDATE]"));
+    assert_eq!(new_state.summary, "Build a file organizer CLI tool");
+    assert_eq!(new_state.precision, IntentPrecision::Structured);
+    assert!(new_state.confirmed.contains(&"CLI".to_string()));
+    assert!(new_state.confirmed.contains(&"Rust".to_string()));
+    assert!(new_state
+        .pending
+        .contains(&"exact file types to handle".to_string()));
+    assert_eq!(new_state.turn, 1);
+}
+
+#[test]
+fn test_intent_state_no_update_block() {
+    let response = "Just a normal response without any intent update.";
+    let current = IntentState::default();
+    let (cleaned, new_state) = IntentState::parse_from_response(response, &current);
+
+    assert_eq!(cleaned, response);
+    assert_eq!(new_state.turn, 0); // No increment without update
+}
+
+#[test]
+fn test_intent_state_precision_progression() {
+    let mut state = IntentState::default();
+    assert_eq!(state.precision, IntentPrecision::Vague);
+
+    state.summary = "organize files".to_string();
+    state.precision = IntentPrecision::Directional;
+    assert!(!state.is_actionable());
+
+    state.precision = IntentPrecision::Actionable;
+    assert!(state.is_actionable());
+}
+
+#[test]
+fn test_intent_state_prompt_block() {
+    let state = IntentState {
+        summary: "Build CLI tool".to_string(),
+        precision: IntentPrecision::Structured,
+        confirmed: vec!["Rust".to_string(), "CLI".to_string()],
+        pending: vec!["file types".to_string()],
+        artifacts: vec!["src/main.rs".to_string()],
+        turn: 3,
+        clarification_state: ClarificationState::NotStarted,
+        user_demand: String::new(),
+        need_summary: String::new(),
+        collected_choices: Vec::new(),
+    };
+    let block = state.to_prompt_block();
+    assert!(block.contains("turn 3"));
+    assert!(block.contains("structured"));
+    assert!(block.contains("Rust, CLI"));
+}
+
+#[test]
+fn test_compress_history_few_turns() {
+    let messages = vec![
+        crate::llm::LlmChatMessage::user("hello"),
+        crate::llm::LlmChatMessage::assistant("hi"),
+    ];
+    let intent = IntentState::default();
+    let compressed = compress_history_with_intent(&messages, &intent);
+    assert_eq!(compressed.len(), 2); // No compression for few turns
+}
+
+#[test]
+fn test_compress_history_many_turns() {
+    let mut messages = Vec::new();
+    for i in 0..10 {
+        messages.push(crate::llm::LlmChatMessage::user(&format!("msg {}", i)));
+        messages.push(crate::llm::LlmChatMessage::assistant(&format!(
+            "reply {}",
+            i
+        )));
     }
-
-    #[test]
-    fn test_intent_state_no_update_block() {
-        let response = "Just a normal response without any intent update.";
-        let current = IntentState::default();
-        let (cleaned, new_state) = IntentState::parse_from_response(response, &current);
-
-        assert_eq!(cleaned, response);
-        assert_eq!(new_state.turn, 0); // No increment without update
-    }
-
-    #[test]
-    fn test_intent_state_precision_progression() {
-        let mut state = IntentState::default();
-        assert_eq!(state.precision, IntentPrecision::Vague);
-
-        state.summary = "organize files".to_string();
-        state.precision = IntentPrecision::Directional;
-        assert!(!state.is_actionable());
-
-        state.precision = IntentPrecision::Actionable;
-        assert!(state.is_actionable());
-    }
-
-    #[test]
-    fn test_intent_state_prompt_block() {
-        let state = IntentState {
-            summary: "Build CLI tool".to_string(),
-            precision: IntentPrecision::Structured,
-            confirmed: vec!["Rust".to_string(), "CLI".to_string()],
-            pending: vec!["file types".to_string()],
-            artifacts: vec!["src/main.rs".to_string()],
-            turn: 3,
-        };
-        let block = state.to_prompt_block();
-        assert!(block.contains("turn 3"));
-        assert!(block.contains("structured"));
-        assert!(block.contains("Rust, CLI"));
-    }
-
-    #[test]
-    fn test_compress_history_few_turns() {
-        let messages = vec![
-            crate::llm::LlmChatMessage::user("hello"),
-            crate::llm::LlmChatMessage::assistant("hi"),
-        ];
-        let intent = IntentState::default();
-        let compressed = compress_history_with_intent(&messages, &intent);
-        assert_eq!(compressed.len(), 2); // No compression for few turns
-    }
-
-    #[test]
-    fn test_compress_history_many_turns() {
-        let mut messages = Vec::new();
-        for i in 0..10 {
-            messages.push(crate::llm::LlmChatMessage::user(&format!("msg {}", i)));
-            messages.push(crate::llm::LlmChatMessage::assistant(&format!("reply {}", i)));
-        }
-        let intent = IntentState {
-            summary: "Building a tool".to_string(),
-            precision: IntentPrecision::Actionable,
-            confirmed: vec!["Rust".to_string()],
-            pending: vec![],
-            artifacts: vec![],
-            turn: 10,
-        };
-        let compressed = compress_history_with_intent(&messages, &intent);
-        // Should be: 1 system (intent) + last 3 turns (6 messages) = 7
-        assert!(compressed.len() < messages.len());
-        assert!(compressed[0].content.contains("Building a tool"));
-    }
+    let intent = IntentState {
+        summary: "Building a tool".to_string(),
+        precision: IntentPrecision::Actionable,
+        confirmed: vec!["Rust".to_string()],
+        pending: vec![],
+        artifacts: vec![],
+        turn: 10,
+        clarification_state: ClarificationState::NotStarted,
+        user_demand: String::new(),
+        need_summary: String::new(),
+        collected_choices: Vec::new(),
+    };
+    let compressed = compress_history_with_intent(&messages, &intent);
+    // Should be: 1 system (intent) + last 3 turns (6 messages) = 7
+    assert!(compressed.len() < messages.len());
+    assert!(compressed[0].content.contains("Building a tool"));
+}

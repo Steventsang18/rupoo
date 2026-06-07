@@ -7,16 +7,16 @@
 use std::sync::Arc;
 use tempfile::TempDir;
 
+use rupoo::agent::StepOutcome;
 use rupoo::agent::{Agent, DummyToolExecutor};
 use rupoo::db::TaskRepo;
 use rupoo::llm::ConversationHistory;
 use rupoo::skill::{SkillDef, SkillManager, SkillStep};
 use rupoo::task::{
-    browser_action_step, exec_step, finish_step, http_request_step, think_step,
-    tool_call_step, wait_for_input_step, BrowserActionType, CheckpointStatus, HttpMethod, Plan, PlanStatus,
+    browser_action_step, exec_step, finish_step, http_request_step, think_step, tool_call_step,
+    wait_for_input_step, BrowserActionType, CheckpointStatus, HttpMethod, Plan, PlanStatus,
     StepStatus,
 };
-use rupoo::agent::StepOutcome;
 
 /// Helper to create a test repo with temp directory.
 fn test_repo() -> (TempDir, Arc<TaskRepo>) {
@@ -79,7 +79,7 @@ async fn test_plan_creation_and_execution() {
 #[tokio::test]
 async fn test_approval_workflow() {
     let (_tmp, repo) = test_repo();
-    
+
     // Create agent with default safety
     let agent = test_agent(repo.clone());
 
@@ -96,15 +96,15 @@ async fn test_approval_workflow() {
 
     // Resume and execute - the echo tool should not require approval
     let mut resumed_plan = agent.resume(&plan_id).await.unwrap().unwrap();
-    
+
     // Execute think
     let outcome = agent.run_next_step(&mut resumed_plan).await.unwrap();
     assert!(matches!(outcome, StepOutcome::Advanced));
-    
+
     // Execute tool call - should succeed without approval
     let outcome = agent.run_next_step(&mut resumed_plan).await.unwrap();
     assert!(matches!(outcome, StepOutcome::Advanced));
-    
+
     // Execute finish
     let outcome = agent.run_next_step(&mut resumed_plan).await.unwrap();
     assert!(matches!(outcome, StepOutcome::Finished));
@@ -132,14 +132,14 @@ async fn test_memory_store_and_retrieve() {
 
     // Search for it
     let results = repo.search_memories("Rust programming", 5).await.unwrap();
-    
+
     assert!(!results.is_empty());
     assert!(results.iter().any(|r| r.content.contains("Rust")));
-    
+
     // Search with different query
     let results2 = repo.search_memories("systems language", 5).await.unwrap();
     assert!(!results2.is_empty());
-    
+
     // Get recent memories
     let recent = repo.recent_memories(10).await.unwrap();
     assert!(!recent.is_empty());
@@ -173,7 +173,7 @@ async fn test_conversation_history_persistence() {
         .unwrap();
 
     assert_eq!(loaded.message_count(), 4);
-    
+
     // Verify message count matches (can't access individual messages directly)
     // We can verify by creating a new history and comparing
     let mut history = ConversationHistory::new(10);
@@ -181,7 +181,7 @@ async fn test_conversation_history_persistence() {
     history.push_assistant("Hi there!");
     history.push_user("How are you?");
     history.push_assistant("I'm doing great, thanks for asking!");
-    
+
     // Both should have the same message count
     assert_eq!(loaded.message_count(), history.message_count());
 }
@@ -253,12 +253,22 @@ async fn test_crash_recovery_from_completed_step() {
     repo.save_plan(&plan).await.unwrap();
 
     // Simulate: steps 0 and 1 completed, then crash
-    repo.record_step_completion(&plan_id, 0, StepStatus::Completed, Some("step 0 done".into()))
-        .await
-        .unwrap();
-    repo.record_step_completion(&plan_id, 1, StepStatus::Completed, Some("step 1 done".into()))
-        .await
-        .unwrap();
+    repo.record_step_completion(
+        &plan_id,
+        0,
+        StepStatus::Completed,
+        Some("step 0 done".into()),
+    )
+    .await
+    .unwrap();
+    repo.record_step_completion(
+        &plan_id,
+        1,
+        StepStatus::Completed,
+        Some("step 1 done".into()),
+    )
+    .await
+    .unwrap();
 
     // Recovery should resume from step 2
     let recovered_plan = agent.resume(&plan_id).await.unwrap().unwrap();
@@ -286,10 +296,10 @@ async fn test_exec_step_execution() {
     repo.save_plan(&plan).await.unwrap();
 
     let mut resumed_plan = agent.resume(&plan_id).await.unwrap().unwrap();
-    
+
     // Execute exec step
     let outcome = agent.run_next_step(&mut resumed_plan).await.unwrap();
-    
+
     // Should succeed or fail depending on tool availability
     match outcome {
         StepOutcome::Advanced => {
@@ -314,12 +324,7 @@ async fn test_http_request_step() {
 
     // Create a plan with HTTP request step (GET httpbin)
     let steps = vec![
-        http_request_step(
-            "https://httpbin.org/get",
-            HttpMethod::GET,
-            None,
-            None,
-        ),
+        http_request_step("https://httpbin.org/get", HttpMethod::GET, None, None),
         finish_step("http complete"),
     ];
     let plan = Plan::new("http-test", steps);
@@ -328,15 +333,17 @@ async fn test_http_request_step() {
     repo.save_plan(&plan).await.unwrap();
 
     let mut resumed_plan = agent.resume(&plan_id).await.unwrap().unwrap();
-    
+
     // Execute HTTP request
     let outcome = agent.run_next_step(&mut resumed_plan).await.unwrap();
-    
+
     // Should advance (or fail if network unavailable)
     match outcome {
         StepOutcome::Advanced => {
             // Check the step result
-            if let Some(rupoo::task::Step::HttpRequest { response, .. }) = resumed_plan.steps.get(0) {
+            if let Some(rupoo::task::Step::HttpRequest { response, .. }) =
+                resumed_plan.steps.first()
+            {
                 assert!(response.is_some());
             }
         }
@@ -372,14 +379,16 @@ async fn test_browser_action_step() {
     repo.save_plan(&plan).await.unwrap();
 
     let mut resumed_plan = agent.resume(&plan_id).await.unwrap().unwrap();
-    
+
     // Execute browser action
     let outcome = agent.run_next_step(&mut resumed_plan).await.unwrap();
-    
+
     // Browser may not be available, so handle both cases
     match outcome {
         StepOutcome::Advanced => {
-            if let Some(rupoo::task::Step::BrowserAction { output, .. }) = resumed_plan.steps.get(0) {
+            if let Some(rupoo::task::Step::BrowserAction { output, .. }) =
+                resumed_plan.steps.first()
+            {
                 assert!(output.is_some());
             }
         }
@@ -411,23 +420,26 @@ async fn test_wait_for_input_preserves_index() {
     repo.save_plan(&plan).await.unwrap();
 
     let mut resumed_plan = agent.resume(&plan_id).await.unwrap().unwrap();
-    
+
     // Execute think
     agent.run_next_step(&mut resumed_plan).await.unwrap();
     assert_eq!(resumed_plan.current_step_index, 1);
-    
+
     // Execute wait_for_input - should NOT advance
     let outcome = agent.run_next_step(&mut resumed_plan).await.unwrap();
-    
+
     assert!(matches!(outcome, StepOutcome::WaitingForInput(_)));
     assert_eq!(resumed_plan.current_step_index, 1); // Index unchanged!
     assert_eq!(resumed_plan.status, PlanStatus::WaitingForInput);
-    
+
     // Now inject input
-    let outcome = agent.inject_input(&mut resumed_plan, 1, "Alice").await.unwrap();
+    let outcome = agent
+        .inject_input(&mut resumed_plan, 1, "Alice")
+        .await
+        .unwrap();
     assert!(matches!(outcome, StepOutcome::Advanced));
     assert_eq!(resumed_plan.current_step_index, 2);
-    
+
     // Finish
     let outcome = agent.run_next_step(&mut resumed_plan).await.unwrap();
     assert!(matches!(outcome, StepOutcome::Finished));
@@ -481,7 +493,10 @@ async fn test_skill_to_plan_conversion() {
     assert_eq!(plan.steps.len(), 4);
     assert!(matches!(plan.steps[0], rupoo::task::Step::Think { .. }));
     assert!(matches!(plan.steps[1], rupoo::task::Step::Exec { .. }));
-    assert!(matches!(plan.steps[2], rupoo::task::Step::HttpRequest { .. }));
+    assert!(matches!(
+        plan.steps[2],
+        rupoo::task::Step::HttpRequest { .. }
+    ));
     assert!(matches!(plan.steps[3], rupoo::task::Step::Finish { .. }));
 }
 
@@ -494,23 +509,33 @@ async fn test_plan_to_skill_preserves_types() {
     let steps = vec![
         think_step("analyze"),
         exec_step("echo", vec!["test".to_string()], None),
-        http_request_step("https://api.example.com", HttpMethod::POST, Some("{}".into()), None),
-        browser_action_step(BrowserActionType::GetText, Some("https://example.com".into()), None, Some(30)),
+        http_request_step(
+            "https://api.example.com",
+            HttpMethod::POST,
+            Some("{}".into()),
+            None,
+        ),
+        browser_action_step(
+            BrowserActionType::GetText,
+            Some("https://example.com".into()),
+            None,
+            Some(30),
+        ),
         finish_step("complete"),
     ];
-    
+
     let mut plan = Plan::new("complex-plan", steps);
-    
+
     // Mark all steps as completed
     for step in &mut plan.steps {
         step.set_status(StepStatus::Completed);
     }
 
     let skill = SkillManager::plan_to_skill(&plan, "complex-skill", "A complex skill");
-    
+
     assert_eq!(skill.schema_version, "2.0");
     assert_eq!(skill.steps.len(), 5);
-    
+
     assert!(matches!(skill.steps[0], SkillStep::Think { .. }));
     assert!(matches!(skill.steps[1], SkillStep::Exec { .. }));
     assert!(matches!(skill.steps[2], SkillStep::HttpRequest { .. }));
@@ -527,12 +552,20 @@ async fn test_settings_crud() {
     let (_tmp, repo) = test_repo();
 
     // Set settings with valid keys
-    repo.set_setting("api_key.anthropic", "secret123").await.unwrap();
+    repo.set_setting("api_key.anthropic", "secret123")
+        .await
+        .unwrap();
     repo.set_setting("theme", "dark").await.unwrap();
-    repo.set_setting("default_timeout_secs", "30").await.unwrap();
+    repo.set_setting("default_timeout_secs", "30")
+        .await
+        .unwrap();
 
     // Get individual setting
-    let api_key = repo.get_setting("api_key.anthropic").await.unwrap().unwrap();
+    let api_key = repo
+        .get_setting("api_key.anthropic")
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(api_key, "secret123");
 
     // List all settings
@@ -543,7 +576,7 @@ async fn test_settings_crud() {
 
     // Delete a setting
     repo.delete_setting("theme").await.unwrap();
-    
+
     let settings_after = repo.list_settings().await.unwrap();
     assert_eq!(settings_after.len(), 2);
     assert!(!settings_after.iter().any(|(k, _)| k == "theme"));
@@ -586,7 +619,7 @@ async fn test_plan_deletion_cascades() {
     let plan_id = plan.id.clone();
 
     repo.save_plan(&plan).await.unwrap();
-    
+
     // Add some checkpoints
     repo.record_step_completion(&plan_id, 0, StepStatus::Completed, Some("done".into()))
         .await
@@ -648,7 +681,6 @@ async fn test_plan_summary_fields() {
         finish_step("done"),
     ];
     let plan = Plan::new("summary-test", steps);
-    let plan_id = plan.id.clone();
 
     repo.save_plan(&plan).await.unwrap();
 

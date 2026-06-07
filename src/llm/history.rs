@@ -22,13 +22,22 @@ pub enum LlmChatRole {
 
 impl LlmChatMessage {
     pub fn system(content: &str) -> Self {
-        Self { role: LlmChatRole::System, content: content.to_string() }
+        Self {
+            role: LlmChatRole::System,
+            content: content.to_string(),
+        }
     }
     pub fn user(content: &str) -> Self {
-        Self { role: LlmChatRole::User, content: content.to_string() }
+        Self {
+            role: LlmChatRole::User,
+            content: content.to_string(),
+        }
     }
     pub fn assistant(content: &str) -> Self {
-        Self { role: LlmChatRole::Assistant, content: content.to_string() }
+        Self {
+            role: LlmChatRole::Assistant,
+            content: content.to_string(),
+        }
     }
 }
 
@@ -46,7 +55,11 @@ pub struct ConversationHistory {
 
 impl ConversationHistory {
     pub fn new(max_turns: usize) -> Self {
-        Self { messages: Vec::new(), max_turns, max_tokens: 0 }
+        Self {
+            messages: Vec::new(),
+            max_turns,
+            max_tokens: 0,
+        }
     }
 
     /// Set a token budget for conversation history. When exceeded, older messages are trimmed.
@@ -75,20 +88,20 @@ impl ConversationHistory {
         self.messages
             .iter()
             .map(|m| {
-                use rig::message::{Message, UserContent, AssistantContent, Text};
+                use rig::message::{AssistantContent, Message, Text, UserContent};
                 use rig::OneOrMany;
                 match m.role {
-                    LlmChatRole::System | LlmChatRole::User => {
-                        Message::User {
-                            content: OneOrMany::one(UserContent::Text(Text { text: m.content.clone() }))
-                        }
-                    }
-                    LlmChatRole::Assistant => {
-                        Message::Assistant {
-                            id: None,
-                            content: OneOrMany::one(AssistantContent::Text(Text { text: m.content.clone() }))
-                        }
-                    }
+                    LlmChatRole::System | LlmChatRole::User => Message::User {
+                        content: OneOrMany::one(UserContent::Text(Text {
+                            text: m.content.clone(),
+                        })),
+                    },
+                    LlmChatRole::Assistant => Message::Assistant {
+                        id: None,
+                        content: OneOrMany::one(AssistantContent::Text(Text {
+                            text: m.content.clone(),
+                        })),
+                    },
                 }
             })
             .collect()

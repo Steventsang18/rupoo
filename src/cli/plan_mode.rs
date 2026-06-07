@@ -2,33 +2,36 @@
 
 use tracing::warn;
 
-use super::{AgentToTui, ChatMessage, PendingTool};
 use super::bridge::AgentUiBridge;
+use super::{AgentToTui, ChatMessage, PendingTool};
 
 impl AgentUiBridge {
     /// Handle Plan Mode: generate plan from task and execute step by step.
     pub(super) async fn handle_plan_mode(&mut self, task: &str) {
         // Check if LLM is configured
         if !self.agent.has_llm() {
-            let _ = self.ui_tx.send(AgentToTui::Message(
-                ChatMessage::error("LLM not configured. Please set up your API key first.".to_string()),
-            ));
+            let _ = self.ui_tx.send(AgentToTui::Message(ChatMessage::error(
+                "LLM not configured. Please set up your API key first.".to_string(),
+            )));
             let _ = self.ui_tx.send(AgentToTui::Idle);
             return;
         }
 
         let _ = self.ui_tx.send(AgentToTui::Thinking);
-        let _ = self.ui_tx.send(AgentToTui::Message(
-            ChatMessage::system(format!("Generating plan for: {}", task)),
-        ));
+        let _ = self
+            .ui_tx
+            .send(AgentToTui::Message(ChatMessage::system(format!(
+                "Generating plan for: {}",
+                task
+            ))));
 
         // Get the LLM gateway to generate plan
         let gateway = match self.agent.llm_gateway_ref() {
             Some(g) => g,
             None => {
-                let _ = self.ui_tx.send(AgentToTui::Message(
-                    ChatMessage::error("LLM gateway not available".to_string()),
-                ));
+                let _ = self.ui_tx.send(AgentToTui::Message(ChatMessage::error(
+                    "LLM gateway not available".to_string(),
+                )));
                 let _ = self.ui_tx.send(AgentToTui::Idle);
                 return;
             }
@@ -37,42 +40,56 @@ impl AgentUiBridge {
         match gateway.generate_plan(task).await {
             Ok(steps) => {
                 let total = steps.len();
-                let _ = self.ui_tx.send(AgentToTui::Message(
-                    ChatMessage::system(format!("Generated plan with {} steps", total)),
-                ));
+                let _ = self
+                    .ui_tx
+                    .send(AgentToTui::Message(ChatMessage::system(format!(
+                        "Generated plan with {} steps",
+                        total
+                    ))));
 
                 // Send task list for display
-                let task_list: Vec<(String, rupoo::task::StepStatus)> = steps.iter()
+                let task_list: Vec<(String, rupoo::task::StepStatus)> = steps
+                    .iter()
                     .map(|spec| {
                         let task_name = spec.instruction.chars().take(50).collect::<String>();
                         (task_name, rupoo::task::StepStatus::Pending)
                     })
                     .collect();
-                let _ = self.ui_tx.send(AgentToTui::PlanTaskList { tasks: task_list });
+                let _ = self
+                    .ui_tx
+                    .send(AgentToTui::PlanTaskList { tasks: task_list });
 
                 // Convert StepSpec to Plan steps
-                let plan_steps: Vec<rupoo::task::Step> = steps.into_iter().map(|spec| {
-                    match spec.step_type.as_str() {
+                let plan_steps: Vec<rupoo::task::Step> = steps
+                    .into_iter()
+                    .map(|spec| match spec.step_type.as_str() {
                         "think" => rupoo::task::think_step(&spec.prompt),
                         "exec" => rupoo::task::exec_step(
-                            if spec.tool_name.is_empty() { "bash" } else { &spec.tool_name },
+                            if spec.tool_name.is_empty() {
+                                "bash"
+                            } else {
+                                &spec.tool_name
+                            },
                             vec![],
                             None,
                         ),
                         "finish" => rupoo::task::finish_step(&spec.summary),
                         "wait_for_input" => rupoo::task::wait_for_input_step(&spec.prompt),
                         _ => rupoo::task::think_step(&spec.instruction),
-                    }
-                }).collect();
+                    })
+                    .collect();
 
                 // Create and save the plan
                 let label: String = task.chars().take(40).collect();
                 let plan = rupoo::task::Plan::new(&label, plan_steps);
 
                 if let Err(e) = self.repo.save_plan(&plan).await {
-                    let _ = self.ui_tx.send(AgentToTui::Message(
-                        ChatMessage::error(format!("Failed to save plan: {}", e)),
-                    ));
+                    let _ = self
+                        .ui_tx
+                        .send(AgentToTui::Message(ChatMessage::error(format!(
+                            "Failed to save plan: {}",
+                            e
+                        ))));
                     let _ = self.ui_tx.send(AgentToTui::Idle);
                     return;
                 }
@@ -83,23 +100,29 @@ impl AgentUiBridge {
                         self.run_plan(&mut plan).await;
                     }
                     Ok(None) => {
-                        let _ = self.ui_tx.send(AgentToTui::Message(
-                            ChatMessage::assistant("Plan already completed".to_string()),
-                        ));
+                        let _ = self.ui_tx.send(AgentToTui::Message(ChatMessage::assistant(
+                            "Plan already completed".to_string(),
+                        )));
                         let _ = self.ui_tx.send(AgentToTui::Idle);
                     }
                     Err(e) => {
-                        let _ = self.ui_tx.send(AgentToTui::Message(
-                            ChatMessage::error(format!("Plan error: {}", e)),
-                        ));
+                        let _ = self
+                            .ui_tx
+                            .send(AgentToTui::Message(ChatMessage::error(format!(
+                                "Plan error: {}",
+                                e
+                            ))));
                         let _ = self.ui_tx.send(AgentToTui::Idle);
                     }
                 }
             }
             Err(e) => {
-                let _ = self.ui_tx.send(AgentToTui::Message(
-                    ChatMessage::error(format!("Failed to generate plan: {}", e)),
-                ));
+                let _ = self
+                    .ui_tx
+                    .send(AgentToTui::Message(ChatMessage::error(format!(
+                        "Failed to generate plan: {}",
+                        e
+                    ))));
                 let _ = self.ui_tx.send(AgentToTui::Idle);
             }
         }
@@ -109,7 +132,9 @@ impl AgentUiBridge {
         *self.pending_plan.lock().unwrap_or_else(|e| e.into_inner()) = Some(plan.clone());
         loop {
             // Send step progress update
-            let step_name = plan.steps.get(plan.current_step_index)
+            let step_name = plan
+                .steps
+                .get(plan.current_step_index)
                 .map(|s| format!("{:?}", s))
                 .unwrap_or_else(|| "unknown".to_string());
             let _ = self.ui_tx.send(AgentToTui::StepProgress {
@@ -125,66 +150,105 @@ impl AgentUiBridge {
                     if plan.current_step_index >= plan.steps.len() {
                         // Send the final output before going idle
                         let output = self.extract_output(plan);
-                        let _ = self.ui_tx.send(AgentToTui::Message(
-                            ChatMessage::assistant(output),
-                        ));
+                        let _ = self
+                            .ui_tx
+                            .send(AgentToTui::Message(ChatMessage::assistant(output)));
                         let _ = self.ui_tx.send(AgentToTui::Idle);
                         *self.pending_plan.lock().unwrap_or_else(|e| e.into_inner()) = None;
-                        *self.pending_step_index.lock().unwrap_or_else(|e| e.into_inner()) = None;
+                        *self
+                            .pending_step_index
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner()) = None;
                         break;
                     }
                 }
                 Ok(rupoo::agent::StepOutcome::Finished) => {
                     self.send_token_update();
-                    let _ = self.ui_tx.send(AgentToTui::Message(
-                        ChatMessage::assistant(self.extract_output(plan)),
-                    ));
+                    let _ = self.ui_tx.send(AgentToTui::Message(ChatMessage::assistant(
+                        self.extract_output(plan),
+                    )));
                     let _ = self.ui_tx.send(AgentToTui::Idle);
                     *self.pending_plan.lock().unwrap_or_else(|e| e.into_inner()) = None;
-                    *self.pending_step_index.lock().unwrap_or_else(|e| e.into_inner()) = None;
+                    *self
+                        .pending_step_index
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner()) = None;
                     break;
                 }
                 Ok(rupoo::agent::StepOutcome::Failed(e)) => {
-                    let _ = self.ui_tx.send(AgentToTui::Message(
-                        ChatMessage::assistant(format!("Failed: {e}")),
-                    ));
+                    let _ = self
+                        .ui_tx
+                        .send(AgentToTui::Message(ChatMessage::assistant(format!(
+                            "Failed: {e}"
+                        ))));
                     let _ = self.ui_tx.send(AgentToTui::Idle);
                     *self.pending_plan.lock().unwrap_or_else(|e| e.into_inner()) = None;
-                    *self.pending_step_index.lock().unwrap_or_else(|e| e.into_inner()) = None;
+                    *self
+                        .pending_step_index
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner()) = None;
                     break;
                 }
                 Ok(rupoo::agent::StepOutcome::WaitingForInput(p)) => {
-                    let _ = self.ui_tx.send(AgentToTui::Message(
-                        ChatMessage::assistant(format!("Input needed: {p}")),
-                    ));
+                    let _ = self
+                        .ui_tx
+                        .send(AgentToTui::Message(ChatMessage::assistant(format!(
+                            "Input needed: {p}"
+                        ))));
                     let _ = self.ui_tx.send(AgentToTui::Idle);
                     *self.pending_plan.lock().unwrap_or_else(|e| e.into_inner()) = None;
-                    *self.pending_step_index.lock().unwrap_or_else(|e| e.into_inner()) = None;
+                    *self
+                        .pending_step_index
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner()) = None;
                     break;
                 }
-                Ok(rupoo::agent::StepOutcome::RequiresApproval { ref tool_name, ref params, step_index }) => {
+                Ok(rupoo::agent::StepOutcome::RequiresApproval {
+                    ref tool_name,
+                    ref params,
+                    step_index,
+                }) => {
                     if self.approve_all {
                         // Auto-approve: execute based on step type.
                         let p = params.clone();
                         let tn = tool_name.clone();
-                        if let Err(e) = self.repo.update_step_progress(
-                            &plan.id, step_index, rupoo::task::StepStatus::Running,
-                        ).await {
+                        if let Err(e) = self
+                            .repo
+                            .update_step_progress(
+                                &plan.id,
+                                step_index,
+                                rupoo::task::StepStatus::Running,
+                            )
+                            .await
+                        {
                             warn!(error = %e, "failed to mark step running");
                         }
 
                         // Determine execution method based on step type
-                        let result = if let Some(rupoo::task::Step::Exec { command, args, timeout_secs, .. }) = plan.steps.get(step_index) {
+                        let result = if let Some(rupoo::task::Step::Exec {
+                            command,
+                            args,
+                            timeout_secs,
+                            ..
+                        }) = plan.steps.get(step_index)
+                        {
                             // Exec step: run via terminal executor
                             let cmd = command.clone();
                             let a = args.clone();
                             let t = *timeout_secs;
                             rupoo::tools::terminal::execute_command(
-                                &cmd, &a, t, &self.agent.safety_ctx,
-                            ).await.map_err(|e| e.to_string())
+                                &cmd,
+                                &a,
+                                t,
+                                &self.agent.safety_ctx,
+                            )
+                            .await
+                            .map_err(|e| e.to_string())
                         } else {
                             // ToolCall step: run via MCP executor
-                            self.tool_executor.execute_tool(&tn, p).await
+                            self.tool_executor
+                                .execute_tool(&tn, p)
+                                .await
                                 .map(|mcp| mcp.content().to_string())
                                 .map_err(|e: rupoo::error::AgentError| e.to_string())
                         };
@@ -193,18 +257,29 @@ impl AgentUiBridge {
                             Ok(output) => {
                                 if let Some(step) = plan.steps.get_mut(step_index) {
                                     step.set_status(rupoo::task::StepStatus::Completed);
-                                    if let rupoo::task::Step::ToolCall { ref mut result, .. } = step {
-                                        *result = Some(serde_json::json!({"success": true, "content": &output}));
+                                    if let rupoo::task::Step::ToolCall { ref mut result, .. } = step
+                                    {
+                                        *result = Some(
+                                            serde_json::json!({"success": true, "content": &output}),
+                                        );
                                     }
-                                    if let rupoo::task::Step::Exec { output: ref mut out, .. } = step {
+                                    if let rupoo::task::Step::Exec {
+                                        output: ref mut out,
+                                        ..
+                                    } = step
+                                    {
                                         *out = Some(output);
                                     }
                                 }
-                                let _ = self.repo.record_step_completion(
-                                    &plan.id, step_index,
-                                    rupoo::task::StepStatus::Completed,
-                                    None,
-                                ).await;
+                                let _ = self
+                                    .repo
+                                    .record_step_completion(
+                                        &plan.id,
+                                        step_index,
+                                        rupoo::task::StepStatus::Completed,
+                                        None,
+                                    )
+                                    .await;
                                 plan.current_step_index = step_index + 1;
                                 plan.updated_at = chrono::Utc::now();
                             }
@@ -212,11 +287,15 @@ impl AgentUiBridge {
                                 if let Some(step) = plan.steps.get_mut(step_index) {
                                     step.set_status(rupoo::task::StepStatus::Failed);
                                 }
-                                let _ = self.repo.record_step_completion(
-                                    &plan.id, step_index,
-                                    rupoo::task::StepStatus::Failed,
-                                    Some(format!("execution error: {e}")),
-                                ).await;
+                                let _ = self
+                                    .repo
+                                    .record_step_completion(
+                                        &plan.id,
+                                        step_index,
+                                        rupoo::task::StepStatus::Failed,
+                                        Some(format!("execution error: {e}")),
+                                    )
+                                    .await;
                                 plan.updated_at = chrono::Utc::now();
                             }
                         }
@@ -228,12 +307,17 @@ impl AgentUiBridge {
                     break;
                 }
                 Err(e) => {
-                    let _ = self.ui_tx.send(AgentToTui::Message(
-                        ChatMessage::assistant(format!("Error: {e}")),
-                    ));
+                    let _ = self
+                        .ui_tx
+                        .send(AgentToTui::Message(ChatMessage::assistant(format!(
+                            "Error: {e}"
+                        ))));
                     let _ = self.ui_tx.send(AgentToTui::Idle);
                     *self.pending_plan.lock().unwrap_or_else(|e| e.into_inner()) = None;
-                    *self.pending_step_index.lock().unwrap_or_else(|e| e.into_inner()) = None;
+                    *self
+                        .pending_step_index
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner()) = None;
                     break;
                 }
             }
@@ -257,11 +341,9 @@ impl AgentUiBridge {
             let output = match step {
                 rupoo::task::Step::Think { output, .. } => output.clone(),
                 rupoo::task::Step::Exec { output, .. } => output.clone(),
-                rupoo::task::Step::ToolCall { result, .. } => {
-                    result.as_ref().map(|r| {
-                        serde_json::to_string_pretty(r).unwrap_or_else(|_| r.to_string())
-                    })
-                }
+                rupoo::task::Step::ToolCall { result, .. } => result
+                    .as_ref()
+                    .map(|r| serde_json::to_string_pretty(r).unwrap_or_else(|_| r.to_string())),
                 _ => None,
             };
 
@@ -277,27 +359,25 @@ impl AgentUiBridge {
         outputs.join("\n\n")
     }
 
-    pub(super) async fn store_pending_plan(
-        &self,
-        plan: &rupoo::task::Plan,
-        step_index: usize,
-    ) {
+    pub(super) async fn store_pending_plan(&self, plan: &rupoo::task::Plan, step_index: usize) {
         *self.pending_plan.lock().unwrap_or_else(|e| e.into_inner()) = Some(plan.clone());
-        *self.pending_step_index.lock().unwrap_or_else(|e| e.into_inner()) = Some(step_index);
-        let (tool_name, params_json) =
-            if let Some(rupoo::task::Step::ToolCall {
-                ref tool_name,
-                ref params,
-                ..
-            }) = plan.steps.get(step_index)
-            {
-                (
-                    tool_name.clone(),
-                    serde_json::to_string_pretty(params).unwrap_or_default(),
-                )
-            } else {
-                ("unknown".into(), "null".into())
-            };
+        *self
+            .pending_step_index
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = Some(step_index);
+        let (tool_name, params_json) = if let Some(rupoo::task::Step::ToolCall {
+            ref tool_name,
+            ref params,
+            ..
+        }) = plan.steps.get(step_index)
+        {
+            (
+                tool_name.clone(),
+                serde_json::to_string_pretty(params).unwrap_or_default(),
+            )
+        } else {
+            ("unknown".into(), "null".into())
+        };
         let _ = self.ui_tx.send(AgentToTui::RequestApproval(PendingTool {
             tool_name,
             args: params_json,

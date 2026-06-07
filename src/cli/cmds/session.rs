@@ -1,8 +1,8 @@
 use anyhow::Result;
+use chrono::Utc;
 use console::style;
 use rupoo::db::TaskRepo;
 use rupoo::task::{PlanStatus, Step, StepStatus};
-use chrono::Utc;
 use std::sync::Arc;
 
 pub async fn run(db_path: &str, action: crate::main_cli::SessionAction) -> Result<()> {
@@ -122,32 +122,23 @@ fn step_icon(status: &StepStatus) -> String {
 
 fn step_label(step: &Step) -> String {
     match step {
-        Step::Think {
-            instruction, ..
-        } => format!("Think: {}", instruction),
+        Step::Think { instruction, .. } => format!("Think: {}", instruction),
         Step::ToolCall {
             tool_name, params, ..
         } => format!("Tool: {} ({})", tool_name, params),
-        Step::WaitForInput {
-            prompt, ..
-        } => format!("Wait: {}", prompt),
-        Step::Finish {
-            summary, ..
-        } => format!("Finish: {}", summary),
-        Step::Exec {
-            command, ..
-        } => format!("Exec: {}", command),
-        Step::HttpRequest {
-            url, method, ..
-        } => format!("HTTP: {:?} {}", method, url),
-        Step::BrowserAction {
-            action, ..
-        } => format!("Browser: {:?}", action),
+        Step::WaitForInput { prompt, .. } => format!("Wait: {}", prompt),
+        Step::Finish { summary, .. } => format!("Finish: {}", summary),
+        Step::Exec { command, .. } => format!("Exec: {}", command),
+        Step::HttpRequest { url, method, .. } => format!("HTTP: {:?} {}", method, url),
+        Step::BrowserAction { action, .. } => format!("Browser: {:?}", action),
     }
 }
 
 async fn cmd_resume_string(plan_id: &str) -> Result<String> {
-    Ok(format!("Use: rupoo run --task {} --db agent.db\n  or from TUI: /run {}", plan_id, plan_id))
+    Ok(format!(
+        "Use: rupoo run --task {} --db agent.db\n  or from TUI: /run {}",
+        plan_id, plan_id
+    ))
 }
 
 async fn cmd_delete_string(repo: &TaskRepo, plan_id: &str) -> Result<String> {
@@ -180,7 +171,11 @@ mod tests {
     #[test]
     fn test_step_icon_pending() {
         let icon = step_icon(&StepStatus::Pending);
-        assert!(icon.contains("·"), "Expected icon to contain '·', got: {:?}", icon);
+        assert!(
+            icon.contains("·"),
+            "Expected icon to contain '·', got: {:?}",
+            icon
+        );
     }
 
     #[test]

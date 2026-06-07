@@ -140,12 +140,12 @@ impl SkillManager {
             )));
         }
         let content = std::fs::read_to_string(&path)?;
-        
+
         // Try parsing as v2.0 first (has schema_version field)
         if let Ok(skill) = serde_json::from_str::<SkillDef>(&content) {
             return Ok(skill);
         }
-        
+
         // Fallback: parse as v1.0 and add schema_version
         #[derive(Deserialize)]
         struct SkillDefV1 {
@@ -156,9 +156,9 @@ impl SkillManager {
             pub trigger: Vec<String>,
             pub steps: Vec<serde_json::Value>,
         }
-        
+
         let skill_v1: SkillDefV1 = serde_json::from_str(&content)?;
-        
+
         // Convert v1 steps to v2 SkillStep enum
         let v2_steps: Vec<SkillStep> = skill_v1
             .steps
@@ -166,34 +166,34 @@ impl SkillManager {
             .map(|s| {
                 let map = serde_json::from_value::<serde_json::Map<String, serde_json::Value>>(s)
                     .unwrap_or_default();
-                let type_str = map.get("type")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("think");
-                
+                let type_str = map.get("type").and_then(|v| v.as_str()).unwrap_or("think");
+
                 match type_str {
                     "think" => SkillStep::Think {
-                        instruction: map.get("instruction")
+                        instruction: map
+                            .get("instruction")
                             .and_then(|v| v.as_str())
                             .unwrap_or("")
                             .to_string(),
                     },
                     "toolCall" => SkillStep::ToolCall {
-                        tool_name: map.get("toolName")
+                        tool_name: map
+                            .get("toolName")
                             .and_then(|v| v.as_str())
                             .unwrap_or("")
                             .to_string(),
-                        params: map.get("params")
-                            .cloned()
-                            .unwrap_or(serde_json::json!({})),
+                        params: map.get("params").cloned().unwrap_or(serde_json::json!({})),
                     },
                     "waitForInput" => SkillStep::WaitForInput {
-                        prompt: map.get("prompt")
+                        prompt: map
+                            .get("prompt")
                             .and_then(|v| v.as_str())
                             .unwrap_or("")
                             .to_string(),
                     },
                     "finish" => SkillStep::Finish {
-                        summary: map.get("summary")
+                        summary: map
+                            .get("summary")
                             .and_then(|v| v.as_str())
                             .unwrap_or("")
                             .to_string(),
@@ -204,7 +204,7 @@ impl SkillManager {
                 }
             })
             .collect();
-        
+
         // Build the v2 SkillDef
         Ok(SkillDef {
             name: skill_v1.name,
@@ -253,36 +253,42 @@ impl SkillManager {
                 SkillStep::ToolCall { tool_name, params } => {
                     tool_call_step(tool_name, params.clone())
                 }
-                SkillStep::Exec { command, args, timeout_secs } => {
-                    crate::task::exec_step(command, args.clone(), *timeout_secs)
-                }
-                SkillStep::HttpRequest { url, method, body, headers } => {
+                SkillStep::Exec {
+                    command,
+                    args,
+                    timeout_secs,
+                } => crate::task::exec_step(command, args.clone(), *timeout_secs),
+                SkillStep::HttpRequest {
+                    url,
+                    method,
+                    body,
+                    headers,
+                } => {
                     let http_method = match method.to_uppercase().as_str() {
                         "POST" => crate::task::HttpMethod::POST,
                         _ => crate::task::HttpMethod::GET,
                     };
                     crate::task::http_request_step(url, http_method, body.clone(), headers.clone())
                 }
-                SkillStep::BrowserAction { action, url, timeout_secs } => {
+                SkillStep::BrowserAction {
+                    action,
+                    url,
+                    timeout_secs,
+                } => {
                     let action_type = match action.to_lowercase().as_str() {
                         "navigate" => crate::task::BrowserActionType::Navigate,
                         "screenshot" => crate::task::BrowserActionType::Screenshot,
                         "gettext" | "get_text" => crate::task::BrowserActionType::GetText,
                         "click" => crate::task::BrowserActionType::Click,
-                        "extractlinks" | "extract_links" => crate::task::BrowserActionType::ExtractLinks,
+                        "extractlinks" | "extract_links" => {
+                            crate::task::BrowserActionType::ExtractLinks
+                        }
                         "javascript" | "js" => crate::task::BrowserActionType::JavaScript,
                         _ => crate::task::BrowserActionType::Navigate,
                     };
-                    crate::task::browser_action_step(
-                        action_type,
-                        url.clone(),
-                        None,
-                        *timeout_secs,
-                    )
+                    crate::task::browser_action_step(action_type, url.clone(), None, *timeout_secs)
                 }
-                SkillStep::WaitForInput { prompt } => {
-                    crate::task::wait_for_input_step(prompt)
-                }
+                SkillStep::WaitForInput { prompt } => crate::task::wait_for_input_step(prompt),
                 SkillStep::Finish { summary } => finish_step(summary),
             })
             .collect();
@@ -310,23 +316,37 @@ impl SkillManager {
                     tool_name: tool_name.clone(),
                     params: params.clone(),
                 },
-                crate::task::Step::Exec { command, args, timeout_secs, .. } => SkillStep::Exec {
+                crate::task::Step::Exec {
+                    command,
+                    args,
+                    timeout_secs,
+                    ..
+                } => SkillStep::Exec {
                     command: command.clone(),
                     args: args.clone(),
                     timeout_secs: *timeout_secs,
                 },
-                crate::task::Step::HttpRequest { url, method, body, headers, .. } => {
-                    SkillStep::HttpRequest {
-                        url: url.clone(),
-                        method: match method {
-                            crate::task::HttpMethod::GET => "GET".to_string(),
-                            crate::task::HttpMethod::POST => "POST".to_string(),
-                        },
-                        body: body.clone(),
-                        headers: headers.clone(),
-                    }
-                }
-                crate::task::Step::BrowserAction { action, url, timeout_secs, .. } => {
+                crate::task::Step::HttpRequest {
+                    url,
+                    method,
+                    body,
+                    headers,
+                    ..
+                } => SkillStep::HttpRequest {
+                    url: url.clone(),
+                    method: match method {
+                        crate::task::HttpMethod::GET => "GET".to_string(),
+                        crate::task::HttpMethod::POST => "POST".to_string(),
+                    },
+                    body: body.clone(),
+                    headers: headers.clone(),
+                },
+                crate::task::Step::BrowserAction {
+                    action,
+                    url,
+                    timeout_secs,
+                    ..
+                } => {
                     let action_str = match action {
                         crate::task::BrowserActionType::Navigate => "navigate",
                         crate::task::BrowserActionType::Screenshot => "screenshot",
@@ -381,7 +401,8 @@ impl SkillManager {
                     params: serde_json::json!({ "path": "." }),
                 },
                 SkillStep::Think {
-                    instruction: "Identify potential bugs, security issues, and style problems".into(),
+                    instruction: "Identify potential bugs, security issues, and style problems"
+                        .into(),
                 },
                 SkillStep::Finish {
                     summary: "Code review analysis complete. See step outputs for details.".into(),
@@ -498,8 +519,8 @@ impl SkillManager {
     /// Parse a SKILL.md file content into a SkillDef.
     fn parse_skill_md(content: &str, fallback_name: &str) -> AgentResult<SkillDef> {
         // Extract YAML frontmatter
-        let (frontmatter, body) = if content.starts_with("---") {
-            let end = content[3..].find("---").map(|i| i + 3);
+        let (frontmatter, body) = if let Some(stripped) = content.strip_prefix("---") {
+            let end = stripped.find("---").map(|i| i + 3);
             match end {
                 Some(end_idx) => {
                     let fm = &content[3..end_idx];
@@ -516,9 +537,8 @@ impl SkillManager {
         let fm: SkillFrontmatter = if frontmatter.is_empty() {
             SkillFrontmatter::default()
         } else {
-            serde_yaml::from_str(&frontmatter).map_err(|e| {
-                AgentError::Skill(format!("parse SKILL.md frontmatter: {e}"))
-            })?
+            serde_yaml::from_str(&frontmatter)
+                .map_err(|e| AgentError::Skill(format!("parse SKILL.md frontmatter: {e}")))?
         };
 
         // Convert body to steps — each section heading becomes a Think step,
@@ -543,8 +563,8 @@ impl SkillManager {
             let trimmed = line.trim();
 
             // Section headings → Think steps
-            if trimmed.starts_with("# ") {
-                let instruction = trimmed[2..].trim().to_string();
+            if let Some(title) = trimmed.strip_prefix("# ") {
+                let instruction = title.trim().to_string();
                 if !instruction.is_empty() {
                     steps.push(SkillStep::Think { instruction });
                 }
@@ -563,7 +583,10 @@ impl SkillManager {
             }
             // Regular text → additional context for the last Think step
             else if !trimmed.is_empty() {
-                if let Some(SkillStep::Think { ref mut instruction }) = steps.last_mut() {
+                if let Some(SkillStep::Think {
+                    ref mut instruction,
+                }) = steps.last_mut()
+                {
                     instruction.push_str(&format!("\n{}", trimmed));
                 } else {
                     steps.push(SkillStep::Think {
@@ -596,20 +619,21 @@ impl SkillManager {
             serde_json::json!({})
         } else {
             // Try to parse as JSON first
-            serde_json::from_str(params_str)
-                .ok()
-                .unwrap_or_else(|| {
-                    // Fallback: try key=value format
-                    let mut map = serde_json::Map::new();
-                    for pair in params_str.split(',') {
-                        if let Some((key, value)) = pair.split_once('=') {
-                            let key = key.trim().trim_matches('"');
-                            let value = value.trim().trim_matches('"');
-                            map.insert(key.to_string(), serde_json::Value::String(value.to_string()));
-                        }
+            serde_json::from_str(params_str).ok().unwrap_or_else(|| {
+                // Fallback: try key=value format
+                let mut map = serde_json::Map::new();
+                for pair in params_str.split(',') {
+                    if let Some((key, value)) = pair.split_once('=') {
+                        let key = key.trim().trim_matches('"');
+                        let value = value.trim().trim_matches('"');
+                        map.insert(
+                            key.to_string(),
+                            serde_json::Value::String(value.to_string()),
+                        );
                     }
-                    serde_json::Value::Object(map)
-                })
+                }
+                serde_json::Value::Object(map)
+            })
         };
 
         Some(SkillStep::ToolCall { tool_name, params })
@@ -635,21 +659,29 @@ fn levenshtein_distance(a: &str, b: &str) -> usize {
     let a_len = a_chars.len();
     let b_len = b_chars.len();
 
-    if a_len == 0 { return b_len; }
-    if b_len == 0 { return a_len; }
+    if a_len == 0 {
+        return b_len;
+    }
+    if b_len == 0 {
+        return a_len;
+    }
 
     let mut matrix = vec![vec![0; b_len + 1]; a_len + 1];
 
     for (i, row) in matrix.iter_mut().enumerate() {
         row[0] = i;
     }
-    for j in 0..=b_len {
-        matrix[0][j] = j;
+    for (j, cell) in matrix[0].iter_mut().enumerate() {
+        *cell = j;
     }
 
     for i in 1..=a_len {
         for j in 1..=b_len {
-            let cost = if a_chars[i - 1] == b_chars[j - 1] { 0 } else { 1 };
+            let cost = if a_chars[i - 1] == b_chars[j - 1] {
+                0
+            } else {
+                1
+            };
             matrix[i][j] = (matrix[i - 1][j] + 1)
                 .min(matrix[i][j - 1] + 1)
                 .min(matrix[i - 1][j - 1] + cost);

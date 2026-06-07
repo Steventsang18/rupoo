@@ -1,7 +1,7 @@
-use std::fs;
-use std::path::PathBuf;
 use anyhow::Result;
 use console::style;
+use std::fs;
+use std::path::PathBuf;
 
 pub async fn run(follow: bool, lines: usize, level: Option<&str>, prev: bool) -> Result<()> {
     let out = output(follow, lines, level, prev).await?;

@@ -25,7 +25,9 @@ pub fn register_tools<M: rig::completion::CompletionModel>(
 
     // FileReadTool is safe
     if let Some(root) = jail_root {
-        builder = builder.tool(crate::rig_tools::FileReadTool::with_jail(root.to_path_buf()));
+        builder = builder.tool(crate::rig_tools::FileReadTool::with_jail(
+            root.to_path_buf(),
+        ));
     } else {
         builder = builder.tool(crate::rig_tools::FileReadTool::new());
     }
@@ -40,7 +42,9 @@ pub fn register_tools<M: rig::completion::CompletionModel>(
     // FileWriteTool — always register so the LLM knows it can write files.
     // The jail_root still enforces that writes stay inside the project directory.
     if let Some(root) = jail_root {
-        builder = builder.tool(crate::rig_tools::FileWriteTool::with_jail(root.to_path_buf()));
+        builder = builder.tool(crate::rig_tools::FileWriteTool::with_jail(
+            root.to_path_buf(),
+        ));
     } else {
         builder = builder.tool(crate::rig_tools::FileWriteTool::new());
     }
@@ -53,12 +57,17 @@ pub fn register_tools_legacy<M: rig::completion::CompletionModel>(
     builder: rig::agent::AgentBuilderSimple<M>,
     jail_root: Option<&std::path::Path>,
 ) -> rig::agent::AgentBuilderSimple<M> {
-    let builder = builder.tool(crate::rig_tools::WebSearchTool::new())
+    let builder = builder
+        .tool(crate::rig_tools::WebSearchTool::new())
         .tool(crate::rig_tools::ShellExecTool::new());
     if let Some(root) = jail_root {
         builder
-            .tool(crate::rig_tools::FileReadTool::with_jail(root.to_path_buf()))
-            .tool(crate::rig_tools::FileWriteTool::with_jail(root.to_path_buf()))
+            .tool(crate::rig_tools::FileReadTool::with_jail(
+                root.to_path_buf(),
+            ))
+            .tool(crate::rig_tools::FileWriteTool::with_jail(
+                root.to_path_buf(),
+            ))
             .tool(crate::rig_tools::ListDirTool::with_jail(root.to_path_buf()))
     } else {
         builder
@@ -76,8 +85,12 @@ pub fn build_anthropic_agent(
 ) -> AgentResult<rig::agent::Agent<rig::providers::anthropic::completion::CompletionModel>> {
     use rig::agent::AgentBuilder;
 
-    let api_key = config.api_key.as_deref()
-        .ok_or_else(|| AgentError::Config("Anthropic requires an API key. Set it via: rupoo config set api_key.anthropic <key>".into()))?;
+    let api_key = config.api_key.as_deref().ok_or_else(|| {
+        AgentError::Config(
+            "Anthropic requires an API key. Set it via: rupoo config set api_key.anthropic <key>"
+                .into(),
+        )
+    })?;
     let client = <rig::providers::anthropic::client::Client<reqwest::Client>>::builder()
         .api_key(api_key)
         .http_client((**http_client).clone())
@@ -106,24 +119,23 @@ pub fn build_openai_agent(
 ) -> AgentResult<rig::agent::Agent<rig::providers::openai::completion::CompletionModel>> {
     use rig::agent::AgentBuilder;
 
-    let api_key = config.api_key.as_deref()
-        .ok_or_else(|| AgentError::Config("OpenAI requires an API key. Set it via: rupoo config set api_key.openai <key>".into()))?;
+    let api_key = config.api_key.as_deref().ok_or_else(|| {
+        AgentError::Config(
+            "OpenAI requires an API key. Set it via: rupoo config set api_key.openai <key>".into(),
+        )
+    })?;
     let client: rig::providers::openai::client::Client = match &config.base_url {
-        Some(custom_url) => {
-            <rig::providers::openai::client::Client<reqwest::Client>>::builder()
-                .api_key(api_key)
-                .base_url(custom_url)
-                .http_client((**http_client).clone())
-                .build()
-                .map_err(|e| AgentError::Llm(format!("OpenAI client init failed: {e}")))?
-        }
-        None => {
-            <rig::providers::openai::client::Client<reqwest::Client>>::builder()
-                .api_key(api_key)
-                .http_client((**http_client).clone())
-                .build()
-                .map_err(|e| AgentError::Llm(format!("OpenAI client init failed: {e}")))?
-        }
+        Some(custom_url) => <rig::providers::openai::client::Client<reqwest::Client>>::builder()
+            .api_key(api_key)
+            .base_url(custom_url)
+            .http_client((**http_client).clone())
+            .build()
+            .map_err(|e| AgentError::Llm(format!("OpenAI client init failed: {e}")))?,
+        None => <rig::providers::openai::client::Client<reqwest::Client>>::builder()
+            .api_key(api_key)
+            .http_client((**http_client).clone())
+            .build()
+            .map_err(|e| AgentError::Llm(format!("OpenAI client init failed: {e}")))?,
     };
     let model = rig::providers::openai::completion::CompletionModel::new(
         client.completions_api(),
@@ -157,7 +169,10 @@ pub fn build_ollama_agent(
 ) -> AgentResult<rig::agent::Agent<rig::providers::ollama::CompletionModel>> {
     use rig::agent::AgentBuilder;
 
-    let base_url = config.base_url.as_deref().unwrap_or("http://localhost:11434");
+    let base_url = config
+        .base_url
+        .as_deref()
+        .unwrap_or("http://localhost:11434");
     let client = <rig::providers::ollama::Client<reqwest::Client>>::builder()
         .api_key(rig::client::Nothing)
         .base_url(base_url)
@@ -208,8 +223,12 @@ pub fn build_anthropic_agent_streaming(
 ) -> AgentResult<rig::agent::Agent<rig::providers::anthropic::completion::CompletionModel>> {
     use rig::agent::AgentBuilder;
 
-    let api_key = config.api_key.as_deref()
-        .ok_or_else(|| AgentError::Config("Anthropic requires an API key. Set it via: rupoo config set api_key.anthropic <key>".into()))?;
+    let api_key = config.api_key.as_deref().ok_or_else(|| {
+        AgentError::Config(
+            "Anthropic requires an API key. Set it via: rupoo config set api_key.anthropic <key>"
+                .into(),
+        )
+    })?;
     let client = <rig::providers::anthropic::client::Client<reqwest::Client>>::builder()
         .api_key(api_key)
         .http_client((**http_client).clone())
@@ -221,7 +240,13 @@ pub fn build_anthropic_agent_streaming(
     let model = rig::providers::anthropic::completion::CompletionModel::new(client, &config.model)
         .with_prompt_caching();
 
-    finish_streaming_agent(AgentBuilder::new(model), preamble, config, jail_root, safe_mode)
+    finish_streaming_agent(
+        AgentBuilder::new(model),
+        preamble,
+        config,
+        jail_root,
+        safe_mode,
+    )
 }
 
 /// Streaming agent for OpenAI with safe_mode.
@@ -234,24 +259,23 @@ pub fn build_openai_agent_streaming(
 ) -> AgentResult<rig::agent::Agent<rig::providers::openai::completion::CompletionModel>> {
     use rig::agent::AgentBuilder;
 
-    let api_key = config.api_key.as_deref()
-        .ok_or_else(|| AgentError::Config("OpenAI requires an API key. Set it via: rupoo config set api_key.openai <key>".into()))?;
+    let api_key = config.api_key.as_deref().ok_or_else(|| {
+        AgentError::Config(
+            "OpenAI requires an API key. Set it via: rupoo config set api_key.openai <key>".into(),
+        )
+    })?;
     let client: rig::providers::openai::client::Client = match &config.base_url {
-        Some(custom_url) => {
-            <rig::providers::openai::client::Client<reqwest::Client>>::builder()
-                .api_key(api_key)
-                .base_url(custom_url)
-                .http_client((**http_client).clone())
-                .build()
-                .map_err(|e| AgentError::Llm(format!("OpenAI client init failed: {e}")))?
-        }
-        None => {
-            <rig::providers::openai::client::Client<reqwest::Client>>::builder()
-                .api_key(api_key)
-                .http_client((**http_client).clone())
-                .build()
-                .map_err(|e| AgentError::Llm(format!("OpenAI client init failed: {e}")))?
-        }
+        Some(custom_url) => <rig::providers::openai::client::Client<reqwest::Client>>::builder()
+            .api_key(api_key)
+            .base_url(custom_url)
+            .http_client((**http_client).clone())
+            .build()
+            .map_err(|e| AgentError::Llm(format!("OpenAI client init failed: {e}")))?,
+        None => <rig::providers::openai::client::Client<reqwest::Client>>::builder()
+            .api_key(api_key)
+            .http_client((**http_client).clone())
+            .build()
+            .map_err(|e| AgentError::Llm(format!("OpenAI client init failed: {e}")))?,
     };
     let model = rig::providers::openai::completion::CompletionModel::new(
         client.completions_api(),
@@ -264,10 +288,9 @@ pub fn build_openai_agent_streaming(
     // passed back on subsequent turns — but rig's OpenAI handler drops it,
     // causing API 400 errors.
     let builder = if config.base_url.is_some() {
-        AgentBuilder::new(model)
-            .additional_params(serde_json::json!({
-                "thinking": {"type": "disabled"}
-            }))
+        AgentBuilder::new(model).additional_params(serde_json::json!({
+            "thinking": {"type": "disabled"}
+        }))
     } else {
         AgentBuilder::new(model)
     };
@@ -285,7 +308,10 @@ pub fn build_ollama_agent_streaming(
 ) -> AgentResult<rig::agent::Agent<rig::providers::ollama::CompletionModel>> {
     use rig::agent::AgentBuilder;
 
-    let base_url = config.base_url.as_deref().unwrap_or("http://localhost:11434");
+    let base_url = config
+        .base_url
+        .as_deref()
+        .unwrap_or("http://localhost:11434");
     let client = <rig::providers::ollama::Client<reqwest::Client>>::builder()
         .api_key(rig::client::Nothing)
         .base_url(base_url)
@@ -294,7 +320,13 @@ pub fn build_ollama_agent_streaming(
         .map_err(|e| AgentError::Llm(format!("Ollama client init failed: {e}")))?;
     let model = rig::providers::ollama::CompletionModel::new(client, &config.model);
 
-    finish_streaming_agent(AgentBuilder::new(model), preamble, config, jail_root, safe_mode)
+    finish_streaming_agent(
+        AgentBuilder::new(model),
+        preamble,
+        config,
+        jail_root,
+        safe_mode,
+    )
 }
 
 pub fn role_label(role: &LlmChatRole) -> &'static str {
@@ -306,23 +338,35 @@ pub fn role_label(role: &LlmChatRole) -> &'static str {
 }
 
 /// Extract text content from UserContent.
-pub fn extract_text_from_user_content(content: &rig::OneOrMany<rig::message::UserContent>) -> String {
-    content.iter().filter_map(|item| {
-        if let rig::message::UserContent::Text(text) = item {
-            Some(text.text.clone())
-        } else {
-            None
-        }
-    }).collect::<Vec<_>>().join("\n")
+pub fn extract_text_from_user_content(
+    content: &rig::OneOrMany<rig::message::UserContent>,
+) -> String {
+    content
+        .iter()
+        .filter_map(|item| {
+            if let rig::message::UserContent::Text(text) = item {
+                Some(text.text.clone())
+            } else {
+                None
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// Extract text content from AssistantContent.
-pub fn extract_text_from_assistant_content(content: &rig::OneOrMany<rig::message::AssistantContent>) -> String {
-    content.iter().filter_map(|item| {
-        if let rig::message::AssistantContent::Text(text) = item {
-            Some(text.text.clone())
-        } else {
-            None
-        }
-    }).collect::<Vec<_>>().join("\n")
+pub fn extract_text_from_assistant_content(
+    content: &rig::OneOrMany<rig::message::AssistantContent>,
+) -> String {
+    content
+        .iter()
+        .filter_map(|item| {
+            if let rig::message::AssistantContent::Text(text) = item {
+                Some(text.text.clone())
+            } else {
+                None
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }

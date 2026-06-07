@@ -7,29 +7,29 @@ pub mod app;
 pub mod cmds;
 pub mod completion;
 
-pub mod output;
-pub mod markdown;
-pub mod theme;
 pub mod enhanced_ui;
+pub mod markdown;
+pub mod output;
+pub mod theme;
 
+mod approval;
 mod bridge;
 mod chat_mode;
 mod plan_mode;
-mod approval;
 
-pub use rupoo::{AgentToTui, ChatMessage, PendingTool, ToolPhase, TuiToAgent};
 pub use app::RupooApp;
+pub use rupoo::{AgentToTui, ChatMessage, PendingTool, ToolPhase, TuiToAgent};
 
 use std::io::{self, Write};
 
-use owo_colors::OwoColorize;
 use crossbeam_channel::{Receiver, Sender};
-use tracing::warn;
-use rupoo::db::TaskRepo;
+use owo_colors::OwoColorize;
 use rupoo::agent::Agent;
+use rupoo::db::TaskRepo;
 use rupoo::llm::ConversationHistory;
-use rustyline::Editor;
 use rustyline::history::{FileHistory, History};
+use rustyline::Editor;
+use tracing::warn;
 
 // ═══════════════════════════════════════════════════════════════════════════
 // REPL Session
@@ -90,8 +90,7 @@ impl ReplSession {
             .unwrap_or_default();
 
         // Init rustyline with completion support
-        let mut rl = completion::create_editor()
-            .map_err(|_| "readline_init_failed")?;
+        let mut rl = completion::create_editor().map_err(|_| "readline_init_failed")?;
 
         // Session labels are handled internally
 
@@ -157,7 +156,7 @@ impl ReplSession {
                 &self.app.model_label,
                 self.app.hybrid_search,
             );
-            
+
             // Read input
             let prompt = self.build_prompt();
             match self.rl.readline(&prompt) {
@@ -171,10 +170,8 @@ impl ReplSession {
                     let _ = self.rl.add_history_entry(&input);
 
                     // Handle slash commands
-                    if input.starts_with('/') {
-                        if self.handle_command(&input) {
-                            continue;
-                        }
+                    if input.starts_with('/') && self.handle_command(&input) {
+                        continue;
                     }
 
                     // Handle quick action shortcuts
@@ -213,7 +210,7 @@ impl ReplSession {
 
         // Take the receiver to avoid borrow conflicts
         let rx = self.ui_rx.take();
-        
+
         loop {
             // Wait for the next event with a timeout.
             // recv_timeout returns immediately when a message arrives (zero latency)
@@ -222,13 +219,23 @@ impl ReplSession {
                 match rx_ref.recv_timeout(std::time::Duration::from_millis(50)) {
                     Ok(msg) => {
                         // Process this event, then drain any remaining queued events
-                        if !self.handle_agent_event(msg, &mut spinner_frame, &mut tool_card_open, &rx) {
+                        if !self.handle_agent_event(
+                            msg,
+                            &mut spinner_frame,
+                            &mut tool_card_open,
+                            &rx,
+                        ) {
                             // Idle received — already put rx back and returned
                             return Ok(());
                         }
                         // Drain all immediately available events without blocking
                         while let Ok(msg) = rx_ref.try_recv() {
-                            if !self.handle_agent_event(msg, &mut spinner_frame, &mut tool_card_open, &rx) {
+                            if !self.handle_agent_event(
+                                msg,
+                                &mut spinner_frame,
+                                &mut tool_card_open,
+                                &rx,
+                            ) {
                                 return Ok(());
                             }
                         }
@@ -245,7 +252,11 @@ impl ReplSession {
 
             // Show spinner animation while thinking
             if self.app.thinking {
-                let tool_name = self.app.current_tool_status.as_ref().map(|(n, _)| n.clone());
+                let tool_name = self
+                    .app
+                    .current_tool_status
+                    .as_ref()
+                    .map(|(n, _)| n.clone());
                 output::thinking_spinner(spinner_frame, tool_name.as_deref());
                 spinner_frame += 1;
             }
@@ -256,7 +267,8 @@ impl ReplSession {
     fn submit_message(&mut self, message: &str) {
         output::replace_readline_with_user_message(message);
 
-        self.app.push_message(ChatMessage::user(message.to_string()));
+        self.app
+            .push_message(ChatMessage::user(message.to_string()));
         self.app.persist_sessions();
         self.app.scroll_bottom = true;
 
@@ -345,7 +357,10 @@ impl ReplSession {
                 self.ui_rx = rx.clone();
                 return false;
             }
-            AgentToTui::TokenUpdate { in_count, out_count } => {
+            AgentToTui::TokenUpdate {
+                in_count,
+                out_count,
+            } => {
                 self.app.token_in = self.app.token_in.saturating_add(in_count);
                 self.app.token_out = self.app.token_out.saturating_add(out_count);
             }
@@ -360,14 +375,28 @@ impl ReplSession {
                 output::clear_spinner();
                 self.handle_approval(t);
             }
-            AgentToTui::LlmStatus { configured, provider, model_label } => {
+            AgentToTui::LlmStatus {
+                configured,
+                provider,
+                model_label,
+            } => {
                 self.app.llm_configured = configured;
                 self.app.llm_provider = provider.clone();
                 self.app.model_label = model_label;
             }
-            AgentToTui::StepProgress { step_index, total, step_name } => {
+            AgentToTui::StepProgress {
+                step_index,
+                total,
+                step_name,
+            } => {
                 output::clear_spinner();
-                println!("  {} {}/{}: {}", "▸".yellow().bold(), step_index + 1, total, step_name.dimmed());
+                println!(
+                    "  {} {}/{}: {}",
+                    "▸".yellow().bold(),
+                    step_index + 1,
+                    total,
+                    step_name.dimmed()
+                );
             }
             AgentToTui::PlanTaskList { tasks } => {
                 output::clear_spinner();
@@ -381,10 +410,10 @@ impl ReplSession {
     }
 
     /// Handle slash commands.
-    /// 
+    ///
     /// # Arguments
     /// * `input` - Command string starting with '/'
-    /// 
+    ///
     /// # Supported Commands
     /// * `/help` - Show help message
     /// * `/tools (/ts)` - List available tools
@@ -396,7 +425,7 @@ impl ReplSession {
     /// * `/plan <msg>` - Enter plan mode
     /// * `/clear` - Clear terminal screen
     /// * `/quit` - Exit application
-    /// 
+    ///
     /// # Returns
     /// `true` if command was handled, `false` otherwise
     fn handle_command(&mut self, input: &str) -> bool {
@@ -414,7 +443,10 @@ impl ReplSession {
                 println!("  {} /sessions    — list sessions", "›".dimmed());
                 println!("  {} /switch <n>  — switch to session #n", "›".dimmed());
                 println!("  {} /model       — show current model", "›".dimmed());
-                println!("  {} /theme (/t)  — switch theme (dark/light/monokai)", "›".dimmed());
+                println!(
+                    "  {} /theme (/t)  — switch theme (dark/light/monokai)",
+                    "›".dimmed()
+                );
                 println!("  {} /plan <msg>  — plan mode", "›".dimmed());
                 println!("  {} /history     — show command history", "›".dimmed());
                 println!("  {} /alias       — show command aliases", "›".dimmed());
@@ -422,9 +454,18 @@ impl ReplSession {
                 println!("  {} /quit        — exit rupoo", "›".dimmed());
                 println!();
                 println!("  {}", "Quick Actions:".cyan().bold());
-                println!("  {} @<path>      — read file (e.g., @./src/main.rs)", "›".dimmed());
-                println!("  {} !<cmd>       — execute shell command (e.g., !ls -la)", "›".dimmed());
-                println!("  {} ~<query>     — web search (e.g., ~Rust async)", "›".dimmed());
+                println!(
+                    "  {} @<path>      — read file (e.g., @./src/main.rs)",
+                    "›".dimmed()
+                );
+                println!(
+                    "  {} !<cmd>       — execute shell command (e.g., !ls -la)",
+                    "›".dimmed()
+                );
+                println!(
+                    "  {} ~<query>     — web search (e.g., ~Rust async)",
+                    "›".dimmed()
+                );
                 println!("  {} %% [path]    — list directory", "›".dimmed());
                 println!();
                 println!("  {}", "Tips:".cyan().bold());
@@ -455,7 +496,11 @@ impl ReplSession {
             }
             "/model" | "/m" => {
                 if arg.is_empty() {
-                    println!("  {} {}", "Model:".cyan(), self.app.model_label.cyan().bold());
+                    println!(
+                        "  {} {}",
+                        "Model:".cyan(),
+                        self.app.model_label.cyan().bold()
+                    );
                     true
                 } else {
                     // /model <provider> [model] — forward to bridge for hot switch
@@ -495,14 +540,19 @@ impl ReplSession {
                         if let Some(ref handle) = self.app.rt_handle {
                             let repo = std::sync::Arc::clone(repo);
                             let theme_name = arg.to_string();
-                            let _ = handle.spawn(async move {
+                            let _handle = handle.spawn(async move {
                                 let _ = repo.set_setting("theme", &theme_name).await;
                             });
                         }
                     }
                 } else {
                     let names = theme::Theme::all_names().join("/");
-                    println!("  {} Unknown theme '{}'. Available: {}", "✗".red(), arg, names);
+                    println!(
+                        "  {} Unknown theme '{}'. Available: {}",
+                        "✗".red(),
+                        arg,
+                        names
+                    );
                 }
                 true
             }
@@ -548,7 +598,7 @@ impl ReplSession {
     /// Show command history
     fn show_history(&self, arg: &str) {
         let history = self.rl.history();
-        
+
         if arg.is_empty() {
             // Show recent history
             let count = history.len().min(10);
@@ -567,7 +617,7 @@ impl ReplSession {
                 .enumerate()
                 .filter(|(_, entry): &(usize, &String)| entry.to_lowercase().contains(&query))
                 .collect();
-            
+
             if results.is_empty() {
                 println!("  {} No history found matching '{}'", "✗".red(), arg);
             } else {
@@ -609,7 +659,7 @@ impl ReplSession {
         } else {
             format!("/memory {}", arg)
         };
-        
+
         if let Some(ref tx) = self.app.agent_tx {
             let _ = tx.send(TuiToAgent::SubmitMessage(cmd));
             self.app.set_thinking();
@@ -624,7 +674,11 @@ impl ReplSession {
     fn handle_approval(&mut self, pending: PendingTool) {
         println!();
         println!("  {} Approval Required", "⚠".yellow().bold());
-        println!("  {} Tool: {}", "│".dimmed(), pending.tool_name.cyan().bold());
+        println!(
+            "  {} Tool: {}",
+            "│".dimmed(),
+            pending.tool_name.cyan().bold()
+        );
         let display_args = if pending.args.len() > 80 {
             format!("{}…", &pending.args[..77])
         } else {
@@ -698,7 +752,9 @@ impl ReplSession {
 
         // Save current messages
         let old_id = self.app.current_session_id();
-        self.app.session_messages.insert(old_id, self.app.messages.clone());
+        self.app
+            .session_messages
+            .insert(old_id, self.app.messages.clone());
 
         // Switch to new
         self.app.sessions.push(tab);
@@ -716,7 +772,11 @@ impl ReplSession {
         println!("  {}", "Sessions:".cyan().bold());
         for (i, s) in self.app.sessions.iter().enumerate() {
             let marker = if s.active { "▸" } else { " " };
-            let color = if s.active { "●".green().to_string() } else { "○".dimmed().to_string() };
+            let color = if s.active {
+                "●".green().to_string()
+            } else {
+                "○".dimmed().to_string()
+            };
             println!("  {} {} [{}] {}", marker, color, i + 1, s.label);
         }
         println!();
@@ -760,21 +820,21 @@ impl ReplSession {
     }
 
     /// Handle quick action shortcuts (@path, !cmd, ~query, %%path).
-    /// 
+    ///
     /// # Quick Actions
     /// * `@<path>` - Read file at path
     /// * `!<cmd>` - Execute shell command
     /// * `~<query>` - Web search for query
     /// * `%% [path]` - List directory (default: current directory)
-    /// 
+    ///
     /// # Arguments
     /// * `input` - User input string to check for quick action
-    /// 
+    ///
     /// # Returns
     /// `true` if quick action was matched and executed, `false` otherwise
     fn handle_quick_action(&mut self, input: &str) -> bool {
         let trimmed = input.trim();
-        
+
         // @path - Read file
         if trimmed.starts_with('@') && trimmed.len() > 1 {
             let path = trimmed[1..].trim();
@@ -789,14 +849,17 @@ impl ReplSession {
                 return true;
             }
         }
-        
+
         // !cmd - Execute shell command
         if trimmed.starts_with('!') && trimmed.len() > 1 {
             let cmd = trimmed[1..].trim();
             if !cmd.is_empty() {
                 output::user_message(input);
                 if let Some(ref tx) = self.app.agent_tx {
-                    let _ = tx.send(TuiToAgent::SubmitMessage(format!("Execute command: {}", cmd)));
+                    let _ = tx.send(TuiToAgent::SubmitMessage(format!(
+                        "Execute command: {}",
+                        cmd
+                    )));
                 }
                 self.app.set_thinking();
                 self.gen_start = Some(std::time::Instant::now());
@@ -804,14 +867,17 @@ impl ReplSession {
                 return true;
             }
         }
-        
+
         // ~query - Web search
         if trimmed.starts_with('~') && trimmed.len() > 1 {
             let query = trimmed[1..].trim();
             if !query.is_empty() {
                 output::user_message(input);
                 if let Some(ref tx) = self.app.agent_tx {
-                    let _ = tx.send(TuiToAgent::SubmitMessage(format!("Search the web for: {}", query)));
+                    let _ = tx.send(TuiToAgent::SubmitMessage(format!(
+                        "Search the web for: {}",
+                        query
+                    )));
                 }
                 self.app.set_thinking();
                 self.gen_start = Some(std::time::Instant::now());
@@ -819,21 +885,24 @@ impl ReplSession {
                 return true;
             }
         }
-        
+
         // %%path - List directory
-        if trimmed.starts_with("%%") {
-            let path = trimmed[2..].trim();
+        if let Some(path) = trimmed.strip_prefix("%%") {
+            let path = path.trim();
             let dir_path = if path.is_empty() { "." } else { path };
             output::user_message(input);
             if let Some(ref tx) = self.app.agent_tx {
-                let _ = tx.send(TuiToAgent::SubmitMessage(format!("List directory: {}", dir_path)));
+                let _ = tx.send(TuiToAgent::SubmitMessage(format!(
+                    "List directory: {}",
+                    dir_path
+                )));
             }
             self.app.set_thinking();
             self.gen_start = Some(std::time::Instant::now());
             self.stream_state = markdown::StreamState::new();
             return true;
         }
-        
+
         false
     }
 
@@ -853,28 +922,35 @@ impl ReplSession {
         }
 
         // Save current messages
-        self.app.session_messages.insert(old_id, self.app.messages.clone());
+        self.app
+            .session_messages
+            .insert(old_id, self.app.messages.clone());
 
         // Switch
         for s in &mut self.app.sessions {
             s.active = s.id == new_id;
         }
-        self.app.messages = self.app.session_messages.get(&new_id).cloned().unwrap_or_default();
+        self.app.messages = self
+            .app
+            .session_messages
+            .get(&new_id)
+            .cloned()
+            .unwrap_or_default();
 
         // Load conversation history
-        if let Some(ref repo) = self.app.repo {
-            if let Some(ref handle) = self.app.rt_handle {
-                let repo = std::sync::Arc::clone(repo);
-                let new_id_clone = new_id.clone();
-                if let Ok(ch) = handle.block_on(async {
-                    repo.load_conversation_history(&new_id_clone).await
-                }) {
-                    if let Some(ch) = ch {
-                        self.app.conversation_history = ch;
-                        if self.app.conversation_history.token_budget() == 0 {
-                            self.app.conversation_history = self.app.conversation_history.clone().with_token_budget(60000);
-                        }
-                    }
+        if let (Some(repo), Some(handle)) = (self.app.repo.as_ref(), self.app.rt_handle.as_ref()) {
+            let repo = std::sync::Arc::clone(repo);
+            let new_id_clone = new_id.clone();
+            if let Ok(Some(ch)) =
+                handle.block_on(async { repo.load_conversation_history(&new_id_clone).await })
+            {
+                self.app.conversation_history = ch;
+                if self.app.conversation_history.token_budget() == 0 {
+                    self.app.conversation_history = self
+                        .app
+                        .conversation_history
+                        .clone()
+                        .with_token_budget(60000);
                 }
             }
         }
@@ -893,7 +969,10 @@ fn parse_tool_call(content: &str) -> (String, String) {
     let rest = content.strip_prefix("🔧 ").unwrap_or(content);
     if let Some(paren_pos) = rest.find('(') {
         let name = rest[..paren_pos].to_string();
-        let args = rest[paren_pos..].trim_end_matches(')').trim_start_matches('(').to_string();
+        let args = rest[paren_pos..]
+            .trim_end_matches(')')
+            .trim_start_matches('(')
+            .to_string();
         (name, args)
     } else {
         (rest.to_string(), String::new())
@@ -910,7 +989,14 @@ pub fn run_tui_with_agent(
     tool_executor: std::sync::Arc<Box<dyn rupoo::agent::ToolExecutor>>,
     rt_handle: tokio::runtime::Handle,
 ) -> Result<(), &'static str> {
-    let (sessions_data, model_label, llm_configured, llm_provider, conversation_history, approve_all) = rt_handle.block_on(async {
+    let (
+        sessions_data,
+        model_label,
+        llm_configured,
+        llm_provider,
+        conversation_history,
+        approve_all,
+    ) = rt_handle.block_on(async {
         let sessions = repo.load_ui_sessions().await.unwrap_or_default();
         let provider = repo
             .get_setting("active_provider")
@@ -930,14 +1016,16 @@ pub fn run_tui_with_agent(
             "not configured".to_string()
         };
 
-        let llm_configured = !provider.is_empty() && repo
-            .get_setting(&format!("api_key.{}", provider))
-            .await
-            .ok()
-            .flatten()
-            .is_some();
+        let llm_configured = !provider.is_empty()
+            && repo
+                .get_setting(&format!("api_key.{}", provider))
+                .await
+                .ok()
+                .flatten()
+                .is_some();
 
-        let active_session_id = sessions.iter()
+        let active_session_id = sessions
+            .iter()
             .find(|s| s.3)
             .map(|s| s.0.clone())
             .unwrap_or_else(|| "default".to_string());
@@ -959,7 +1047,14 @@ pub fn run_tui_with_agent(
             .map(|v| v == "true")
             .unwrap_or(false);
 
-        (sessions, label, llm_configured, provider, conversation_history, approve_all)
+        (
+            sessions,
+            label,
+            llm_configured,
+            provider,
+            conversation_history,
+            approve_all,
+        )
     });
 
     // Create channel pair

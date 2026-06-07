@@ -75,7 +75,11 @@ async fn test_interrupted_step_retry() {
     let db_path = tmp.path().to_str().unwrap().to_string();
 
     // Create plan with a "Running" checkpoint simulating a crash mid-step
-    let steps = vec![think_step("step1"), think_step("step2"), finish_step("done")];
+    let steps = vec![
+        think_step("step1"),
+        think_step("step2"),
+        finish_step("done"),
+    ];
     let plan = Plan::new("interrupted", steps);
     let plan_id = plan.id.clone();
 
@@ -109,11 +113,7 @@ async fn test_interrupted_step_retry() {
         let agent = Agent::new(Arc::clone(&repo), Box::new(DummyToolExecutor));
 
         let mut p = agent.resume(&plan_id).await.unwrap().unwrap();
-        assert_eq!(
-            p.current_step_index,
-            1,
-            "should retry the interrupted step"
-        );
+        assert_eq!(p.current_step_index, 1, "should retry the interrupted step");
 
         let outcome = agent.run_next_step(&mut p).await.unwrap();
         assert!(matches!(outcome, StepOutcome::Advanced));

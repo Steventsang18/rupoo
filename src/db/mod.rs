@@ -215,8 +215,10 @@ impl TaskRepo {
         tokio::task::spawn_blocking(move || {
             let read_conn = rusqlite::Connection::open_with_flags(
                 &db_path,
-                rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
-            ).map_err(|e| AgentError::Other(format!("failed to open read connection: {e}")))?;
+                rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY
+                    | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+            )
+            .map_err(|e| AgentError::Other(format!("failed to open read connection: {e}")))?;
             f(&read_conn)
         })
         .await

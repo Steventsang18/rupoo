@@ -5,9 +5,7 @@
 use tracing::info;
 
 use crate::error::{AgentError, AgentResult};
-use crate::task::{
-    Checkpoint, CheckpointStatus, Plan, PlanStatus, Step, StepStatus,
-};
+use crate::task::{Checkpoint, CheckpointStatus, Plan, PlanStatus, Step, StepStatus};
 
 use super::TaskRepo;
 
@@ -100,13 +98,19 @@ impl TaskRepo {
                     ))
                 })
                 .map_err(|e| match e {
-                    rusqlite::Error::QueryReturnedNoRows => {
-                        AgentError::PlanNotFound(pid.clone())
-                    }
+                    rusqlite::Error::QueryReturnedNoRows => AgentError::PlanNotFound(pid.clone()),
                     other => AgentError::Database(other),
                 })?;
 
-            let (id, name, steps_json, current_step_index, status_str, created_at_str, updated_at_str) = row;
+            let (
+                id,
+                name,
+                steps_json,
+                current_step_index,
+                status_str,
+                created_at_str,
+                updated_at_str,
+            ) = row;
 
             let steps: Vec<Step> = serde_json::from_str(&steps_json)?;
             let status = str_to_plan_status(&status_str)?;
@@ -297,9 +301,7 @@ impl TaskRepo {
                         _ => CheckpointStatus::Failed,
                     };
                     let created_at = chrono::DateTime::parse_from_rfc3339(&created_at_str)
-                        .map_err(|e| {
-                            AgentError::Other(format!("parse checkpoint date: {e}"))
-                        })?
+                        .map_err(|e| AgentError::Other(format!("parse checkpoint date: {e}")))?
                         .with_timezone(&chrono::Utc);
                     Ok(Some(Checkpoint {
                         id,
@@ -383,7 +385,11 @@ impl TaskRepo {
     // ---------------------------------------------------------------------------
 
     /// List plans ordered by updated_at descending.
-    pub async fn list_plans(&self, limit: usize, offset: usize) -> AgentResult<Vec<super::PlanSummary>> {
+    pub async fn list_plans(
+        &self,
+        limit: usize,
+        offset: usize,
+    ) -> AgentResult<Vec<super::PlanSummary>> {
         self.with_read_conn(move |conn| {
             let mut stmt = conn.prepare(
                 "SELECT id, name, steps_json, current_step_index, status, created_at, updated_at
@@ -453,10 +459,7 @@ impl TaskRepo {
                 "DELETE FROM checkpoints WHERE plan_id = ?1",
                 rusqlite::params![pid],
             )?;
-            tx.execute(
-                "DELETE FROM plans WHERE id = ?1",
-                rusqlite::params![pid],
-            )?;
+            tx.execute("DELETE FROM plans WHERE id = ?1", rusqlite::params![pid])?;
             tx.commit()?;
             Ok(())
         })
@@ -515,7 +518,11 @@ mod tests {
     #[tokio::test]
     async fn test_record_step_completion_updates_checkpoint() {
         let repo = repo();
-        let steps = vec![think_step("step1"), think_step("step2"), finish_step("done")];
+        let steps = vec![
+            think_step("step1"),
+            think_step("step2"),
+            finish_step("done"),
+        ];
         let plan = Plan::new("checkpoint-test", steps);
         let id = plan.id.clone();
         repo.save_plan(&plan).await.unwrap();
