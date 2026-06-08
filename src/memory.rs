@@ -1,18 +1,14 @@
 //! High-level memory operations for the long-term memory system.
 //!
-//! This module provides a unified interface for storing and retrieving memories
-//! with support for hybrid search combining FTS5 full-text search and vector
-//! semantic search.
-//!
-//! # Features
-//!
-//! - **FTS5 Search**: Full-text search using SQLite FTS5 for keyword matching
-//! - **Vector Search**: Semantic search using HNSW-indexed embeddings
-//! - **Hybrid Search**: Combines both approaches using Reciprocal Rank Fusion (RRF)
-//! - **Automatic Embeddings**: Auto-generates embeddings when storing memories
-//! - **Thread-Safe**: Uses `RwLock` for concurrent access
+//! Wraps TaskRepo's FTS5-backed memory methods with hybrid search support.
 //!
 //! # Architecture
+//!
+//! - **FTS5 Search**: Full-text search using SQLite FTS5 (keyword matching)
+//! - **Vector Search**: Semantic search using embeddings (new)
+//! - **Hybrid Search**: Combines both for optimal relevance
+//!
+//! # Hybrid Search Design
 //!
 //! ```text
 //! User Query
@@ -21,55 +17,29 @@
 //!     |         |
 //!     |         +---> Exact matches, keyword hits
 //!     |
-//!     +---> Vector Search (semantic) using HNSW
+//!     +---> Vector Search (semantic)
 //!               |
-//!               +---> Similar meanings, intent understanding (O(log n))
+//!               +---> Similar meanings, intent understanding
 //!
 //! Combined Results (RRF ranking)
 //! ```
 //!
-//! # Reciprocal Rank Fusion (RRF)
+//! # Usage
 //!
-//! RRF is used to combine results from FTS and vector search:
+//! ```rust,ignore
+//! // Create memory store with hybrid search
+//! let memory = MemoryStore::with_hybrid_search(
+//!     repo,
+//!     Some(embedding_service),
+//!     HybridSearchConfig::default(),
+//! ).await;
 //!
-//! ```text
-//! RRF_score(d) = Σ (1 / (k + rank(d)))
+//! // Store memory (auto-generates embedding)
+//! memory.remember("User prefers Rust", &["preference"]).await?;
+//!
+//! // Search with hybrid ranking
+//! let results = memory.recall("programming language", 10).await?;
 //! ```
-//!
-//! Where `k` is a constant (default: 60) and `rank(d)` is the rank of document `d`.
-//!
-//! # Usage Example
-//!
-//! ```rust
-//! use rupoo::memory::{MemoryStore, HybridSearchConfig};
-//! use rupoo::db::TaskRepo;
-//! use std::sync::Arc;
-//!
-//! // Create a task repository
-//! let repo = Arc::new(TaskRepo::new(":memory:").await.unwrap());
-//!
-//! // Create memory store with FTS5 only
-//! let memory = MemoryStore::new(Arc::clone(&repo));
-//!
-//! // Store a memory
-//! let id = memory.remember("User prefers Rust for system programming", &["rust", "preference"]).await.unwrap();
-//! println!("Stored memory: {}", id);
-//!
-//! // Search memories
-//! let results = memory.recall("programming language", 10).await.unwrap();
-//! for result in results {
-//!     println!("{}: {}", result.id, result.content);
-//! }
-//! ```
-//!
-//! # Configuration Options
-//!
-//! | Method | Description |
-//! |--------|-------------|
-//! | `HybridSearchConfig::default()` | Balanced FTS and vector weights (0.5/0.5) |
-//! | `HybridSearchConfig::fts_only()` | FTS search only |
-//! | `HybridSearchConfig::semantic_focused()` | Higher weight on vector search (0.3/0.7) |
-//! | `HybridSearchConfig::keyword_focused()` | Higher weight on FTS (0.7/0.3) |
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -83,41 +53,20 @@ use crate::error::AgentResult;
 use crate::task::MemoryEntry;
 use crate::vector_store::{VectorMemoryDoc, VectorStore};
 
-/// Configuration for hybrid search combining FTS5 and vector search.
-///
-/// # Fields
-///
-/// | Field | Type | Default | Description |
-/// |-------|------|---------|-------------|
-/// | `enable_vector_search` | `bool` | `true` | Enable vector semantic search |
-/// | `fts_weight` | `f32` | `0.5` | Weight for FTS5 results (0.0-1.0) |
-/// | `vector_weight` | `f32` | `0.5` | Weight for vector search results (0.0-1.0) |
-/// | `min_similarity` | `f32` | `0.3` | Minimum similarity threshold for vector results |
-/// | `use_rrf` | `bool` | `true` | Use Reciprocal Rank Fusion for result combination |
-/// | `rrf_k` | `u32` | `60` | RRF constant (typically 20-100) |
+/// Configuration for hybrid search.
 #[derive(Debug, Clone)]
 pub struct HybridSearchConfig {
     /// Enable vector search (requires embedding service).
     pub enable_vector_search: bool,
     /// Weight for FTS5 results (0.0 to 1.0).
-    ///
-    /// Higher values give more weight to keyword matching.
     pub fts_weight: f32,
     /// Weight for vector search results (0.0 to 1.0).
-    ///
-    /// Higher values give more weight to semantic similarity.
     pub vector_weight: f32,
-    /// Minimum similarity threshold for vector search results.
-    ///
-    /// Results below this threshold are filtered out. Range: 0.0-1.0.
+    /// Minimum similarity threshold for vector search.
     pub min_similarity: f32,
-    /// Use Reciprocal Rank Fusion (RRF) for combining results.
-    ///
-    /// When true, uses RRF algorithm instead of simple weighted averaging.
+    /// Use Reciprocal Rank Fusion for combining results.
     pub use_rrf: bool,
     /// RRF constant (typically 60).
-    ///
-    /// Lower values give more weight to higher-ranked results.
     pub rrf_k: u32,
 }
 
@@ -169,21 +118,17 @@ impl HybridSearchConfig {
 /// High-level memory operations for the long-term memory system.
 ///
 /// Supports hybrid search combining:
-/// - **FTS5 full-text search**: Fast keyword matching using SQLite FTS5
-/// - **Vector semantic search**: Intent understanding using HNSW indexing
-///
-/// # Thread Safety
-///
-/// All operations are thread-safe using `RwLock` for concurrent access.
+/// - FTS5 full-text search (keyword matching)
+/// - Vector semantic search (intent understanding)
 pub struct MemoryStore {
     repo: Arc<TaskRepo>,
     /// Default source tag applied when none is provided.
     default_source: String,
-    /// Optional vector store for semantic search using HNSW indexing.
+    /// Optional vector store for semantic search.
     vector_store: Option<Arc<RwLock<VectorStore>>>,
-    /// Optional embedding service for generating text embeddings.
+    /// Optional embedding service for generating embeddings.
     embedding_service: Option<Arc<EmbeddingService>>,
-    /// Hybrid search configuration parameters.
+    /// Hybrid search configuration.
     config: HybridSearchConfig,
 }
 
@@ -214,7 +159,7 @@ impl MemoryStore {
         let vector_store = if config.enable_vector_search {
             if let Some(ref svc) = embedding_service {
                 let dim = svc.dimension();
-                Some(Arc::new(RwLock::new(VectorStore::with_default_config(dim))))
+                Some(Arc::new(RwLock::new(VectorStore::new(dim))))
             } else {
                 None
             }
@@ -237,8 +182,7 @@ impl MemoryStore {
         if enabled && self.vector_store.is_none() {
             if let Some(ref svc) = self.embedding_service {
                 let dim = svc.dimension();
-                self.vector_store =
-                    Some(Arc::new(RwLock::new(VectorStore::with_default_config(dim))));
+                self.vector_store = Some(Arc::new(RwLock::new(VectorStore::new(dim))));
             }
         } else if !enabled {
             self.vector_store = None;
@@ -271,7 +215,7 @@ impl MemoryStore {
                         let entry = self.repo.get_memory(&id).await?;
                         if let Some(entry) = entry {
                             let doc = VectorMemoryDoc::from_memory_entry(&entry);
-                            let vs = vs.write().await;
+                            let mut vs = vs.write().await;
                             if let Err(e) = vs.insert(doc, embedding).await {
                                 warn!(error = %e, "failed to store embedding");
                             } else {
@@ -312,7 +256,7 @@ impl MemoryStore {
                         let entry = self.repo.get_memory(&id).await?;
                         if let Some(entry) = entry {
                             let doc = VectorMemoryDoc::from_memory_entry(&entry);
-                            let vs = vs.write().await;
+                            let mut vs = vs.write().await;
                             if let Err(e) = vs.insert(doc, embedding).await {
                                 warn!(error = %e, "failed to store embedding");
                             }

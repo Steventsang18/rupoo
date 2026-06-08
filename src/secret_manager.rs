@@ -66,8 +66,11 @@ impl SecretManager {
     pub async fn set(&self, key: &str, value: &str) -> AgentResult<()> {
         #[cfg(feature = "keyring")]
         {
-            let entry = keyring::Entry::new(&self.service, key)?;
-            entry.set_password(value)?;
+            let entry = keyring::Entry::new(&self.service, key)
+                .map_err(|e| AgentError::Keyring(e.to_string()))?;
+            entry
+                .set_password(value)
+                .map_err(|e| AgentError::Keyring(e.to_string()))?;
             debug!(key, "secret stored in keyring");
             Ok(())
         }
@@ -84,14 +87,15 @@ impl SecretManager {
     pub async fn get(&self, key: &str) -> AgentResult<Option<String>> {
         #[cfg(feature = "keyring")]
         {
-            let entry = keyring::Entry::new(&self.service, key)?;
+            let entry = keyring::Entry::new(&self.service, key)
+                .map_err(|e| AgentError::Keyring(e.to_string()))?;
             match entry.get_password() {
                 Ok(password) => {
                     debug!(key, "secret retrieved from keyring");
                     Ok(Some(password))
                 }
                 Err(keyring::Error::NoEntry) => Ok(None),
-                Err(e) => Err(AgentError::Other(format!("failed to get secret: {}", e))),
+                Err(e) => Err(AgentError::Keyring(e.to_string())),
             }
         }
         #[cfg(not(feature = "keyring"))]
@@ -107,14 +111,15 @@ impl SecretManager {
     pub async fn delete(&self, key: &str) -> AgentResult<bool> {
         #[cfg(feature = "keyring")]
         {
-            let entry = keyring::Entry::new(&self.service, key)?;
+            let entry = keyring::Entry::new(&self.service, key)
+                .map_err(|e| AgentError::Keyring(e.to_string()))?;
             match entry.delete_password() {
                 Ok(_) => {
                     debug!(key, "secret deleted from keyring");
                     Ok(true)
                 }
                 Err(keyring::Error::NoEntry) => Ok(false),
-                Err(e) => Err(AgentError::Other(format!("failed to delete secret: {}", e))),
+                Err(e) => Err(AgentError::Keyring(e.to_string())),
             }
         }
         #[cfg(not(feature = "keyring"))]

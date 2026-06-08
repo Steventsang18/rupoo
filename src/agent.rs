@@ -1,55 +1,3 @@
-//! Core agent implementation for task execution and planning.
-//!
-//! This module provides the main Agent struct that orchestrates task execution,
-//! plan management, memory operations, and tool execution. The agent supports:
-//!
-//! - **Plan Execution**: Execute step-by-step plans with checkpoint-based recovery
-//! - **Memory System**: Store and retrieve memories with hybrid search support
-//! - **Tool Execution**: Execute tools with retry logic and safety approval
-//! - **Chat Mode**: Multi-turn conversation with memory integration
-//! - **Crash Recovery**: Resume plans from last checkpoint after interruptions
-//!
-//! # Architecture Overview
-//!
-//! ```text
-//!                          Agent
-//!                            │
-//!          ┌─────────────────┼─────────────────┐
-//!          ▼                 ▼                 ▼
-//!     TaskRepo          MemoryStore      LlmGateway
-//!     (SQLite)          (FTS5+HNSW)     (LLM Provider)
-//!          │                 │                 │
-//!          ▼                 ▼                 ▼
-//!     Plans/Steps       Vector Store      Chat Completions
-//!                       Document Cache
-//! ```
-//!
-//! # Key Components
-//!
-//! - **Agent**: Main orchestrator for task execution
-//! - **ToolExecutor**: Trait for executing tools (supports parallel execution)
-//! - **PlanCache**: LRU cache for generated plans
-//! - **StepOutcome**: Enum representing step execution results
-//!
-//! # Usage Example
-//!
-//! ```rust
-//! use rupoo::agent::{Agent, DummyToolExecutor};
-//! use rupoo::db::TaskRepo;
-//!
-//! // Create a task repository
-//! let repo = TaskRepo::new(":memory:").await.unwrap();
-//!
-//! // Create agent with dummy tool executor
-//! let mut agent = Agent::new(Arc::new(repo), Box::new(DummyToolExecutor));
-//!
-//! // Enable memory
-//! agent.set_memory_enabled(true);
-//!
-//! // Store a memory
-//! let memory_id = agent.remember("Hello world", &["greeting"]).await.unwrap();
-//! println!("Stored memory: {}", memory_id);
-//! ```
 use std::fs;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -70,33 +18,23 @@ use crate::task::{
 
 use crate::safety::SafetyContext;
 
-/// Result of running a single step in a plan.
-///
-/// This enum captures all possible outcomes of executing a plan step,
-/// allowing the caller to decide how to proceed.
+/// Result of running a single step.
 #[derive(Debug)]
 pub enum StepOutcome {
-    /// Step executed successfully; continue to the next step.
+    /// Step executed successfully; continue to next.
     Advanced,
-    /// Plan is fully finished and complete.
+    /// Plan is fully finished.
     Finished,
-    /// Agent is waiting for human input before proceeding.
+    /// Agent is waiting for human input.
     WaitingForInput(String),
     /// Tool call requires user approval before execution.
-    ///
-    /// The bridge should call `store_pending_plan` then break the loop,
-    /// allowing the user to review and approve the operation.
+    /// Bridge should call store_pending_plan then break the loop.
     RequiresApproval {
-        /// Name of the tool requiring approval
         tool_name: String,
-        /// Parameters for the tool call
         params: serde_json::Value,
-        /// Index of the step in the plan
         step_index: usize,
     },
     /// Step failed (fatal for the plan).
-    ///
-    /// Contains the error message describing the failure.
     Failed(String),
 }
 
@@ -104,22 +42,8 @@ pub enum StepOutcome {
 // Tool executor trait — allows plugging in different tool backends
 // ---------------------------------------------------------------------------
 
-/// Trait for executing tools in the agent system.
-///
-/// Implement this trait to provide custom tool execution behavior.
-/// The default implementation supports parallel execution of multiple tools.
 #[async_trait::async_trait]
 pub trait ToolExecutor: Send + Sync {
-    /// Execute a single tool with the given parameters.
-    ///
-    /// # Arguments
-    ///
-    /// * `tool_name` - Name of the tool to execute
-    /// * `params` - JSON parameters for the tool
-    ///
-    /// # Returns
-    ///
-    /// Returns `AgentResult<McpToolResult>` with the tool execution result.
     async fn execute_tool(
         &self,
         tool_name: &str,
@@ -127,16 +51,7 @@ pub trait ToolExecutor: Send + Sync {
     ) -> AgentResult<McpToolResult>;
 
     /// Execute multiple tools in parallel.
-    ///
-    /// Returns a vector of results in the same order as the input tool calls.
-    ///
-    /// # Arguments
-    ///
-    /// * `tool_calls` - Vector of (tool_name, params) pairs to execute
-    ///
-    /// # Returns
-    ///
-    /// Vector of results corresponding to each tool call.
+    /// Returns a vector of results in the same order as the input.
     async fn execute_tools_parallel(
         &self,
         tool_calls: Vec<(String, serde_json::Value)>,
@@ -161,11 +76,7 @@ pub trait ToolExecutor: Send + Sync {
     }
 }
 
-/// Dummy tool executor for testing and development.
-///
-/// Echoes back the tool name and parameters as the result.
-/// Useful for testing plan execution without requiring real tool implementations.
-#[derive(Debug, Default)]
+/// Dummy tool executor for testing — echoes back the params as result.
 pub struct DummyToolExecutor;
 
 #[async_trait::async_trait]
@@ -188,14 +99,6 @@ impl ToolExecutor for DummyToolExecutor {
 // Agent
 // ---------------------------------------------------------------------------
 
-/// Core agent struct that orchestrates task execution, memory operations, and tool usage.
-///
-/// The Agent is the central component of the rupoo system, responsible for:
-/// - Executing step-by-step plans with checkpoint-based recovery
-/// - Managing memory (storing and retrieving memories)
-/// - Executing tools with safety checks
-/// - Running chat conversations with memory integration
-/// - Handling plan caching and crash recovery
 pub struct Agent {
     repo: Arc<TaskRepo>,
     memory_cache: std::sync::Arc<MemoryCache>,

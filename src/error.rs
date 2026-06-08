@@ -162,9 +162,9 @@ pub enum AgentError {
     #[error("Memory error: {0}")]
     Memory(String),
 
-    // --- Secret/Keyring errors ---
+    // --- Secret errors ---
     #[error("Keyring error: {0}")]
-    Keyring(#[from] keyring::Error),
+    Keyring(String),
 
     // --- Other errors ---
     #[error("{0}")]
