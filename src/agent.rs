@@ -5,12 +5,14 @@ use std::sync::Arc;
 
 use tracing::{debug, error, info, warn};
 
+use crate::context::ConversationContext;
 use crate::db::TaskRepo;
 use crate::embedding::EmbeddingService;
 use crate::error::{AgentError, AgentResult};
 use crate::llm::{AgentEvent, ConversationHistory, LlmGateway, TokenUsage};
 use crate::memory::{HybridSearchConfig, MemoryStore};
 use crate::memory_cache::MemoryCache;
+use crate::tool_selector::{ToolRegistry, ToolUsageTracker};
 
 use crate::task::{
     Checkpoint, CheckpointStatus, McpToolResult, MemoryEntry, Plan, PlanStatus, Step, StepStatus,
@@ -124,6 +126,12 @@ pub struct Agent {
     pub http_client: std::sync::Arc<reqwest::Client>,
     /// Plan cache for storing and reusing generated plans
     plan_cache: std::sync::Arc<PlanCache>,
+    /// Unified conversation context for environment + intent + memory + behavior.
+    conversation_context: std::sync::Mutex<ConversationContext>,
+    /// Tool registry for intelligent tool selection and scoring.
+    tool_registry: ToolRegistry,
+    /// Tool usage tracker for adaptive optimization.
+    tool_usage_tracker: std::sync::Arc<ToolUsageTracker>,
 }
 
 // ---------------------------------------------------------------------------
@@ -240,6 +248,9 @@ impl Agent {
         let memory_cache = std::sync::Arc::new(MemoryCache::new(Arc::clone(&repo), 64));
         let memory_store = std::sync::Arc::new(MemoryStore::new(Arc::clone(&repo)));
         let plan_cache = std::sync::Arc::new(PlanCache::new(PlanCacheConfig::default()));
+        let conversation_context = std::sync::Mutex::new(ConversationContext::collect());
+        let tool_registry = ToolRegistry::new();
+        let tool_usage_tracker = std::sync::Arc::new(ToolUsageTracker::new());
         Self {
             repo,
             memory_cache,
@@ -255,6 +266,9 @@ impl Agent {
             cancelled: std::sync::atomic::AtomicBool::new(false),
             http_client: crate::http_client::HTTP_CLIENT.clone(),
             plan_cache,
+            conversation_context,
+            tool_registry,
+            tool_usage_tracker,
         }
     }
 
@@ -330,6 +344,104 @@ impl Agent {
     /// Get plan cache statistics.
     pub fn plan_cache_stats(&self) -> (usize, usize) {
         self.plan_cache.stats()
+    }
+
+    /// Access the unified conversation context.
+    /// Returns a MutexGuard for thread-safe read/write access.
+    pub fn context(&self) -> std::sync::MutexGuard<'_, ConversationContext> {
+        self.conversation_context
+            .lock()
+            .expect("conversation_context lock poisoned")
+    }
+
+    /// Reset the conversation context (start a new conversation).
+    pub fn reset_context(&self) {
+        let mut ctx = self
+            .conversation_context
+            .lock()
+            .expect("conversation_context lock poisoned");
+        ctx.reset();
+        info!("conversation context reset");
+    }
+
+    /// Record a user message in the conversation context.
+    pub fn record_user_message(&self, content: &str) {
+        let mut ctx = self
+            .conversation_context
+            .lock()
+            .expect("conversation_context lock poisoned");
+        ctx.record_user_message(content);
+    }
+
+    /// Record an assistant response in the conversation context.
+    pub fn record_assistant_response(&self, content: &str) {
+        let mut ctx = self
+            .conversation_context
+            .lock()
+            .expect("conversation_context lock poisoned");
+        ctx.record_assistant_response(content);
+    }
+
+    /// Record a tool call in the conversation context.
+    pub fn record_tool_call(&self, tool_name: &str) {
+        let mut ctx = self
+            .conversation_context
+            .lock()
+            .expect("conversation_context lock poisoned");
+        ctx.record_tool_call(tool_name);
+    }
+
+    /// Inject memory context for the current conversation turn.
+    pub fn inject_memory_context(&self, memories: &[MemoryEntry]) {
+        let mut ctx = self
+            .conversation_context
+            .lock()
+            .expect("conversation_context lock poisoned");
+        *ctx = std::mem::take(&mut *ctx).with_memories(memories.to_vec());
+    }
+
+    /// Get the current context block for the system prompt.
+    pub fn get_context_block(&self) -> String {
+        self.conversation_context
+            .lock()
+            .expect("conversation_context lock poisoned")
+            .to_system_context_block()
+    }
+
+    /// Get a reference to the tool registry.
+    pub fn tool_registry(&self) -> &ToolRegistry {
+        &self.tool_registry
+    }
+
+    /// Get a reference to the tool usage tracker.
+    pub fn tool_usage_tracker(&self) -> &std::sync::Arc<ToolUsageTracker> {
+        &self.tool_usage_tracker
+    }
+
+    /// Record tool execution result for adaptive optimization.
+    pub fn record_tool_result(
+        &self,
+        tool_name: &str,
+        success: bool,
+        duration_ms: u64,
+        output_tokens: usize,
+    ) {
+        self.tool_usage_tracker
+            .record(tool_name, success, duration_ms, output_tokens);
+    }
+
+    /// Recommend better tool alternatives based on task context.
+    pub fn recommend_tool_alternatives(
+        &self,
+        tool_name: &str,
+        task: &str,
+    ) -> Vec<(&'static str, f64)> {
+        self.tool_registry.recommend_alternatives(tool_name, task)
+    }
+
+    /// Get tool effectiveness summary for context injection.
+    pub fn tool_effectiveness_summary(&self) -> String {
+        self.tool_usage_tracker.summary()
     }
 
     // ------------------------------------------------------------------

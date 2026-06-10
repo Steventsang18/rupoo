@@ -1,4 +1,5 @@
 pub mod agent;
+pub mod context;
 pub mod db;
 pub mod embedding;
 pub mod error;
@@ -19,6 +20,7 @@ pub mod signal;
 pub mod skill;
 pub mod strings;
 pub mod task;
+pub mod tool_selector;
 pub mod tools;
 pub mod vector_store;
 

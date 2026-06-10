@@ -395,6 +395,384 @@ impl Default for SecurityPolicy {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Operation risk assessment — integrates with tool_selector for safety grading
+// ---------------------------------------------------------------------------
+
+use crate::tool_selector::RiskLevel;
+
+/// Assess the risk level of a tool operation based on its parameters,
+/// combining static tool risk with parameter-sensitive analysis.
+#[derive(Debug, Clone, Default)]
+pub struct OperationRiskAssessor {
+    /// Blocked paths that should never be accessed.
+    blocked_paths: HashSet<String>,
+    /// Blocked network hosts/domains.
+    blocked_hosts: HashSet<String>,
+    /// Whether to log all tool calls.
+    audit_all: bool,
+}
+
+impl OperationRiskAssessor {
+    /// Create with default blocked paths (system directories on each OS).
+    pub fn new() -> Self {
+        let mut assessor = Self {
+            audit_all: true,
+            ..Default::default()
+        };
+
+        // System directories that should never be directly modified
+        #[cfg(target_os = "macos")]
+        {
+            assessor.blocked_paths.insert("/System".to_string());
+            assessor.blocked_paths.insert("/Library/System".to_string());
+        }
+        #[cfg(target_os = "linux")]
+        {
+            assessor.blocked_paths.insert("/boot".to_string());
+            assessor.blocked_paths.insert("/sys".to_string());
+            assessor.blocked_paths.insert("/proc/kcore".to_string());
+        }
+        #[cfg(target_os = "windows")]
+        {
+            assessor
+                .blocked_paths
+                .insert("C:\\Windows\\System32".to_string());
+        }
+
+        assessor
+    }
+
+    /// Assess a shell command for risk escalation.
+    /// Returns (risk_level, reason).
+    pub fn assess_shell_command(&self, command: &str) -> (RiskLevel, Option<String>) {
+        let lower = command.to_lowercase().trim().to_string();
+
+        // Critical: commands that can destroy the system
+        let critical_patterns = [
+            "rm -rf /",
+            "mkfs.",
+            "dd if=",
+            ":(){ :|:& };:",
+            "> /dev/sda",
+            "chmod 777 /",
+            "chown -R root:root /",
+            "> /dev/null 2>&1 &",
+        ];
+        for pat in &critical_patterns {
+            if lower.contains(pat) {
+                return (
+                    RiskLevel::Critical,
+                    Some(format!("Command matches critical pattern: {pat}")),
+                );
+            }
+        }
+
+        // High: commands that modify system state
+        let high_patterns = [
+            "sudo ",
+            "su ",
+            "rm ",
+            "chmod ",
+            "chown ",
+            "mount ",
+            "umount ",
+            "systemctl ",
+            "service ",
+            "kill -9",
+            "pkill ",
+            "docker rm",
+        ];
+        for pat in &high_patterns {
+            if lower.contains(pat) {
+                return (
+                    RiskLevel::High,
+                    Some(format!("Privileged or destructive command: {pat}")),
+                );
+            }
+        }
+
+        // Medium: commands that install or modify software
+        let medium_patterns = [
+            "pip install",
+            "npm install -g",
+            "cargo install",
+            "gem install",
+            "brew install",
+            "apt-get install",
+            "yum install",
+            "pacman -S",
+        ];
+        for pat in &medium_patterns {
+            if lower.contains(pat) {
+                return (
+                    RiskLevel::Medium,
+                    Some(format!("Installation command: {pat}")),
+                );
+            }
+        }
+
+        // Default: low risk
+        (RiskLevel::Low, None)
+    }
+
+    /// Assess file operation risk based on path.
+    pub fn assess_file_path(&self, path: &str, is_write: bool) -> (RiskLevel, Option<String>) {
+        let normalized = path.trim();
+
+        // Check against blocked paths
+        for blocked in &self.blocked_paths {
+            if normalized.starts_with(blocked) {
+                return (
+                    RiskLevel::Critical,
+                    Some(format!("Path '{}' is in blocked system directory", blocked)),
+                );
+            }
+        }
+
+        // Sensitive config files
+        let sensitive_paths = [".env", ".gitconfig", "id_rsa", "credentials", ".aws/"];
+        for sensitive in &sensitive_paths {
+            if normalized.contains(sensitive) {
+                if is_write {
+                    return (
+                        RiskLevel::High,
+                        Some("Modifying sensitive config file".to_string()),
+                    );
+                }
+                return (
+                    RiskLevel::Medium,
+                    Some("Reading sensitive config file".to_string()),
+                );
+            }
+        }
+
+        if is_write {
+            (RiskLevel::Medium, None)
+        } else {
+            (RiskLevel::Safe, None)
+        }
+    }
+
+    /// Assess network URL risk (SSRF, metadata services, etc.).
+    pub fn assess_network_url(&self, url: &str) -> (RiskLevel, Option<String>) {
+        // Metadata service IPs
+        let metadata_ips = [
+            "169.254.169.254",
+            "100.100.100.200",
+            "metadata.google.internal",
+        ];
+        for ip in &metadata_ips {
+            if url.contains(ip) {
+                return (
+                    RiskLevel::Critical,
+                    Some("Request to cloud metadata service".to_string()),
+                );
+            }
+        }
+
+        // Internal IP ranges
+        let internal_prefixes = [
+            "10.", "172.16.", "172.17.", "172.18.", "172.19.", "172.20.", "172.21.", "172.22.",
+            "172.23.", "172.24.", "172.25.", "172.26.", "172.27.", "172.28.", "172.29.", "172.30.",
+            "172.31.", "192.168.",
+        ];
+        for prefix in &internal_prefixes {
+            if url.contains(prefix) {
+                return (
+                    RiskLevel::High,
+                    Some("Request to internal/private IP range".to_string()),
+                );
+            }
+        }
+
+        // Check blocked hosts
+        for host in &self.blocked_hosts {
+            if url.contains(host.as_str()) {
+                return (
+                    RiskLevel::Critical,
+                    Some(format!("Request to blocked host: {host}")),
+                );
+            }
+        }
+
+        (RiskLevel::Low, None)
+    }
+
+    /// Block a host from network access.
+    pub fn block_host(&mut self, host: &str) {
+        self.blocked_hosts.insert(host.to_string());
+        info!(host, "host blocked from network access");
+    }
+
+    /// Block a path from file access.
+    pub fn block_path(&mut self, path: &str) {
+        self.blocked_paths.insert(path.to_string());
+        info!(path, "path blocked from file access");
+    }
+
+    /// Enable or disable full audit logging.
+    pub fn set_audit_all(&mut self, enabled: bool) {
+        self.audit_all = enabled;
+    }
+
+    /// Whether auditing is enabled.
+    pub fn is_auditing(&self) -> bool {
+        self.audit_all
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tool execution guard — combines selector metadata with safety policy
+// ---------------------------------------------------------------------------
+
+/// Result of a tool safety check.
+#[derive(Debug, Clone)]
+pub struct ToolSafetyCheck {
+    /// Whether the tool is allowed to execute.
+    pub allowed: bool,
+    /// Whether user approval is required.
+    pub requires_approval: bool,
+    /// Risk level of the operation.
+    pub risk_level: RiskLevel,
+    /// Warning message if any concerns.
+    pub warning: Option<String>,
+    /// Block reason if not allowed.
+    pub block_reason: Option<String>,
+}
+
+impl ToolSafetyCheck {
+    pub fn allowed() -> Self {
+        Self {
+            allowed: true,
+            requires_approval: false,
+            risk_level: RiskLevel::Safe,
+            warning: None,
+            block_reason: None,
+        }
+    }
+
+    pub fn requires_approval(risk: RiskLevel, reason: Option<String>) -> Self {
+        Self {
+            allowed: true,
+            requires_approval: true,
+            risk_level: risk,
+            warning: reason,
+            block_reason: None,
+        }
+    }
+
+    pub fn blocked(reason: String) -> Self {
+        Self {
+            allowed: false,
+            requires_approval: false,
+            risk_level: RiskLevel::Critical,
+            warning: Some(reason.clone()),
+            block_reason: Some(reason),
+        }
+    }
+}
+
+/// Perform a comprehensive safety check on a tool call.
+///
+/// Combines static tool metadata with dynamic parameter analysis.
+pub fn check_tool_safety(
+    tool_name: &str,
+    params: &serde_json::Value,
+    assessor: &OperationRiskAssessor,
+) -> ToolSafetyCheck {
+    let lower_name = tool_name.to_lowercase();
+
+    match lower_name.as_str() {
+        "shell_exec" | "sh" | "bash" => {
+            let cmd = params.get("command").and_then(|v| v.as_str()).unwrap_or("");
+            let (risk, reason) = assessor.assess_shell_command(cmd);
+            match risk {
+                RiskLevel::Critical => ToolSafetyCheck::blocked(
+                    reason.unwrap_or_else(|| "Critical risk shell command".to_string()),
+                ),
+                RiskLevel::High => ToolSafetyCheck::requires_approval(risk, reason),
+                _ => {
+                    let mut check = ToolSafetyCheck::allowed();
+                    check.risk_level = risk;
+                    check.warning = reason;
+                    check
+                }
+            }
+        }
+
+        "file_write" | "write" | "save" => {
+            let path = params.get("path").and_then(|v| v.as_str()).unwrap_or("");
+            let (risk, reason) = assessor.assess_file_path(path, true);
+            match risk {
+                RiskLevel::Critical => ToolSafetyCheck::blocked(
+                    reason.unwrap_or_else(|| "Critical risk file path".to_string()),
+                ),
+                RiskLevel::High => ToolSafetyCheck::requires_approval(risk, reason),
+                _ => {
+                    let mut check = ToolSafetyCheck::allowed();
+                    check.risk_level = risk;
+                    check.warning = reason;
+                    check
+                }
+            }
+        }
+
+        "file_read" | "read" | "open" => {
+            let path = params.get("path").and_then(|v| v.as_str()).unwrap_or("");
+            let (risk, reason) = assessor.assess_file_path(path, false);
+            match risk {
+                RiskLevel::Critical => ToolSafetyCheck::blocked(
+                    reason.unwrap_or_else(|| "Critical risk file path".to_string()),
+                ),
+                RiskLevel::High => ToolSafetyCheck::requires_approval(risk, reason),
+                _ => {
+                    let mut check = ToolSafetyCheck::allowed();
+                    check.risk_level = risk;
+                    check.warning = reason;
+                    check
+                }
+            }
+        }
+
+        "delete_file" | "rm" | "remove" | "delete" => {
+            let path = params.get("path").and_then(|v| v.as_str()).unwrap_or("");
+            let (risk, reason) = assessor.assess_file_path(path, true);
+            match risk {
+                RiskLevel::Critical => ToolSafetyCheck::blocked(
+                    reason.unwrap_or_else(|| "Cannot delete critical system file".to_string()),
+                ),
+                _ => ToolSafetyCheck::requires_approval(
+                    RiskLevel::High,
+                    Some(format!("File deletion: {}", path)),
+                ),
+            }
+        }
+
+        "http_get" | "http_post" | "http_request" | "web_request" => {
+            let url = params.get("url").and_then(|v| v.as_str()).unwrap_or("");
+            let (risk, reason) = assessor.assess_network_url(url);
+            match risk {
+                RiskLevel::Critical => ToolSafetyCheck::blocked(
+                    reason.unwrap_or_else(|| "Blocked network request".to_string()),
+                ),
+                RiskLevel::High => ToolSafetyCheck::requires_approval(risk, reason),
+                _ => {
+                    let mut check = ToolSafetyCheck::allowed();
+                    check.risk_level = risk;
+                    check.warning = reason;
+                    check
+                }
+            }
+        }
+
+        _ => ToolSafetyCheck::allowed(),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -516,5 +894,107 @@ mod tests {
 
         let result = policy.check_permission_detailed("test_user", &Permission::SystemShutdown);
         assert!(!result.allowed);
+    }
+
+    // --- OperationRiskAssessor tests ---
+
+    #[test]
+    fn test_assess_shell_command_critical() {
+        let assessor = OperationRiskAssessor::new();
+        let (risk, reason) = assessor.assess_shell_command("rm -rf /");
+        assert_eq!(risk, RiskLevel::Critical);
+        assert!(reason.is_some());
+    }
+
+    #[test]
+    fn test_assess_shell_command_high() {
+        let assessor = OperationRiskAssessor::new();
+        let (risk, _) = assessor.assess_shell_command("sudo systemctl restart");
+        assert_eq!(risk, RiskLevel::High);
+    }
+
+    #[test]
+    fn test_assess_shell_command_medium() {
+        let assessor = OperationRiskAssessor::new();
+        let (risk, _) = assessor.assess_shell_command("pip install requests");
+        assert_eq!(risk, RiskLevel::Medium);
+    }
+
+    #[test]
+    fn test_assess_shell_command_low() {
+        let assessor = OperationRiskAssessor::new();
+        let (risk, _) = assessor.assess_shell_command("ls -la");
+        assert_eq!(risk, RiskLevel::Low);
+    }
+
+    #[test]
+    fn test_assess_file_path_sensitive() {
+        let assessor = OperationRiskAssessor::new();
+        let (risk, reason) = assessor.assess_file_path(".env", true);
+        assert_eq!(risk, RiskLevel::High);
+        assert!(reason.is_some());
+    }
+
+    #[test]
+    fn test_assess_file_path_normal() {
+        let assessor = OperationRiskAssessor::new();
+        let (risk, _) = assessor.assess_file_path("src/main.rs", false);
+        assert_eq!(risk, RiskLevel::Safe);
+    }
+
+    #[test]
+    fn test_assess_network_metadata() {
+        let assessor = OperationRiskAssessor::new();
+        let (risk, _) = assessor.assess_network_url("http://169.254.169.254/latest/meta-data/");
+        assert_eq!(risk, RiskLevel::Critical);
+    }
+
+    #[test]
+    fn test_assess_network_internal() {
+        let assessor = OperationRiskAssessor::new();
+        let (risk, _) = assessor.assess_network_url("http://192.168.1.1/admin");
+        assert_eq!(risk, RiskLevel::High);
+    }
+
+    #[test]
+    fn test_assess_network_normal() {
+        let assessor = OperationRiskAssessor::new();
+        let (risk, _) = assessor.assess_network_url("https://api.github.com");
+        assert_eq!(risk, RiskLevel::Low);
+    }
+
+    #[test]
+    fn test_block_host() {
+        let mut assessor = OperationRiskAssessor::new();
+        assessor.block_host("evil.com");
+        let (risk, _) = assessor.assess_network_url("http://evil.com/phishing");
+        assert_eq!(risk, RiskLevel::Critical);
+    }
+
+    #[test]
+    fn test_check_tool_safety_critical_shell() {
+        let assessor = OperationRiskAssessor::new();
+        let params = serde_json::json!({"command": "rm -rf /"});
+        let result = check_tool_safety("shell_exec", &params, &assessor);
+        assert!(!result.allowed);
+        assert!(result.block_reason.is_some());
+    }
+
+    #[test]
+    fn test_check_tool_safety_safe_read() {
+        let assessor = OperationRiskAssessor::new();
+        let params = serde_json::json!({"path": "src/main.rs"});
+        let result = check_tool_safety("file_read", &params, &assessor);
+        assert!(result.allowed);
+        assert!(!result.requires_approval);
+    }
+
+    #[test]
+    fn test_check_tool_safety_delete_requires_approval() {
+        let assessor = OperationRiskAssessor::new();
+        let params = serde_json::json!({"path": "test.txt"});
+        let result = check_tool_safety("delete_file", &params, &assessor);
+        assert!(result.allowed);
+        assert!(result.requires_approval);
     }
 }

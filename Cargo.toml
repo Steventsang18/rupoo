@@ -1,6 +1,6 @@
 [package]
 name = "rupoo"
-version = "0.4.0"
+version = "0.4.1"
 edition = "2021"
 authors = ["Steventsang18"]
 description = "AI-powered Terminal Assistant — native REPL with plan execution, memory, and MCP support"
@@ -59,7 +59,7 @@ keyring = { version = "2", optional = true }
 name = "Rupoo"
 identifier = "com.plan-executor.agent"
 icon = []
-version = "0.4.0"
+version = "0.4.1"
 category = "Developer Tools"
 short_description = "AI-powered plan execution agent"
 long_description = "A desktop AI assistant with plan execution, memory, and skills management."

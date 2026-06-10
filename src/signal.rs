@@ -213,6 +213,10 @@ pub struct EnvironmentSignals {
     pub project_type: Option<String>, // e.g. "Rust (Cargo.toml)"
     pub recent_files: Vec<String>,    // files modified in last 24h
     pub dir_summary: Option<String>,  // e.g. "src/ (12 files), tests/ (1 file)"
+    /// Approximate process memory usage in MB.
+    pub process_memory_mb: Option<u64>,
+    /// Number of available CPU cores.
+    pub cpu_cores: Option<usize>,
 }
 
 impl EnvironmentSignals {
@@ -240,7 +244,27 @@ impl EnvironmentSignals {
         signals.git_status =
             run_git_command(&["status", "--short"]).map(|s| summarize_git_status(&s));
 
+        // System resources
+        signals.cpu_cores = std::thread::available_parallelism().ok().map(|n| n.get());
+
+        #[cfg(target_os = "macos")]
+        {
+            signals.process_memory_mb = Self::collect_memory_mb();
+        }
+
         signals
+    }
+
+    /// Collect process memory usage on macOS via ps.
+    #[cfg(target_os = "macos")]
+    fn collect_memory_mb() -> Option<u64> {
+        let output = std::process::Command::new("ps")
+            .args(["-o", "rss=", "-p", &std::process::id().to_string()])
+            .output()
+            .ok()?;
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let kb: u64 = stdout.trim().parse().ok()?;
+        Some(kb / 1024) // KB -> MB
     }
 
     /// Format signals as a block to inject into the system prompt.
@@ -270,6 +294,12 @@ impl EnvironmentSignals {
         }
         if let Some(ref summary) = self.dir_summary {
             parts.push(format!("- Directory: {}", summary));
+        }
+        if let Some(mem) = self.process_memory_mb {
+            parts.push(format!("- Process memory: {mem} MB"));
+        }
+        if let Some(cores) = self.cpu_cores {
+            parts.push(format!("- CPU cores: {cores}"));
         }
 
         if parts.len() > 1 {
@@ -948,6 +978,8 @@ mod tests {
             project_type: Some("Rust (Cargo.toml)".into()),
             recent_files: vec!["src/main.rs".into()],
             dir_summary: Some("src/, 3 files".into()),
+            process_memory_mb: Some(128),
+            cpu_cores: Some(8),
         };
         let block = signals.to_prompt_block();
         assert!(block.contains("PWD: /projects/myapp"));
