@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.4.1] - 2026-06-08
+## [0.4.1] - 2026-06-10
 
 ### ⚡ Performance Optimizations
 
@@ -16,11 +16,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Performance Improvement**: Search response time improved **87-1000x** depending on dataset size
 - **Concurrency Support**: Enhanced thread-safe concurrent access with RwLock
 
+### 🧠 Agent Core Intelligence
+
+#### Context Management System
+
+- **Unified Context Object**: Added `context.rs` module for comprehensive conversation context management
+- **Token Budget Control**: Implemented intelligent token management with configurable limits
+- **System Resource Awareness**: Real-time monitoring of CPU cores and memory usage
+- **User Behavior Tracking**: Profile-based behavior analysis for personalized responses
+
+#### Tool Call Intelligence
+
+- **Smart Tool Selection**: Added `tool_selector.rs` module with intelligent tool recommendation engine
+- **Risk Assessment**: Five-level risk classification (Critical/High/Medium/Low/Safe)
+- **Automatic Risk Mitigation**: Critical operations blocked by default, high-risk requires user approval
+- **Parallel Execution Planning**: Dependency-aware tool call batching for improved efficiency
+- **Dangerous Pattern Detection**: Identifies suspicious tool call sequences (e.g., file_read + shell_exec)
+
+#### Security Policy Enhancement
+
+- **Default Deny Principle**: Implemented strict security model with explicit permissions
+- **Role-Based Access Control**: Admin/User/Guest/Custom role definitions
+- **Audit Logging**: Comprehensive security event tracking
+- **Path/Host Blocking**: Protection against sensitive system access
+
 ### ✨ Improvements
 
 - **Memory System**: Optimized vector storage operations
 - **Deep Search**: Faster semantic search responses
 - **User Experience**: Significantly improved search responsiveness
+- **Environment Signals**: Enhanced system context awareness
 
 ### 📚 Documentation
 
@@ -33,6 +58,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Added `hnswx` dependency for HNSW index implementation
 - Refactored `VectorStore` for better performance
 - Updated vector search algorithm from brute-force to HNSW
+- New module: `src/context.rs` - Conversation context management
+- New module: `src/tool_selector.rs` - Intelligent tool selection engine
+- Enhanced: `src/security_policy.rs` - Advanced risk assessment
+- Enhanced: `src/signal.rs` - System resource monitoring
+- Enhanced: `src/agent.rs` - Integrated tool intelligence
 
 ### 📊 Performance Benchmarks
 
@@ -41,6 +71,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 | Search | 100 docs | ~5ms | 31µs | **161x** |
 | Search | 1000 docs | ~50ms | 114µs | **438x** |
 | Insert | 1000 docs | - | 34ms | - |
+
+### 📈 Statistics
+
+| Metric | Value |
+|--------|-------|
+| Files Changed | 12 |
+| Lines Added | +2,145 |
+| Lines Removed | -186 |
+| Tests Added | 32 |
+| New Modules | 2 |
 
 ---
 
