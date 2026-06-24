@@ -47,7 +47,6 @@ impl Default for BreakerConfig {
 struct BreakerInner {
     state: BreakerState,
     failure_count: u32,
-    last_failure_time: Instant,
     last_state_change: Instant,
     half_open_requests: u32,
     /// 滑动窗口：每秒调用计数器
@@ -67,7 +66,6 @@ impl CircuitBreaker {
             inner: Arc::new(Mutex::new(BreakerInner {
                 state: BreakerState::Closed,
                 failure_count: 0,
-                last_failure_time: Instant::now(),
                 last_state_change: Instant::now(),
                 half_open_requests: 0,
                 call_timestamps: Vec::new(),
@@ -99,6 +97,7 @@ impl CircuitBreaker {
                 if elapsed >= Duration::from_secs(self.config.open_duration_secs) {
                     // 冷却时间到，进入半开
                     inner.state = BreakerState::HalfOpen;
+                    inner.failure_count = 0;
                     inner.half_open_requests = 0;
                     inner.last_state_change = now;
                     info!("circuit breaker: Closed -> HalfOpen after cooldown");
@@ -140,18 +139,23 @@ impl CircuitBreaker {
     pub fn record_failure(&self) {
         let mut inner = self.inner.lock();
         inner.failure_count += 1;
-        inner.last_failure_time = Instant::now();
 
-        if inner.failure_count >= self.config.failure_threshold
-            && inner.state == BreakerState::Closed
-        {
-            inner.state = BreakerState::Open;
-            inner.last_state_change = Instant::now();
-            warn!(
-                failures = inner.failure_count,
-                threshold = self.config.failure_threshold,
-                "circuit breaker: Closed -> Open (failure threshold exceeded)"
-            );
+        match inner.state {
+            BreakerState::Closed if inner.failure_count >= self.config.failure_threshold => {
+                inner.state = BreakerState::Open;
+                inner.last_state_change = Instant::now();
+                warn!(
+                    failures = inner.failure_count,
+                    threshold = self.config.failure_threshold,
+                    "circuit breaker: Closed -> Open (failure threshold exceeded)"
+                );
+            }
+            BreakerState::HalfOpen => {
+                inner.state = BreakerState::Open;
+                inner.last_state_change = Instant::now();
+                warn!("circuit breaker: HalfOpen -> Open (probe failed)");
+            }
+            _ => {}
         }
     }
 
