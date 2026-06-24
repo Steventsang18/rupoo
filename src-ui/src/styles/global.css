@@ -1,0 +1,288 @@
+/* ============================================================
+   Rupoo Design System v2 — AI Agent Desktop
+   Inspired by Trae CN's visual quality, built for AI-native UX
+   ============================================================ */
+
+/* ── Font imports ── */
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;450;500;600;700&display=swap');
+
+/* ============================================================
+   Design Tokens (Dark Theme — Default)
+   ============================================================ */
+
+:root {
+  /* ── Brand palette ── */
+  --brand-50:   #eff6ff;
+  --brand-100:  #dbeafe;
+  --brand-200:  #bfdbfe;
+  --brand-300:  #93c5fd;
+  --brand-400:  #60a5fa;
+  --brand-500:  #3b82f6;   /* Primary blue */
+  --brand-600:  #2563eb;
+  --brand-700:  #1d4ed8;
+  --brand-800:  #1e40af;
+
+  /* ── Accent gradient ── */
+  --accent-gradient: linear-gradient(135deg, #3b82f6, #8b5cf6);
+
+  /* ── Neutral palette (dark) ── */
+  --bg-deepest:    #0a0b0e;
+  --bg-root:       #0e1015;
+  --bg-raised:     #13151c;
+  --bg-surface:    #181b24;
+  --bg-elevated:   #1e212c;
+  --bg-hover:      #242836;
+  --bg-active:     #2a2f40;
+  --bg-inset:      #0c0d12;
+
+  /* ── Borders ── */
+  --border-subtle:   rgba(255,255,255,0.04);
+  --border-default:  rgba(255,255,255,0.07);
+  --border-strong:   rgba(255,255,255,0.10);
+  --border-accent:   rgba(59,130,246,0.30);
+
+  /* ── Text ── */
+  --text-primary:    #e8eaed;
+  --text-secondary:  #9aa0a6;
+  --text-tertiary:   #5f6368;
+  --text-disabled:   #3c4043;
+  --text-on-brand:   #ffffff;
+  --text-link:       #8ab4f8;
+
+  /* ── Semantic colors ── */
+  --success:         #34d399;
+  --success-bg:      rgba(52,211,153,0.12);
+  --warning:         #fbbf24;
+  --warning-bg:      rgba(251,191,36,0.12);
+  --error:           #f87171;
+  --error-bg:        rgba(248,113,113,0.12);
+  --info:            #60a5fa;
+  --info-bg:         rgba(96,165,250,0.12);
+
+  /* ── Shadows ── */
+  --shadow-xs:   0 1px 2px rgba(0,0,0,0.3);
+  --shadow-sm:   0 2px 6px rgba(0,0,0,0.35);
+  --shadow-md:   0 4px 16px rgba(0,0,0,0.40);
+  --shadow-lg:   0 8px 32px rgba(0,0,0,0.50);
+  --shadow-xl:   0 16px 48px rgba(0,0,0,0.60);
+
+  /* ── Blur / Glass ── */
+  --glass-bg:      rgba(14,16,21,0.80);
+  --glass-border:  rgba(255,255,255,0.06);
+  --glass-blur:    16px;
+
+  /* ── Typography ── */
+  --font-sans:   'Inter', -apple-system, BlinkMacSystemFont, 'PingFang SC',
+                 'Hiragino Sans GB', 'Microsoft YaHei', sans-serif;
+  --font-mono:   'JetBrains Mono', 'SF Mono', 'Fira Code', 'Cascadia Code',
+                 'Source Code Pro', monospace;
+
+  /* ── Font scale ── */
+  --fs-2xs:   10px;
+  --fs-xs:    11.5px;
+  --fs-sm:    13px;
+  --fs-base:  14.5px;
+  --fs-md:    16px;
+  --fs-lg:    20px;
+  --fs-xl:    26px;
+  --fs-2xl:   34px;
+  --fs-3xl:   42px;
+
+  /* ── Line heights ── */
+  --lh-tight:   1.25;
+  --lh-base:    1.55;
+  --lh-relaxed: 1.75;
+
+  /* ── Letter spacing ── */
+  --ls-tight:   -0.015em;
+  --ls-normal:   0;
+  --ls-wide:     0.02em;
+  --ls-caps:     0.04em;
+
+  /* ── Radius ── */
+  --radius-2xs: 4px;
+  --radius-xs:  6px;
+  --radius-sm:  8px;
+  --radius-md:  12px;
+  --radius-lg:  16px;
+  --radius-xl:  20px;
+  --radius-full: 9999px;
+
+  /* ── Spacing scale (4px base) ── */
+  --space-1:  4px;
+  --space-2:  8px;
+  --space-3:  12px;
+  --space-4:  16px;
+  --space-5:  20px;
+  --space-6:  24px;
+  --space-8:  32px;
+  --space-10: 40px;
+  --space-12: 48px;
+
+  /* ── Layout ── */
+  --activity-bar-width: 52px;
+  --titlebar-height:    38px;
+  --statusbar-height:   28px;
+  --sidebar-min:        260px;
+  --sidebar-max:        400px;
+
+  /* ── Scrollbar ── */
+  --scroll-thumb:       rgba(255,255,255,0.10);
+  --scroll-thumb-hover: rgba(255,255,255,0.18);
+  --scroll-track:       transparent;
+
+  /* ── Transitions ── */
+  --ease-out:     cubic-bezier(0.16, 1, 0.3, 1);
+  --ease-in-out:  cubic-bezier(0.65, 0, 0.35, 1);
+  --ease-spring:  cubic-bezier(0.34, 1.56, 0.64, 1);
+  --duration-fast:   120ms;
+  --duration-normal: 200ms;
+  --duration-slow:   350ms;
+}
+
+/* ============================================================
+   Light Theme Overrides
+   ============================================================ */
+
+:root[data-theme="light"] {
+  --bg-deepest:    #f5f6f8;
+  --bg-root:       #f8f9fa;
+  --bg-raised:     #ffffff;
+  --bg-surface:    #f0f1f3;
+  --bg-elevated:   #e8eaed;
+  --bg-hover:      #e2e5e9;
+  --bg-active:     #d3d7de;
+  --bg-inset:      #edeff2;
+
+  --border-subtle:   rgba(0,0,0,0.04);
+  --border-default:  rgba(0,0,0,0.08);
+  --border-strong:   rgba(0,0,0,0.12);
+  --border-accent:   rgba(59,130,246,0.25);
+
+  --text-primary:    #1f1f1f;
+  --text-secondary:  #5f6368;
+  --text-tertiary:   #9aa0a6;
+  --text-disabled:   #c4c7c5;
+  --text-link:       #1a73e8;
+
+  --shadow-xs:   0 1px 2px rgba(0,0,0,0.04);
+  --shadow-sm:   0 2px 6px rgba(0,0,0,0.05);
+  --shadow-md:   0 4px 16px rgba(0,0,0,0.06);
+  --shadow-lg:   0 8px 32px rgba(0,0,0,0.08);
+  --shadow-xl:   0 16px 48px rgba(0,0,0,0.10);
+
+  --glass-bg:      rgba(255,255,255,0.75);
+  --glass-border:  rgba(0,0,0,0.06);
+
+  --scroll-thumb:       rgba(0,0,0,0.12);
+  --scroll-thumb-hover: rgba(0,0,0,0.20);
+}
+
+/* ============================================================
+   Base Styles
+   ============================================================ */
+
+*, *::before, *::after {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html {
+  font-size: var(--fs-base);
+  line-height: var(--lh-base);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+}
+
+body {
+  font-family: var(--font-sans);
+  font-size: var(--fs-base);
+  color: var(--text-primary);
+  background: var(--bg-root);
+  overflow: hidden;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+/* ── Selection ── */
+::selection {
+  background: var(--brand-500);
+  color: var(--text-on-brand);
+}
+
+/* ── Focus ── */
+:focus-visible {
+  outline: 2px solid var(--brand-500);
+  outline-offset: 2px;
+  border-radius: var(--radius-2xs);
+}
+
+/* ── Scrollbar ── */
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: var(--scroll-track); }
+::-webkit-scrollbar-thumb {
+  background: var(--scroll-thumb);
+  border-radius: 3px;
+}
+::-webkit-scrollbar-thumb:hover { background: var(--scroll-thumb-hover); }
+
+/* ── Headings ── */
+h1, h2, h3, h4 { font-weight: 600; line-height: var(--lh-tight); letter-spacing: var(--ls-tight); }
+h1 { font-size: var(--fs-2xl); }
+h2 { font-size: var(--fs-xl); }
+h3 { font-size: var(--fs-lg); }
+h4 { font-size: var(--fs-md); }
+
+/* ── Links ── */
+a { color: var(--text-link); text-decoration: none; }
+a:hover { text-decoration: underline; }
+
+/* ── Input/textarea base ── */
+input, textarea, select {
+  font-family: var(--font-sans);
+  font-size: var(--fs-sm);
+  color: var(--text-primary);
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-xs);
+  outline: none;
+  transition: border-color var(--duration-fast) var(--ease-out),
+              box-shadow var(--duration-fast) var(--ease-out);
+}
+input:focus, textarea:focus, select:focus {
+  border-color: var(--brand-500);
+  box-shadow: 0 0 0 3px rgba(59,130,246,0.15);
+}
+
+/* ── Button base ── */
+button {
+  font-family: var(--font-sans);
+  cursor: pointer;
+  border: none;
+  background: none;
+  color: inherit;
+  outline: none;
+}
+button:disabled { opacity: 0.4; cursor: not-allowed; }
+
+/* ── Image ── */
+img { -webkit-user-drag: none; user-select: none; }
+
+/* ── Transitions ── */
+.fade-enter-active, .fade-leave-active { transition: opacity var(--duration-normal) var(--ease-out); }
+.fade-enter-from, .fade-leave-to { opacity: 0; }
+
+.slide-up-enter-active, .slide-up-leave-active { transition: all var(--duration-slow) var(--ease-out); }
+.slide-up-enter-from, .slide-up-leave-to { opacity: 0; transform: translateY(12px); }
+
+.slide-right-enter-active, .slide-right-leave-active { transition: all var(--duration-slow) var(--ease-out); }
+.slide-right-enter-from, .slide-right-leave-to { opacity: 0; transform: translateX(-12px); }
+
+/* ── App root ── */
+#app {
+  width: 100vw;
+  height: 100vh;
+  overflow: hidden;
+}

@@ -1,0 +1,15 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "type": "lldb",
+      "request": "launch",
+      "name": "Debug Tauri 开发模式",
+      "cargo": {
+        "args": ["tauri", "dev"]
+      },
+      "preLaunchTask": "cargo check",
+      "console": "integratedTerminal"
+    }
+  ]
+}

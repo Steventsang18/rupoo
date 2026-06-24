@@ -1,0 +1,14 @@
+{
+  "name": "rupoo",
+  "private": true,
+  "version": "0.4.1",
+  "type": "module",
+  "scripts": {
+    "dev": "cd src-ui && pnpm dev",
+    "build": "cd src-ui && pnpm build",
+    "tauri": "tauri"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.11.0"
+  }
+}

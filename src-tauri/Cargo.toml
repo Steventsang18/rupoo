@@ -1,0 +1,29 @@
+[package]
+name = "rupoo-tauri"
+version = "0.4.1"
+edition = "2021"
+description = "Tauri desktop app for rupoo AI agent"
+
+[lib]
+name = "rupoo_tauri_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-shell = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+rupoo = { path = "../src-agent", features = ["gui"] }
+tokio = { version = "1", features = ["rt", "sync", "time"] }
+anyhow = "1"
+chrono = "0.4"
+tracing = "0.1"
+tracing-subscriber = "0.3"
+dirs = "5"
+
+[features]
+default = ["custom-protocol"]
+custom-protocol = ["tauri/custom-protocol"]

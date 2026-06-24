@@ -2,11 +2,11 @@
 
 [中文版本](README_CN.md) | English
 
-Rupoo is a terminal-based AI assistant with a native REPL interface, featuring syntax-highlighted code blocks, Markdown rendering, theme switching, and Claude Code–style tool call display — all driven by a dual-mode agent engine (Chat + Plan).
+Rupoo is a terminal-based AI assistant with a native REPL interface, featuring syntax-highlighted code blocks, Markdown rendering, theme switching, and Claude Code–style tool call display — driven by a triple-mode agent engine (Chat + Plan + Loop).
 
 ```
-Version:   0.4.0          Language: Rust 2021
-Lines:     ~26,000        Tests:    110 ✅
+Version:   0.5.0          Language: Rust 2021
+Lines:     ~28,000        Tests:    178 ✅
 Interface: Native REPL    LLM:      Anthropic / OpenAI / DeepSeek / Ollama
 DB:        SQLite (FTS5)  Memory:   Hybrid Search (FTS5 + Vector)
 Safety:    path_jail sandbox + SSRF protection
@@ -26,7 +26,9 @@ Safety:    path_jail sandbox + SSRF protection
 | **Tool Cards** | Claude Code–style folding cards for tool calls |
 | **Thinking Chain** | Streaming spinner + bubble for AI reasoning |
 | **History Search** | `Ctrl+R` incremental search (1000 entries) |
-| **Dual-Mode Agent** | Chat Mode + Plan Mode with checkpoints |
+| **Triple-Mode Agent** | Chat Mode + Plan Mode + Loop Mode |
+| **Loop Engineering** | Adaptive iterative execution: execute → evaluate → correct → repeat |
+| **Recursive Decomposition** | Auto-break complex goals into independent sub-tasks |
 | **7 Step Types** | Think, ToolCall, WaitForInput, Exec, HttpRequest, BrowserAction, Finish |
 | **Long-term Memory** | SQLite FTS5 full-text search + Vector semantic search |
 | **Hybrid Search** | Combines FTS5 keyword matching + Vector semantic understanding |
@@ -43,7 +45,7 @@ Safety:    path_jail sandbox + SSRF protection
 
 ```bash
 # Install from source
-cargo install --path .
+cargo install --path src-agent
 
 # Or run directly
 cargo run --release
@@ -72,6 +74,64 @@ rupoo config set model.ollama llama3
 # Interactive REPL (default)
 rupoo
 ```
+
+---
+
+## 🎯 New in v0.5.0 — Loop Engineering
+
+Loop Engineering introduces adaptive iterative execution: the Agent autonomously plans, executes, evaluates, and corrects until the goal is met.
+
+### Adaptive Loop
+
+```
+User Goal → Plan → Execute → LLM Evaluate → met ✓? → Done
+                ↑                          ↓ unmet ✗
+                └── Correction Plan ←──────┘
+```
+
+```bash
+# Start an adaptive loop
+/loop "Optimize project performance"
+
+# Check loop status
+/loop status <id>
+
+# List all loops
+/loop list
+
+# Pause / resume / cancel
+/loop pause <id>
+/loop resume <id>
+/loop cancel <id>
+```
+
+### Recursive Decomposition
+
+When a goal is too complex, the evaluator decomposes it into independent sub-goals and merges results.
+
+```
+Complex Goal → Decompose → [Sub-Loop 1, Sub-Loop 2, ...] → Aggregate → Evaluate
+```
+
+### CLI Loop Commands
+
+```bash
+rupoo loops start "Fix all failing tests" --max-iterations 20
+rupoo loops status <id>
+rupoo loops list
+rupoo loops pause <id>
+rupoo loops resume <id>
+rupoo loops cancel <id>
+```
+
+### Convergence Guarantees
+
+| Mechanism | Description |
+|-----------|-------------|
+| Consistency Check | Vanished unmet items force re-evaluation |
+| Oscillation Detection | [Done, Continue, Done] pattern triggers pause |
+| Hard Limits | max_iterations + stall detection prevent infinite loops |
+| Budget Guard | Token + time budgets with graceful pause |
 
 ---
 
@@ -147,6 +207,10 @@ Combined Results (RRF ranking)
 | `/new` | New conversation |
 | `/model` | Switch LLM model |
 | `/plan` | Enter Plan Mode |
+| `/loop <goal>` | Start adaptive iterative loop |
+| `/loop status <id>` | Show loop status |
+| `/loop list` | List all loops |
+| `/loop pause\|resume\|cancel` | Manage running loops |
 | `/memory` | Memory management |
 | `/memory on/off` | Enable/disable memory |
 | `/memory list` | List recent memories |
@@ -171,6 +235,7 @@ rupoo [OPTIONS] [COMMAND]
 | `status` | System status overview |
 | `model [show\|list\|set]` | Manage LLM providers |
 | `session [list\|show\|resume\|delete]` | Manage plans |
+| `loops [start\|status\|list\|pause\|resume\|cancel]` | Loop engineering |
 | `skills [list\|show\|install-builtin]` | Skill management |
 | `config [set\|get\|list]` | Configuration management |
 | `git [status\|commit\|pr]` | Git integration |
@@ -229,23 +294,23 @@ cargo bench
 ## 📊 Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│                       User Layer (CLI/TUI)                     │
-│  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌──────────────┐   │
-│  │  Chat    │  │  Plan    │  │ Commands │  │   Memory     │   │
-│  │  Mode    │  │  Mode    │  │  System  │  │   System     │   │
-│  └────┬─────┘  └────┬─────┘  └────┬─────┘  └──────┬───────┘   │
-└───────┼─────────────┼─────────────┼────────────────┼───────────┘
-        │             │             │                │
-┌───────▼─────────────▼─────────────▼────────────────▼───────────┐
-│                      Agent Core Layer                          │
-│  ┌─────────────────────────────────────────────────────────┐   │
-│  │  Agent + Memory System + LLM Gateway                    │   │
-│  │  ┌──────────┐ ┌─────────────┐ ┌─────────────────────┐  │   │
-│  │  │ TaskRepo │ │ MemoryStore  │ │ MemoryCache (LRU)   │  │   │
-│  │  └──────────┘ └─────────────┘ └──────────────────────┘  │   │
-│  └─────────────────────────────────────────────────────────┘   │
-└─────────────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────────┐
+│                        User Layer (CLI/TUI)                          │
+│  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌───────┐ │
+│  │  Chat    │  │  Plan    │  │  Loop    │  │ Commands │  │Memory │ │
+│  │  Mode    │  │  Mode    │  │  Mode    │  │  System  │  │System │ │
+│  └────┬─────┘  └────┬─────┘  └────┬─────┘  └────┬─────┘  └───┬───┘ │
+└───────┼─────────────┼─────────────┼─────────────┼─────────────┼──────┘
+        │             │             │             │             │
+┌───────▼─────────────▼─────────────▼─────────────▼─────────────▼──────┐
+│                         Agent Core Layer                             │
+│  ┌──────────────────────────────────────────────────────────────┐   │
+│  │  Agent + LoopEngine + Memory System + LLM Gateway            │   │
+│  │  ┌──────────┐ ┌──────────────┐ ┌─────────────┐ ┌──────────┐ │   │
+│  │  │ TaskRepo │ │ LoopEngine   │ │ MemoryStore │ │ PlanCache│ │   │
+│  │  └──────────┘ └──────────────┘ └─────────────┘ └──────────┘ │   │
+│  └──────────────────────────────────────────────────────────────┘   │
+└──────────────────────────────────────────────────────────────────────┘
 ```
 
 ---

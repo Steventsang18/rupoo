@@ -1,0 +1,39 @@
+{
+  "$schema": "https://raw.githubusercontent.com/tauri-apps/tauri/dev/crates/tauri-config-schema/schema.json",
+  "productName": "Rupoo",
+  "version": "0.4.1",
+  "identifier": "com.rupoo.app",
+  "build": {
+    "beforeDevCommand": "pnpm --dir /Users/pengxiangzeng/rust-project/src-ui dev",
+    "devUrl": "http://localhost:5173",
+    "beforeBuildCommand": "pnpm --dir /Users/pengxiangzeng/rust-project/src-ui build",
+    "frontendDist": "/Users/pengxiangzeng/rust-project/src-ui/dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "Rupoo",
+        "width": 1400,
+        "height": 900,
+        "minWidth": 720,
+        "minHeight": 480,
+        "resizable": true,
+        "maximizable": true,
+        "minimizable": true,
+        "center": true
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "icon": [
+      "/Users/pengxiangzeng/rust-project/src-tauri/icons/32x32.png",
+      "/Users/pengxiangzeng/rust-project/src-tauri/icons/128x128.png",
+      "/Users/pengxiangzeng/rust-project/src-tauri/icons/128x128@2x.png"
+    ]
+  }
+}
