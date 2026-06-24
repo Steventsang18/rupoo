@@ -5652,6 +5652,7 @@ dependencies = [
  "moka",
  "once_cell",
  "owo-colors",
+ "parking_lot",
  "path_jail",
  "rand 0.8.6",
  "reqwest 0.12.28",

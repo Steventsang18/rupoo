@@ -173,6 +173,13 @@ pub enum AgentError {
         threshold: f64,
     },
 
+    // --- Circuit breaker ---
+    #[error("Circuit breaker is open: {reason}")]
+    CircuitBreakerOpen {
+        reason: String,
+        retry_after_secs: u64,
+    },
+
     // --- Other errors ---
     #[error("{0}")]
     Other(String),
@@ -271,6 +278,9 @@ impl AgentError {
                     threshold * 100.0,
                 )
             }
+            AgentError::CircuitBreakerOpen { reason, retry_after_secs } => {
+                format!("系统熔断器已触发：{}，请等待 {} 秒后重试", reason, retry_after_secs)
+            }
             AgentError::Other(e) => e.clone(),
         }
     }
@@ -368,6 +378,7 @@ impl AgentError {
                 | AgentError::LlmRequest { .. }
                 | AgentError::DnsResolutionFailed { .. }
                 | AgentError::ToolTimeout { .. }
+                | AgentError::CircuitBreakerOpen { .. }
         )
     }
 
