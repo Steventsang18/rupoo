@@ -6,6 +6,7 @@ pub mod context;
 pub mod db;
 pub mod embedding;
 pub mod error;
+pub mod execution;
 pub mod git;
 pub mod http_client;
 pub mod llm;
