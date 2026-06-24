@@ -12,6 +12,7 @@ pub mod http_client;
 pub mod llm;
 pub mod loop_engine;
 pub mod mcp;
+pub mod orchestrator;
 pub mod mcp_server;
 pub mod memory;
 pub mod memory_cache;
