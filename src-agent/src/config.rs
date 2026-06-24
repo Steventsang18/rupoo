@@ -50,6 +50,8 @@ pub struct RupooConfig {
     pub memory: MemorySection,
     #[serde(default)]
     pub mcp: McpSection,
+    #[serde(default)]
+    pub confidence: ConfidenceConfig,
 }
 
 impl Default for RupooConfig {
@@ -60,6 +62,7 @@ impl Default for RupooConfig {
             shell: ShellSection::default(),
             memory: MemorySection::default(),
             mcp: McpSection::default(),
+            confidence: ConfidenceConfig::default(),
         }
     }
 }
@@ -180,6 +183,33 @@ fn default_jail_root() -> String { ".".into() }
 fn default_approval_policy() -> String { "dangerous_only".into() }
 fn default_forbidden_commands() -> Vec<String> { vec![] }
 fn default_auto_approve_tools() -> Vec<String> { vec![] }
+
+// ---------------------------------------------------------------------------
+// Confidence section
+// ---------------------------------------------------------------------------
+
+/// 置信度拦截配置
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConfidenceConfig {
+    /// 最低置信阈值（0.0-1.0），低于此值的推理被暂停
+    #[serde(default = "default_confidence_threshold")]
+    pub min_threshold: f64,
+    /// 是否在低置信时暂停（true）或直接放行（false）
+    #[serde(default = "default_pause_on_low_confidence")]
+    pub pause_on_low_confidence: bool,
+}
+
+fn default_confidence_threshold() -> f64 { 0.7 }
+fn default_pause_on_low_confidence() -> bool { true }
+
+impl Default for ConfidenceConfig {
+    fn default() -> Self {
+        Self {
+            min_threshold: default_confidence_threshold(),
+            pause_on_low_confidence: default_pause_on_low_confidence(),
+        }
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Shell section
