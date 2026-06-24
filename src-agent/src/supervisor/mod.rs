@@ -1,5 +1,6 @@
 pub mod audit_logger;
 pub mod compliance;
+pub use self::compliance::ComplianceChecker;
 pub use self::compliance::ComplianceResult;
 pub mod confidence;
 pub mod circuit_breaker;

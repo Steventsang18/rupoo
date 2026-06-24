@@ -13,34 +13,21 @@ pub struct ComplianceResult {
 
 /// 合规校验器——检查动作是否越权
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct ComplianceChecker {
     /// 永久禁止的命令
     forbidden_commands: HashSet<String>,
     /// 需要审批的工具
     approval_required_tools: HashSet<String>,
-    /// 自动放行的工具
-    auto_approve_tools: HashSet<String>,
-    /// 最大调用频次（每秒）
-    max_calls_per_second: u64,
-    /// 最大并发动作数
-    max_concurrent_actions: usize,
 }
 
 impl ComplianceChecker {
     pub fn new(
         forbidden: Vec<String>,
         approval_required: Vec<String>,
-        auto_approve: Vec<String>,
-        max_calls_per_second: u64,
-        max_concurrent: usize,
     ) -> Self {
         Self {
             forbidden_commands: forbidden.into_iter().collect(),
             approval_required_tools: approval_required.into_iter().collect(),
-            auto_approve_tools: auto_approve.into_iter().collect(),
-            max_calls_per_second,
-            max_concurrent_actions: max_concurrent,
         }
     }
 
@@ -59,32 +46,30 @@ impl ComplianceChecker {
             approval.push(t.to_string());
         }
 
-        let auto: Vec<String> = vec!["echo".to_string(), "file_read".to_string(),
-            "list_directory".to_string(), "run_tests".to_string()];
-
-        Self::new(forbidden, approval, auto, 10, 5)
+        Self::new(forbidden, approval)
     }
 
     /// 单次合规校验
     pub fn check(&self, action: &Action) -> AgentResult<ComplianceResult> {
-        let action_type = action.action_type.to_lowercase();
+        // 提取 base command，与 is_forbidden()/needs_approval() 保持一致的 split 逻辑
+        let base = action.action_type.split_whitespace().next().unwrap_or(&action.action_type).to_lowercase();
 
         // 检查禁止命令
-        if self.forbidden_commands.contains(&action_type) {
-            warn!(command = %action_type, "blocked forbidden command");
+        if self.is_forbidden(&action.action_type) {
+            warn!(command = %base, "blocked forbidden command");
             return Ok(ComplianceResult {
                 allowed: false,
-                reason: format!("命令 '{}' 被安全策略禁止", action_type),
+                reason: format!("命令 '{}' 被安全策略禁止", base),
             });
         }
 
         // 检查是否需要审批——当前阶段放行，审批逻辑由外部控制
-        if self.approval_required_tools.contains(&action_type) {
+        if self.needs_approval(&action.action_type) {
             // 这里返回 allowed=true 但标记需要审批的信号
             // 实际审批在编排器层面由 loop_engine 的 autonomy level 控制
             return Ok(ComplianceResult {
                 allowed: true,
-                reason: format!("工具 '{}' 需要审批，已放行至下一闸门", action_type),
+                reason: format!("工具 '{}' 需要审批，已放行至下一闸门", base),
             });
         }
 
@@ -116,8 +101,6 @@ mod tests {
         let checker = ComplianceChecker::new(
             vec!["sudo".to_string(), "rm".to_string()],
             vec!["bash".to_string()],
-            vec!["echo".to_string()],
-            10, 5,
         );
         let action = Action::new("sudo", "sudo rm -rf /");
         let result = checker.check(&action).unwrap();
@@ -125,12 +108,10 @@ mod tests {
     }
 
     #[test]
-    fn test_auto_approve_passes() {
+    fn test_default_allow_passes() {
         let checker = ComplianceChecker::new(
             vec!["sudo".to_string()],
             vec![],
-            vec!["echo".to_string()],
-            10, 5,
         );
         let action = Action::new("echo", "echo hello");
         let result = checker.check(&action).unwrap();
@@ -142,8 +123,6 @@ mod tests {
         let checker = ComplianceChecker::new(
             vec![],
             vec!["bash".to_string(), "sh".to_string()],
-            vec![],
-            10, 5,
         );
         assert!(checker.needs_approval("bash -c 'ls'"));
         assert!(!checker.needs_approval("echo hello"));
@@ -154,8 +133,6 @@ mod tests {
         let checker = ComplianceChecker::new(
             vec!["sudo".to_string(), "rm".to_string()],
             vec![],
-            vec![],
-            10, 5,
         );
         assert!(checker.is_forbidden("sudo"));
         assert!(!checker.is_forbidden("ls"));
@@ -166,8 +143,6 @@ mod tests {
         let checker = ComplianceChecker::new(
             vec![],
             vec![],
-            vec![],
-            10, 5,
         );
         let action = Action::new("any_command", "anything");
         let result = checker.check(&action).unwrap();
