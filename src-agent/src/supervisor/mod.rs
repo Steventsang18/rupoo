@@ -102,13 +102,15 @@ impl SupervisorImpl {
     }
 
     /// 从 SafetyContext + 默认配置构建
-    pub fn from_safety_ctx(ctx: &crate::safety::SafetyContext) -> Self {
+    pub fn from_safety_ctx(ctx: &crate::safety::SafetyContext) -> AgentResult<Self> {
         let compliance = ComplianceChecker::from_safety_ctx(ctx);
         let confidence = ConfidenceChecker::default();
         let circuit_breaker =
             CircuitBreaker::new(crate::supervisor::circuit_breaker::BreakerConfig::default());
-        let audit_logger = Arc::new(crate::supervisor::audit_logger::SqliteAuditLogger::new());
-        Self::new(compliance, confidence, circuit_breaker, audit_logger)
+        let audit_logger = Arc::new(
+            crate::supervisor::audit_logger::SqliteAuditLogger::new()?,
+        );
+        Ok(Self::new(compliance, confidence, circuit_breaker, audit_logger))
     }
 }
 
@@ -213,7 +215,7 @@ mod integration_tests {
         let compliance = ComplianceChecker::new(vec!["sudo".to_string()], vec![]);
         let confidence = ConfidenceChecker::default();
         let breaker = CircuitBreaker::new(BreakerConfig::default());
-        let audit = Arc::new(SqliteAuditLogger::new());
+        let audit = Arc::new(SqliteAuditLogger::new().unwrap());
         let supervisor = SupervisorImpl::new(compliance, confidence, breaker, audit);
         let action = Action::new("echo", "echo hello");
         let meta = ExecutionMeta::with_confidence(0.95);
@@ -227,7 +229,7 @@ mod integration_tests {
             compliance,
             ConfidenceChecker::default(),
             CircuitBreaker::new(BreakerConfig::default()),
-            Arc::new(SqliteAuditLogger::new()),
+            Arc::new(SqliteAuditLogger::new().unwrap()),
         );
         assert!(supervisor
             .intercept(
@@ -245,7 +247,7 @@ mod integration_tests {
             compliance,
             ConfidenceChecker::default(),
             CircuitBreaker::new(BreakerConfig::default()),
-            Arc::new(SqliteAuditLogger::new()),
+            Arc::new(SqliteAuditLogger::new().unwrap()),
         );
         let meta = ExecutionMeta::with_confidence(0.3);
         assert!(supervisor
@@ -267,7 +269,7 @@ mod integration_tests {
             ComplianceChecker::new(vec![], vec![]),
             ConfidenceChecker::default(),
             breaker,
-            Arc::new(SqliteAuditLogger::new()),
+            Arc::new(SqliteAuditLogger::new().unwrap()),
         );
         assert!(supervisor
             .intercept(

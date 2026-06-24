@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use crate::error::AgentResult;
+use crate::error::{AgentError, AgentResult};
 
 /// 审计事件类型
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -75,13 +75,13 @@ pub struct SqliteAuditLogger {
 }
 
 impl SqliteAuditLogger {
-    pub fn new() -> Self {
+    pub fn new() -> AgentResult<Self> {
         let path = crate::config::rupoo_home().join("agent.db");
         let repo = std::sync::Arc::new(
             crate::db::TaskRepo::new(path.to_str().unwrap_or(":memory:"))
-                .unwrap_or_else(|_| crate::db::TaskRepo::new(":memory:").unwrap()),
+                .map_err(|_| AgentError::Config("无法打开审计日志数据库".to_string()))?,
         );
-        Self { repo }
+        Ok(Self { repo })
     }
 
     pub fn with_repo(repo: std::sync::Arc<crate::db::TaskRepo>) -> Self {
@@ -89,11 +89,6 @@ impl SqliteAuditLogger {
     }
 }
 
-impl Default for SqliteAuditLogger {
-    fn default() -> Self {
-        Self::new()
-    }
-}
 
 #[async_trait]
 impl AuditLogger for SqliteAuditLogger {
