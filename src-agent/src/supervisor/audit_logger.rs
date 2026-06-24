@@ -68,3 +68,94 @@ pub trait AuditLogger: Send + Sync {
     async fn query_blocked(&self, limit: usize) -> AgentResult<Vec<AuditEvent>>;
     async fn count_events(&self) -> AgentResult<usize>;
 }
+
+/// SQLite 实现的审计日志
+pub struct SqliteAuditLogger {
+    repo: std::sync::Arc<crate::db::TaskRepo>,
+}
+
+impl SqliteAuditLogger {
+    pub fn new() -> Self {
+        let path = crate::config::rupoo_home().join("agent.db");
+        let repo = std::sync::Arc::new(
+            crate::db::TaskRepo::new(path.to_str().unwrap_or(":memory:"))
+                .unwrap_or_else(|_| crate::db::TaskRepo::new(":memory:").unwrap()),
+        );
+        Self { repo }
+    }
+
+    pub fn with_repo(repo: std::sync::Arc<crate::db::TaskRepo>) -> Self {
+        Self { repo }
+    }
+}
+
+impl Default for SqliteAuditLogger {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[async_trait]
+impl AuditLogger for SqliteAuditLogger {
+    async fn record(&self, event: AuditEvent) -> AgentResult<()> {
+        let key = format!("audit_{}", event.action_id);
+        let json = serde_json::to_string(&event)?;
+        let key_c = key.clone();
+        let json_c = json.clone();
+        self.repo
+            .with_conn(move |conn| {
+                conn.execute(
+                    "INSERT INTO settings (key, value) VALUES (?1, ?2)
+                     ON CONFLICT(key) DO UPDATE SET value = ?2",
+                    rusqlite::params![key_c, json_c],
+                )?;
+                Ok(())
+            })
+            .await
+    }
+
+    async fn query_by_type(
+        &self,
+        event_type: AuditEventType,
+        limit: usize,
+    ) -> AgentResult<Vec<AuditEvent>> {
+        let all = self.repo.list_settings().await?;
+        let mut events = Vec::new();
+        for (key, val) in &all {
+            if key.starts_with("audit_") {
+                if let Ok(event) = serde_json::from_str::<AuditEvent>(val) {
+                    if event.event_type == event_type {
+                        events.push(event);
+                        if events.len() >= limit {
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        Ok(events)
+    }
+
+    async fn query_blocked(&self, limit: usize) -> AgentResult<Vec<AuditEvent>> {
+        let all = self.repo.list_settings().await?;
+        let mut events = Vec::new();
+        for (key, val) in &all {
+            if key.starts_with("audit_") {
+                if let Ok(event) = serde_json::from_str::<AuditEvent>(val) {
+                    if event.result == AuditResult::Blocked {
+                        events.push(event);
+                        if events.len() >= limit {
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        Ok(events)
+    }
+
+    async fn count_events(&self) -> AgentResult<usize> {
+        let all = self.repo.list_settings().await?;
+        Ok(all.iter().filter(|(k, _)| k.starts_with("audit_")).count())
+    }
+}
