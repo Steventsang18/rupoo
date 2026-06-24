@@ -24,32 +24,6 @@
 //! Combined Results (RRF ranking)
 //! ```
 //!
-//! # Usage
-//!
-//! ```rust,no_run
-//! # use rupoo::memory::MemoryStore;
-//! # use rupoo::db::TaskRepo;
-//! # use rupoo::embedding::EmbeddingService;
-//! # use rupoo::memory::HybridSearchConfig;
-//! # use std::sync::Arc;
-//! # async fn example() -> anyhow::Result<()> {
-//! # let repo = Arc::new(TaskRepo::new(":memory:")?);
-//! # let embedding_service: Option<Arc<EmbeddingService>> = None;
-//! // Create memory store with hybrid search
-//! let memory = MemoryStore::with_hybrid_search(
-//!     repo,
-//!     embedding_service,
-//!     HybridSearchConfig::default(),
-//! ).await;
-//!
-//! // Store memory (auto-generates embedding)
-//! memory.remember("User prefers Rust", &["preference"]).await?;
-//!
-//! // Search with hybrid ranking
-//! let results = memory.recall("programming language", 10).await?;
-//! # Ok(())
-//! # }
-//! ```
 
 use std::collections::HashMap;
 use std::sync::Arc;
