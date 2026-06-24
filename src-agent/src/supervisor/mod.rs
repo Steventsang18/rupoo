@@ -4,7 +4,7 @@ pub mod confidence;
 pub mod circuit_breaker;
 
 #[cfg(test)]
-pub mod test_data_types;
+mod test_data_types;
 
 use async_trait::async_trait;
 use crate::error::AgentResult;
@@ -29,6 +29,7 @@ impl Action {
         }
     }
 
+    #[must_use]
     pub fn with_payload(mut self, payload: serde_json::Value) -> Self {
         self.payload = payload;
         self
@@ -44,6 +45,7 @@ pub struct ExecutionMeta {
 }
 
 impl ExecutionMeta {
+    #[must_use]
     pub fn with_confidence(confidence: f64) -> Self {
         Self {
             confidence: Some(confidence),
@@ -51,19 +53,13 @@ impl ExecutionMeta {
         }
     }
 
+    #[must_use]
     pub fn with_tool(name: &str) -> Self {
         Self {
             tool_name: Some(name.to_string()),
             ..Default::default()
         }
     }
-}
-
-/// 合规校验结果
-#[derive(Debug, Clone)]
-pub struct ComplianceResult {
-    pub allowed: bool,
-    pub reason: String,
 }
 
 /// 监督层 Trait——三道闸门串行拦截
