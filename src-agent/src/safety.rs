@@ -428,6 +428,11 @@ impl SafetyContext {
         }
     }
 
+    /// Export forbidden commands as a Vec for use in compliance checking.
+    pub fn forbidden_commands(&self) -> Vec<String> {
+        self.forbidden_commands.iter().cloned().collect()
+    }
+
     /// Check if a tool call requires user approval before execution.
     ///
     /// Returns `true` for high-risk operations (file deletion, network calls
