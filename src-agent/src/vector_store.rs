@@ -1,38 +1,35 @@
 //! Vector store for semantic memory search.
 //!
-//! This module provides hybrid search combining:
-//! - FTS5 keyword search (existing)
-//! - Vector semantic search (planned)
+//! This module provides a flat, in-memory embedding store backed by:
+//! - An `IndexMap<String, VectorMemoryDoc>` for O(1) document lookup with
+//!   stable iteration order (ensuring the embedding flat array stays
+//!   in sync with document indices).
+//! - A `Vec<f32>` flattened embedding array, where document `i` occupies
+//!   indices `[i * embedding_dim .. (i+1) * embedding_dim)`.
 //!
-//! # Architecture
+//! # Search Algorithm
 //!
-//! ```text
-//! User Query
-//!     |
-//!     +---> FTS5 Search (keyword matching)
-//!     |         |
-//!     |         +---> Exact matches, keyword hits
-//!     |
-//!     +---> Vector Search (semantic) [TODO]
-//!               |
-//!               +---> Similar meanings, intent understanding
+//! `semantic_search()` performs **O(n) brute-force cosine similarity** over
+//! every stored embedding. This is acceptable for workloads under ~10,000
+//! entries. Beyond that threshold, you should integrate an ANN index
+//! (e.g., HNSW via the `hnswx` crate, which is reserved as a dependency
+//! but not yet wired in).
 //!
-//! Combined Results (relevance ranking)
-//! ```
+//! # Current Limitations
 //!
-//! # Implementation Status
+//! - No ANN index (search is O(n) linear scan).
+//! - Embeddings must be computed externally and supplied to `insert()`;
+//!   no automatic embedding generation is performed by this module.
+//! - No hybrid scoring with keyword FTS5 is implemented.
 //!
-//! - ✅ VectorStore struct and document types created
-//! - ✅ Basic operations defined
-//! - ⏳ Vector embedding integration (requires LLM provider support)
-//! - ⏳ Hybrid search implementation
+//! # Performance Guidance
 //!
-//! # Next Steps
-//!
-//! 1. Integrate with LLM provider's embedding model
-//! 2. Add automatic embedding generation on memory store
-//! 3. Implement hybrid search combining FTS5 and vector results
+//! | Dataset Size    | Recommended Approach         |
+//! |-----------------|------------------------------|
+//! | < 10,000 docs   | O(n) brute force (current)   |
+//! | > 10,000 docs   | Switch to HNSW / ANN index   |
 
+use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 use tracing::debug;
 
@@ -77,29 +74,26 @@ impl SearchResult {
 
 /// Hybrid vector store combining keyword and semantic search.
 ///
-/// This is a foundation structure for future hybrid search implementation.
-/// Currently, Rupoo uses FTS5 for memory search. Vector search will be
-/// integrated in a future release to enable semantic understanding.
+/// Stores documents in an `IndexMap` for O(1) lookup with stable iteration
+/// order, paired with a flat `Vec<f32>` embedding array. The embedding for
+/// document at position `i` lives at indices
+/// `[i * embedding_dim .. (i+1) * embedding_dim)` so that both structures
+/// stay synchronised.
+///
+/// **Search is O(n) brute-force cosine similarity** — see the module-level
+/// documentation for performance guidance and when to switch to ANN.
 ///
 /// # Usage
 ///
-/// ```rust,no_run
-/// # use rupoo::vector_store::VectorStore;
-/// # use std::sync::Arc;
-/// # async fn example() -> anyhow::Result<()> {
-/// let vector_store = VectorStore::new();
-///
-/// // TODO: Generate embedding using LLM provider
-/// let embedding = llm_client.embed("user query").await?;
-///
-/// // TODO: Perform vector search
-/// let results = vector_store.semantic_search(embedding, 10).await?;
-/// # Ok(())
-/// # }
+/// ```rust
+/// # use rupoo::vector_store::{VectorStore, VectorMemoryDoc};
+/// let mut store = VectorStore::new(384); // 384-dim (all-MiniLM-L6-v2)
+/// assert_eq!(store.len(), 0);
+/// assert!(store.is_empty());
 /// ```
 pub struct VectorStore {
     /// Store documents and their embeddings
-    documents: std::collections::HashMap<String, VectorMemoryDoc>,
+    documents: IndexMap<String, VectorMemoryDoc>,
     /// Store embeddings as flat Vec<f32> arrays
     /// Format: [id1_emb_0, id1_emb_1, ..., id2_emb_0, id2_emb_1, ...]
     embeddings: Vec<f32>,
@@ -116,7 +110,7 @@ impl VectorStore {
     /// - 1536: High-quality models (e.g., text-embedding-3-large)
     pub fn new(embedding_dim: usize) -> Self {
         Self {
-            documents: std::collections::HashMap::new(),
+            documents: IndexMap::new(),
             embeddings: Vec::new(),
             embedding_dim,
         }
@@ -154,15 +148,17 @@ impl VectorStore {
         Ok(())
     }
 
-    /// Search by semantic similarity using cosine similarity.
+    /// Search by semantic similarity using brute-force O(n) cosine similarity.
+    ///
+    /// Every stored embedding is compared to the query. This is a linear
+    /// scan — acceptable for < 10,000 entries, but should be replaced with
+    /// an ANN index (e.g. HNSW via `hnswx`) for larger datasets.
     ///
     /// Returns document IDs with similarity scores sorted by relevance.
     ///
     /// # TODO
     ///
-    /// - Implement efficient similarity search (currently O(n))
-    /// - Consider using approximate nearest neighbor (ANN) algorithms
-    /// - Add hybrid search combining with FTS5 results
+    /// - Add approximate nearest neighbor (ANN) for sub-linear search
     pub async fn semantic_search(
         &self,
         query_embedding: Vec<f32>,
@@ -188,8 +184,8 @@ impl VectorStore {
             // Cosine similarity
             let similarity = self.cosine_similarity(&query_embedding, doc_embedding);
 
-            // Get document ID
-            if let Some((id, _)) = self.documents.iter().nth(i) {
+            // Get document ID (IndexMap guarantees index == position)
+            if let Some((id, _)) = self.documents.get_index(i) {
                 results.push(SearchResult::new(id.clone(), similarity));
             }
         }
@@ -222,13 +218,23 @@ impl VectorStore {
         }
     }
 
-    /// Remove a memory entry from the vector store.
+    /// Remove a memory entry and its embedding from the vector store.
+    ///
+    /// Uses the stable index from `IndexMap` to locate and drain the
+    /// corresponding slice from the flat embedding array, preventing
+    /// memory leaks and phantom search results.
     pub async fn remove(&mut self, id: &str) -> AgentResult<()> {
-        if self.documents.remove(id).is_some() {
-            debug!(id, "memory removed from vector store");
+        if let Some(idx) = self.documents.get_index_of(id) {
+            // shift_remove preserves the order of remaining entries, keeping
+            // the flat embedding array index aligned with document position
+            self.documents.shift_remove(id);
+            let start = idx * self.embedding_dim;
+            let end = start + self.embedding_dim;
+            if end <= self.embeddings.len() {
+                self.embeddings.drain(start..end);
+            }
+            debug!(id, "memory and embedding removed from vector store");
         }
-        // Note: In a production implementation, we would also remove the embedding
-        // For simplicity, we leave orphaned embeddings (they'll be skipped in search)
         Ok(())
     }
 

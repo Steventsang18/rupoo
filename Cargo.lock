@@ -5646,6 +5646,7 @@ dependencies = [
  "futures",
  "git2",
  "hnswx",
+ "indexmap 2.14.0",
  "indicatif",
  "keyring",
  "lru",
