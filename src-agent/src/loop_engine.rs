@@ -719,6 +719,12 @@ impl LoopEngine {
         // This is the core loop. It drives the state machine for a single Loop.
         // Takes `&self` so callers can release their mutex before the long-running await.
 
+        // Check daemon mode at entry — warn if enabled since it's not yet implemented.
+        let loop_config = self.repo.load_loop(loop_id).await?.config;
+        if loop_config.daemon {
+            warn!("守护模式（daemon=true）尚未完全实现，回退到标准循环模式");
+        }
+
         loop {
             // --- Guard checks ---
             if self.is_cancelled() {
@@ -1611,6 +1617,8 @@ Suggested approach: {next_action}"#,
 
     /// Execute plan steps without an Agent reference (for child loops).
     async fn execute_plan_inner(&self, plan: &mut crate::task::Plan) -> AgentResult<()> {
+        warn!("execute_plan_inner: 占位符实现——子循环步骤标记为 Completed 但不实际执行。将在未来版本中委托给 Agent::run_next_step()。");
+
         use crate::task::PlanStatus;
 
         if plan.status == PlanStatus::Pending || plan.status == PlanStatus::Running {
