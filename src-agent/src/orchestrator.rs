@@ -8,6 +8,7 @@ use crate::execution::ExecutionEngine;
 use crate::memory::MemorySystem;
 use crate::planning::{ExecutionPlan, Planner};
 use crate::supervisor::{Action, ExecutionMeta, Supervisor};
+use crate::task::Step;
 
 /// 五层编排器——认知→规划→执行→记忆→监督
 pub struct Orchestrator {
@@ -91,30 +92,60 @@ impl Orchestrator {
         info!("[规划层] {} 个备选方案", fallbacks.len());
 
         // ======== 第3层：执行层——带监督的逐步执行 ========
-        for (i, step) in best_plan.steps.iter().enumerate() {
-            let step_action = Action::new(
-                "execute_step",
-                &format!("step {}/{}", i + 1, best_plan.steps.len()),
-            );
+        let mut plan = best_plan.clone();
+        let mut step_offset = 0;
+
+        while step_offset < plan.steps.len() {
+            let i = step_offset;
+            let step = &plan.steps[i];
+            let step_label = format!("step {}/{}", i + 1, plan.steps.len());
+            let step_action = Action::new("execute_step", &step_label);
             let meta = ExecutionMeta::with_tool(&format!("{:?}", std::mem::discriminant(step)));
 
             // 每步执行前监督拦截
             self.supervisor.intercept(&step_action, &meta).await?;
 
+            // 根据步骤类型提取入参
+            let input_params = match step {
+                Step::ToolCall {
+                    tool_name, params, ..
+                } => {
+                    serde_json::json!({ "tool": tool_name, "params": params })
+                }
+                Step::Exec { command, args, .. } => {
+                    serde_json::json!({ "command": command, "args": args })
+                }
+                Step::HttpRequest { method, url, .. } => {
+                    serde_json::json!({ "method": method, "url": url })
+                }
+                _ => serde_json::json!({}), // Think, WaitForInput, Finish
+            };
+
             // 入参校验
-            let validation = self
-                .execution
-                .validate_input("step", &serde_json::json!({}))
-                .await?;
+            let validation = self.execution.validate_input("step", &input_params).await?;
+
             if validation.trigger_replan {
                 warn!("[执行层] 步骤 {} 入参校验失败，触发重规划", i);
-                // 触发重规划（Phase 3 完整实现）
-                continue;
+
+                // 收集失败步骤信息后重规划
+                let revised = self.planner.generate_alternatives(&goal, 1).await?;
+
+                if let Some(new_plan) = revised.into_iter().next() {
+                    info!("[执行层] 重规划完成，新方案: {}", new_plan.name);
+                    plan = new_plan;
+                    step_offset = 0; // 从头执行新方案
+                    continue;
+                } else {
+                    warn!("[执行层] 重规划失败，跳过当前步骤继续");
+                    step_offset += 1;
+                    continue;
+                }
             }
 
-            info!("[执行层] 执行步骤 {}/{}", i + 1, best_plan.steps.len());
+            info!("[执行层] {} 校验通过", step_label);
             // 实际执行由现存的 Agent::run_next_step 或 ToolExecutor 处理
             // 编排器当前是调度层，实际 step 执行由 agent 完成
+            step_offset += 1;
         }
 
         // ======== 第4层：记忆层——经验沉淀 ========
