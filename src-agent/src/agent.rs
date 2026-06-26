@@ -9,7 +9,7 @@ use crate::db::TaskRepo;
 use crate::embedding::EmbeddingService;
 use crate::error::{AgentError, AgentResult};
 use crate::llm::{AgentEvent, ConversationHistory, LlmGateway, TokenUsage};
-use crate::memory::{HybridSearchConfig, MemoryStore};
+use crate::memory::{HybridSearchConfig, MemoryStore, MemorySystemBridge};
 use crate::memory_cache::MemoryCache;
 use crate::tool_selector::{ToolRegistry, ToolUsageTracker};
 
@@ -134,6 +134,8 @@ pub struct Agent {
     /// Loop engine for adaptive iterative execution (Loop Engineering).
     /// Shared via Arc so the lock can be released before long-running awaits.
     pub loop_engine: Option<std::sync::Arc<crate::loop_engine::LoopEngine>>,
+    /// Trait-based memory system bridge (shared with Orchestrator).
+    pub memory_system: std::sync::Arc<MemorySystemBridge>,
 }
 
 // ---------------------------------------------------------------------------
@@ -258,6 +260,7 @@ impl Agent {
             Arc::clone(&memory_cache),
             SafetyContext::default(),
         )));
+        let memory_system = std::sync::Arc::new(MemorySystemBridge::new(Arc::clone(&repo)));
         Self {
             repo,
             memory_cache,
@@ -277,6 +280,7 @@ impl Agent {
             tool_registry,
             tool_usage_tracker,
             loop_engine,
+            memory_system,
         }
     }
 
@@ -734,6 +738,7 @@ impl Agent {
             tool_registry: ToolRegistry::new(),
             tool_usage_tracker: Arc::clone(&self.tool_usage_tracker),
             loop_engine: None, // child agents share parent's engine via Arc
+            memory_system: std::sync::Arc::clone(&self.memory_system),
         })
     }
 
