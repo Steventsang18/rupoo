@@ -144,6 +144,35 @@ impl Default for SafetyContext {
 }
 
 impl SafetyContext {
+    /// Create a SafetyContext from configuration, merging with built-in defaults.
+    ///
+    /// Config values extend (not replace) the hardcoded defaults, so removing a
+    /// default-forbidden command requires an explicit allowlist (future feature).
+    pub fn from_config(config: &crate::config::RupooConfig) -> Self {
+        let mut ctx = SafetyContext::default();
+
+        // Extend forbidden commands from config (additive only)
+        for cmd in &config.safety.forbidden_commands {
+            if !cmd.is_empty() {
+                ctx.forbidden_commands.insert(cmd.to_lowercase());
+            }
+        }
+
+        // Use config's jail_root if explicitly set (overrides default ".")
+        if config.safety.jail_root != "." && !config.safety.jail_root.is_empty() {
+            if let Ok(root) = std::fs::canonicalize(&config.safety.jail_root) {
+                ctx.allowed_paths.insert(0, root);
+            }
+        }
+
+        // Extend auto-approve tools from config
+        for tool in &config.safety.auto_approve_tools {
+            ctx.auto_approve_tools.insert(tool.to_string());
+        }
+
+        ctx
+    }
+
     /// Check if a command is allowed to run.
     ///
     /// Returns `Ok(())` if the command is safe, or `Err` with a description
