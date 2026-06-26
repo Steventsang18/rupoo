@@ -6,7 +6,7 @@ Rupoo is a terminal-based AI assistant with a native REPL interface, featuring s
 
 ```
 Version:   0.5.0          Language: Rust 2021
-Lines:     ~28,000        Tests:    178 ✅
+Lines:     ~46,000        Tests:    231 ✅
 Interface: Native REPL    LLM:      Anthropic / OpenAI / DeepSeek / Ollama
 DB:        SQLite (FTS5)  Memory:   Hybrid Search (FTS5 + Vector)
 Safety:    path_jail sandbox + SSRF protection

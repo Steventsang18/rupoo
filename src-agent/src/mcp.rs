@@ -38,11 +38,15 @@ fn extract_mcp_result(value: &serde_json::Value) -> McpToolResult {
     }
 
     // Check for success field
-    let success = value.get("success").and_then(|v| v.as_bool()).unwrap_or(true);
-    
+    let success = value
+        .get("success")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true);
+
     if !success {
         // Error case
-        let error = value.get("error")
+        let error = value
+            .get("error")
             .and_then(|v| v.as_str())
             .unwrap_or("tool execution failed")
             .to_string();
@@ -67,7 +71,8 @@ fn extract_mcp_result(value: &serde_json::Value) -> McpToolResult {
         stdout.to_string()
     } else if let Some(entries) = value.get("entries").and_then(|v| v.as_array()) {
         // ListDirOutput - format entries
-        entries.iter()
+        entries
+            .iter()
             .filter_map(|e| {
                 let name = e.get("name")?.as_str()?;
                 let kind = e.get("kind")?.as_str()?;
@@ -106,12 +111,14 @@ where
     async fn execute_json(&self, params: serde_json::Value) -> Result<serde_json::Value, String> {
         let args: T::Args = serde_json::from_value(params)
             .map_err(|e| format!("failed to deserialize args: {}", e))?;
-        
-        let output = self.0.call(args).await
+
+        let output = self
+            .0
+            .call(args)
+            .await
             .map_err(|e| format!("tool execution failed: {}", e))?;
-        
-        serde_json::to_value(output)
-            .map_err(|e| format!("failed to serialize output: {}", e))
+
+        serde_json::to_value(output).map_err(|e| format!("failed to serialize output: {}", e))
     }
 }
 
@@ -182,9 +189,18 @@ impl McpToolExecutor {
         // File tools with optional jail
         match jail_root {
             Some(ref root) => {
-                register!("file_read", crate::rig_tools::FileReadTool::with_jail(root.clone()));
-                register!("file_write", crate::rig_tools::FileWriteTool::with_jail(root.clone()));
-                register!("list_directory", crate::rig_tools::ListDirTool::with_jail(root.clone()));
+                register!(
+                    "file_read",
+                    crate::rig_tools::FileReadTool::with_jail(root.clone())
+                );
+                register!(
+                    "file_write",
+                    crate::rig_tools::FileWriteTool::with_jail(root.clone())
+                );
+                register!(
+                    "list_directory",
+                    crate::rig_tools::ListDirTool::with_jail(root.clone())
+                );
             }
             None => {
                 register!("file_read", crate::rig_tools::FileReadTool::new());

@@ -9,9 +9,9 @@
 //!
 //! Note: Some functions are reserved for future use and may not be currently active.
 
+use super::theme;
 use console::Term;
 use owo_colors::OwoColorize;
-use super::theme;
 
 fn terminal_width() -> usize {
     Term::stdout().size().1 as usize

@@ -79,7 +79,9 @@ impl CircuitBreaker {
 
         // 清理超过 1 秒的时间戳
         let now = Instant::now();
-        inner.call_timestamps.retain(|t| now.duration_since(*t) < Duration::from_secs(1));
+        inner
+            .call_timestamps
+            .retain(|t| now.duration_since(*t) < Duration::from_secs(1));
 
         // 频率限制
         if inner.call_timestamps.len() as u64 >= self.config.max_rate_per_sec {

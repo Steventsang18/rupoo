@@ -88,28 +88,50 @@ impl Default for SafetyContext {
     fn default() -> Self {
         Self {
             forbidden_commands: [
-                "sudo", "su", "passwd", "mkfs", "fdisk", "dd", "format",
-                "shutdown", "reboot", "halt", "poweroff",
-                "iptables", "ufw", "mount", "umount",
-                "chown", "chmod", "chattr", "kill", "killall", "pkill",
-                "rm",
+                "sudo", "su", "passwd", "mkfs", "fdisk", "dd", "format", "shutdown", "reboot",
+                "halt", "poweroff", "iptables", "ufw", "mount", "umount", "chown", "chmod",
+                "chattr", "kill", "killall", "pkill", "rm",
             ]
             .iter()
             .map(|s| s.to_string())
             .collect(),
             approval_required_tools: [
-                "delete_file", "rm", "remove", "exec", "run_command",
-                "bash", "sh", "zsh", "dash", "ksh", "csh", "fish", "shell",
-                "sudo", "reboot", "shutdown",
-                "http_delete", "http_post",
-                "python", "python3", "perl", "ruby", "node", "lua",
+                "delete_file",
+                "rm",
+                "remove",
+                "exec",
+                "run_command",
+                "bash",
+                "sh",
+                "zsh",
+                "dash",
+                "ksh",
+                "csh",
+                "fish",
+                "shell",
+                "sudo",
+                "reboot",
+                "shutdown",
+                "http_delete",
+                "http_post",
+                "python",
+                "python3",
+                "perl",
+                "ruby",
+                "node",
+                "lua",
             ]
             .iter()
             .map(|s| s.to_string())
             .collect(),
             auto_approve_tools: [
-                "echo", "file_read", "list_directory", "run_tests",
-                "check_output", "diff_check", "web_search",
+                "echo",
+                "file_read",
+                "list_directory",
+                "run_tests",
+                "check_output",
+                "diff_check",
+                "web_search",
             ]
             .iter()
             .map(|s| s.to_string())

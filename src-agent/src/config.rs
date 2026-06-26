@@ -29,8 +29,7 @@ pub fn rupoo_home() -> PathBuf {
     if let Ok(home) = std::env::var("RUPOO_HOME") {
         return PathBuf::from(home);
     }
-    let home = std::env::var("HOME")
-        .unwrap_or_else(|_| ".".to_string());
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
     PathBuf::from(home).join(".rupoo")
 }
 
@@ -38,7 +37,7 @@ pub fn rupoo_home() -> PathBuf {
 // Top-level config schema
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct RupooConfig {
     #[serde(default)]
     pub llm: LlmSection,
@@ -52,19 +51,6 @@ pub struct RupooConfig {
     pub mcp: McpSection,
     #[serde(default)]
     pub confidence: ConfidenceConfig,
-}
-
-impl Default for RupooConfig {
-    fn default() -> Self {
-        Self {
-            llm: LlmSection::default(),
-            safety: SafetySection::default(),
-            shell: ShellSection::default(),
-            memory: MemorySection::default(),
-            mcp: McpSection::default(),
-            confidence: ConfidenceConfig::default(),
-        }
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -91,24 +77,36 @@ fn default_active_provider() -> String {
 impl Default for LlmSection {
     fn default() -> Self {
         let mut providers = HashMap::new();
-        providers.insert("ollama".into(), ProviderConfig {
-            base_url: Some("http://localhost:11434".into()),
-            model: Some("qwen2.5-coder:7b".into()),
-            ..ProviderConfig::default()
-        });
-        providers.insert("deepseek".into(), ProviderConfig {
-            base_url: Some("https://api.deepseek.com".into()),
-            model: Some("deepseek-chat".into()),
-            ..ProviderConfig::default()
-        });
-        providers.insert("openai".into(), ProviderConfig {
-            model: Some("gpt-4o".into()),
-            ..ProviderConfig::default()
-        });
-        providers.insert("anthropic".into(), ProviderConfig {
-            model: Some("claude-sonnet-4-20250514".into()),
-            ..ProviderConfig::default()
-        });
+        providers.insert(
+            "ollama".into(),
+            ProviderConfig {
+                base_url: Some("http://localhost:11434".into()),
+                model: Some("qwen2.5-coder:7b".into()),
+                ..ProviderConfig::default()
+            },
+        );
+        providers.insert(
+            "deepseek".into(),
+            ProviderConfig {
+                base_url: Some("https://api.deepseek.com".into()),
+                model: Some("deepseek-chat".into()),
+                ..ProviderConfig::default()
+            },
+        );
+        providers.insert(
+            "openai".into(),
+            ProviderConfig {
+                model: Some("gpt-4o".into()),
+                ..ProviderConfig::default()
+            },
+        );
+        providers.insert(
+            "anthropic".into(),
+            ProviderConfig {
+                model: Some("claude-sonnet-4-20250514".into()),
+                ..ProviderConfig::default()
+            },
+        );
         Self {
             active_provider: default_active_provider(),
             fallback_provider: Some("ollama".into()),
@@ -149,8 +147,12 @@ impl Default for ProviderConfig {
     }
 }
 
-fn default_max_tokens() -> u32 { 2048 }
-fn default_temperature() -> f64 { 0.7 }
+fn default_max_tokens() -> u32 {
+    2048
+}
+fn default_temperature() -> f64 {
+    0.7
+}
 
 // ---------------------------------------------------------------------------
 // Safety section
@@ -179,10 +181,18 @@ impl Default for SafetySection {
     }
 }
 
-fn default_jail_root() -> String { ".".into() }
-fn default_approval_policy() -> String { "dangerous_only".into() }
-fn default_forbidden_commands() -> Vec<String> { vec![] }
-fn default_auto_approve_tools() -> Vec<String> { vec![] }
+fn default_jail_root() -> String {
+    ".".into()
+}
+fn default_approval_policy() -> String {
+    "dangerous_only".into()
+}
+fn default_forbidden_commands() -> Vec<String> {
+    vec![]
+}
+fn default_auto_approve_tools() -> Vec<String> {
+    vec![]
+}
 
 // ---------------------------------------------------------------------------
 // Confidence section
@@ -199,8 +209,12 @@ pub struct ConfidenceConfig {
     pub pause_on_low_confidence: bool,
 }
 
-fn default_confidence_threshold() -> f64 { 0.7 }
-fn default_pause_on_low_confidence() -> bool { true }
+fn default_confidence_threshold() -> f64 {
+    0.7
+}
+fn default_pause_on_low_confidence() -> bool {
+    true
+}
 
 impl Default for ConfidenceConfig {
     fn default() -> Self {
@@ -232,8 +246,12 @@ impl Default for ShellSection {
     }
 }
 
-fn default_timeout() -> u64 { 30 }
-fn default_max_output_bytes() -> usize { 10240 }
+fn default_timeout() -> u64 {
+    30
+}
+fn default_max_output_bytes() -> usize {
+    10240
+}
 
 // ---------------------------------------------------------------------------
 // Memory section
@@ -256,27 +274,23 @@ impl Default for MemorySection {
     }
 }
 
-fn default_max_entries() -> usize { 10000 }
-fn default_ttl_days() -> u64 { 90 }
+fn default_max_entries() -> usize {
+    10000
+}
+fn default_ttl_days() -> u64 {
+    90
+}
 
 // ---------------------------------------------------------------------------
 // MCP section
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct McpSection {
     /// External MCP servers to connect as client.
     /// Key: server name, Value: command to start the server.
     #[serde(default)]
     pub servers: HashMap<String, McpServerConfig>,
-}
-
-impl Default for McpSection {
-    fn default() -> Self {
-        Self {
-            servers: HashMap::new(),
-        }
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -403,8 +417,7 @@ impl CredentialsFile {
             let _ = std::fs::set_permissions(&path, perms);
         }
 
-        toml::from_str(&content)
-            .map_err(|e| AgentError::Config(format!("parse credentials: {e}")))
+        toml::from_str(&content).map_err(|e| AgentError::Config(format!("parse credentials: {e}")))
     }
 
     /// Save credentials to `RUPOO_HOME/credentials.toml` with 0600 permissions.
@@ -527,7 +540,9 @@ pub async fn migrate_from_db(repo: &crate::db::TaskRepo) -> AgentResult<()> {
     for provider in &["anthropic", "openai", "deepseek", "ollama"] {
         let key_name = format!("model.{}", provider);
         if let Ok(Some(model)) = repo.get_setting(&key_name).await {
-            let pc = config.llm.providers
+            let pc = config
+                .llm
+                .providers
                 .entry(provider.to_string())
                 .or_default();
             pc.model = Some(model);
@@ -539,7 +554,9 @@ pub async fn migrate_from_db(repo: &crate::db::TaskRepo) -> AgentResult<()> {
     for provider in &["anthropic", "openai", "deepseek", "ollama"] {
         let key_name = format!("base_url.{}", provider);
         if let Ok(Some(base_url)) = repo.get_setting(&key_name).await {
-            let pc = config.llm.providers
+            let pc = config
+                .llm
+                .providers
                 .entry(provider.to_string())
                 .or_default();
             pc.base_url = Some(base_url);

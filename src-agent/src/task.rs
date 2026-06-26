@@ -140,14 +140,48 @@ impl Step {
     /// Used by record_step_completion to persist step outputs into steps_json.
     pub fn set_output_from_string(&mut self, output: Option<String>) {
         match (self, output) {
-            (Step::Think { output: ref mut out, .. }, Some(val)) => *out = Some(val),
-            (Step::Exec { output: ref mut out, .. }, Some(val)) => *out = Some(val),
-            (Step::BrowserAction { output: ref mut out, .. }, Some(val)) => *out = Some(val),
-            (Step::ToolCall { result: ref mut res, .. }, Some(val)) => {
-                *res = serde_json::from_str(&val).ok()
-            }
-            (Step::HttpRequest { response: ref mut resp, .. }, Some(val)) => *resp = Some(val),
-            (Step::WaitForInput { response: ref mut resp, .. }, Some(val)) => *resp = Some(val),
+            (
+                Step::Think {
+                    output: ref mut out,
+                    ..
+                },
+                Some(val),
+            ) => *out = Some(val),
+            (
+                Step::Exec {
+                    output: ref mut out,
+                    ..
+                },
+                Some(val),
+            ) => *out = Some(val),
+            (
+                Step::BrowserAction {
+                    output: ref mut out,
+                    ..
+                },
+                Some(val),
+            ) => *out = Some(val),
+            (
+                Step::ToolCall {
+                    result: ref mut res,
+                    ..
+                },
+                Some(val),
+            ) => *res = serde_json::from_str(&val).ok(),
+            (
+                Step::HttpRequest {
+                    response: ref mut resp,
+                    ..
+                },
+                Some(val),
+            ) => *resp = Some(val),
+            (
+                Step::WaitForInput {
+                    response: ref mut resp,
+                    ..
+                },
+                Some(val),
+            ) => *resp = Some(val),
             _ => {} // Finish has no output field
         }
     }

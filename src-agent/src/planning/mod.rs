@@ -1,11 +1,11 @@
 pub mod planner;
 pub mod scorer;
 
-use async_trait::async_trait;
-use serde::{Deserialize, Serialize};
 use crate::cognitive::goal::AgentGoal;
 use crate::error::AgentResult;
 use crate::task::Step;
+use async_trait::async_trait;
+use serde::{Deserialize, Serialize};
 
 /// 执行方案（带量化数据）
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -101,7 +101,10 @@ pub async fn build_engine(
                 agent = agent.with_embedding_service(svc);
             }
             Err(e) => {
-                info!("embedding service not available: {} (vector search disabled)", e);
+                info!(
+                    "embedding service not available: {} (vector search disabled)",
+                    e
+                );
             }
         }
     }

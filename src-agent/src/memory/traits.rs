@@ -1,6 +1,6 @@
-use async_trait::async_trait;
 use crate::error::AgentResult;
 use crate::task::MemoryEntry;
+use async_trait::async_trait;
 
 /// 可插拔存储单元
 #[async_trait]

@@ -1,14 +1,14 @@
 //! Memory layer: traits, implementations, and legacy hybrid-search store.
 
+pub mod episodic;
+pub mod long_term;
+pub mod short_term;
 pub mod store;
 pub mod traits;
-pub mod short_term;
-pub mod long_term;
-pub mod episodic;
 
 // Re-export new trait types
-pub use traits::{MemoryStorage, MemorySystem};
 pub use short_term::ShortTermMemory;
+pub use traits::{MemoryStorage, MemorySystem};
 
 // Re-export legacy store types (backward compatibility)
 pub use store::{HybridSearchConfig, MemoryStore};

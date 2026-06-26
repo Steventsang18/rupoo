@@ -154,7 +154,10 @@ impl Tool for RunTestsTool {
                         success: false,
                         output: String::new(),
                         test_runner: runner.into(),
-                        error: Some(format!("Test runner timed out after {} seconds", TEST_TIMEOUT_SECS)),
+                        error: Some(format!(
+                            "Test runner timed out after {} seconds",
+                            TEST_TIMEOUT_SECS
+                        )),
                     })
                 }
                 Ok(Err(e)) => Ok(RunTestsOutput {
@@ -225,7 +228,10 @@ impl Tool for CheckOutputTool {
            + WasmCompatSend
            + WasmCompatSync {
         async move {
-            let timeout_secs = args.timeout.unwrap_or(CHECK_OUTPUT_TIMEOUT_MIN).min(CHECK_OUTPUT_TIMEOUT_MAX);
+            let timeout_secs = args
+                .timeout
+                .unwrap_or(CHECK_OUTPUT_TIMEOUT_MIN)
+                .min(CHECK_OUTPUT_TIMEOUT_MAX);
             let safety = crate::safety::SafetyContext::default();
 
             // Safety check: block dangerous commands

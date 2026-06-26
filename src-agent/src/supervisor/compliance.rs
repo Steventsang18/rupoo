@@ -21,10 +21,7 @@ pub struct ComplianceChecker {
 }
 
 impl ComplianceChecker {
-    pub fn new(
-        forbidden: Vec<String>,
-        approval_required: Vec<String>,
-    ) -> Self {
+    pub fn new(forbidden: Vec<String>, approval_required: Vec<String>) -> Self {
         Self {
             forbidden_commands: forbidden.into_iter().collect(),
             approval_required_tools: approval_required.into_iter().collect(),
@@ -40,9 +37,26 @@ impl ComplianceChecker {
         // needs_approval 使用字符串匹配，这里提取所有审批需要的工具前缀
         let mut approval: Vec<String> = Vec::new();
         // 常用的审批工具列表
-        for t in &["delete_file", "rm", "remove", "exec", "run_command",
-            "bash", "sh", "zsh", "sudo", "reboot", "shutdown",
-            "http_delete", "http_post", "python", "python3", "perl", "ruby", "node"] {
+        for t in &[
+            "delete_file",
+            "rm",
+            "remove",
+            "exec",
+            "run_command",
+            "bash",
+            "sh",
+            "zsh",
+            "sudo",
+            "reboot",
+            "shutdown",
+            "http_delete",
+            "http_post",
+            "python",
+            "python3",
+            "perl",
+            "ruby",
+            "node",
+        ] {
             approval.push(t.to_string());
         }
 
@@ -52,7 +66,12 @@ impl ComplianceChecker {
     /// 单次合规校验
     pub fn check(&self, action: &Action) -> AgentResult<ComplianceResult> {
         // 提取 base command，与 is_forbidden()/needs_approval() 保持一致的 split 逻辑
-        let base = action.action_type.split_whitespace().next().unwrap_or(&action.action_type).to_lowercase();
+        let base = action
+            .action_type
+            .split_whitespace()
+            .next()
+            .unwrap_or(&action.action_type)
+            .to_lowercase();
 
         // 检查禁止命令
         if self.is_forbidden(&action.action_type) {
@@ -81,12 +100,20 @@ impl ComplianceChecker {
 
     /// 检查命令是否在禁止列表中（供 SafetyContext 调用）
     pub fn is_forbidden(&self, command: &str) -> bool {
-        let base = command.split_whitespace().next().unwrap_or(command).to_lowercase();
+        let base = command
+            .split_whitespace()
+            .next()
+            .unwrap_or(command)
+            .to_lowercase();
         self.forbidden_commands.contains(&base)
     }
 
     pub fn needs_approval(&self, tool_name: &str) -> bool {
-        let lower = tool_name.split_whitespace().next().unwrap_or(tool_name).to_lowercase();
+        let lower = tool_name
+            .split_whitespace()
+            .next()
+            .unwrap_or(tool_name)
+            .to_lowercase();
         self.approval_required_tools.contains(&lower)
     }
 }
@@ -109,10 +136,7 @@ mod tests {
 
     #[test]
     fn test_default_allow_passes() {
-        let checker = ComplianceChecker::new(
-            vec!["sudo".to_string()],
-            vec![],
-        );
+        let checker = ComplianceChecker::new(vec!["sudo".to_string()], vec![]);
         let action = Action::new("echo", "echo hello");
         let result = checker.check(&action).unwrap();
         assert!(result.allowed);
@@ -120,30 +144,21 @@ mod tests {
 
     #[test]
     fn test_needs_approval_returns_true() {
-        let checker = ComplianceChecker::new(
-            vec![],
-            vec!["bash".to_string(), "sh".to_string()],
-        );
+        let checker = ComplianceChecker::new(vec![], vec!["bash".to_string(), "sh".to_string()]);
         assert!(checker.needs_approval("bash -c 'ls'"));
         assert!(!checker.needs_approval("echo hello"));
     }
 
     #[test]
     fn test_is_forbidden() {
-        let checker = ComplianceChecker::new(
-            vec!["sudo".to_string(), "rm".to_string()],
-            vec![],
-        );
+        let checker = ComplianceChecker::new(vec!["sudo".to_string(), "rm".to_string()], vec![]);
         assert!(checker.is_forbidden("sudo"));
         assert!(!checker.is_forbidden("ls"));
     }
 
     #[test]
     fn test_empty_forbidden_allows_all() {
-        let checker = ComplianceChecker::new(
-            vec![],
-            vec![],
-        );
+        let checker = ComplianceChecker::new(vec![], vec![]);
         let action = Action::new("any_command", "anything");
         let result = checker.check(&action).unwrap();
         assert!(result.allowed);

@@ -136,7 +136,10 @@ impl MockLlmAgent {
 #[async_trait]
 impl LlmAgent for MockLlmAgent {
     async fn chat(&self, _history: &ConversationHistory) -> AgentResult<(String, TokenUsage)> {
-        let mut index = self.response_index.lock().expect("MockLlmAgent response_index lock poisoned");
+        let mut index = self
+            .response_index
+            .lock()
+            .expect("MockLlmAgent response_index lock poisoned");
         let response = if self.responses.is_empty() {
             "Mock response".to_string()
         } else {
@@ -203,7 +206,10 @@ impl LlmGatewayBackend for MockLlmGateway {
         _plan: &str,
         _history: Option<&ConversationHistory>,
     ) -> AgentResult<String> {
-        let mut index = self.response_index.lock().expect("MockLlmGateway response_index lock poisoned");
+        let mut index = self
+            .response_index
+            .lock()
+            .expect("MockLlmGateway response_index lock poisoned");
         let response = if self.responses.is_empty() {
             "Mock plan response".to_string()
         } else {
@@ -215,7 +221,10 @@ impl LlmGatewayBackend for MockLlmGateway {
     }
 
     async fn generate(&self, _context: &str) -> AgentResult<String> {
-        let mut index = self.response_index.lock().expect("MockLlmGateway response_index lock poisoned");
+        let mut index = self
+            .response_index
+            .lock()
+            .expect("MockLlmGateway response_index lock poisoned");
         let response = if self.responses.is_empty() {
             "Mock generation response".to_string()
         } else {

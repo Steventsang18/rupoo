@@ -168,10 +168,7 @@ pub enum AgentError {
 
     // --- Supervisor errors ---
     #[error("Low confidence: {confidence} (threshold: {threshold})")]
-    LowConfidence {
-        confidence: f64,
-        threshold: f64,
-    },
+    LowConfidence { confidence: f64, threshold: f64 },
 
     // --- Circuit breaker ---
     #[error("Circuit breaker is open: {reason}")]
@@ -271,15 +268,24 @@ impl AgentError {
             AgentError::MemoryDisabled => "记忆功能已禁用，请使用 /memory on 启用".to_string(),
             AgentError::Memory(e) => format!("记忆操作失败: {}", e),
             AgentError::Keyring(e) => format!("密钥环操作失败: {}", e),
-            AgentError::LowConfidence { confidence, threshold } => {
+            AgentError::LowConfidence {
+                confidence,
+                threshold,
+            } => {
                 format!(
                     "推理置信度过低 ({:.1}%)，低于最低要求 ({:.1}%)，已暂停执行",
                     confidence * 100.0,
                     threshold * 100.0,
                 )
             }
-            AgentError::CircuitBreakerOpen { reason, retry_after_secs } => {
-                format!("系统熔断器已触发：{}，请等待 {} 秒后重试", reason, retry_after_secs)
+            AgentError::CircuitBreakerOpen {
+                reason,
+                retry_after_secs,
+            } => {
+                format!(
+                    "系统熔断器已触发：{}，请等待 {} 秒后重试",
+                    reason, retry_after_secs
+                )
             }
             AgentError::Other(e) => e.clone(),
         }

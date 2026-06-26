@@ -45,7 +45,7 @@ impl AppState {
         let cwd = std::env::current_dir()
             .map(|p| p.to_string_lossy().to_string())
             .unwrap_or_else(|_| ".".into());
-        
+
         let layout_config = LayoutConfig {
             explorer_width: 240.0,
             chat_width: 360.0,
@@ -56,7 +56,7 @@ impl AppState {
             window_width: 1200,
             window_height: 800,
         };
-        
+
         Self {
             initialized: Mutex::new(false),
             workspace_root: Mutex::new(cwd),
@@ -185,7 +185,9 @@ const CACHE_TTL_SECONDS: u64 = 300;
 // ============================================================
 
 fn now_iso() -> String {
-    chrono::Local::now().format("%Y-%m-%d %H:%M:%S%.3f").to_string()
+    chrono::Local::now()
+        .format("%Y-%m-%d %H:%M:%S%.3f")
+        .to_string()
 }
 
 fn now_ms() -> u64 {
@@ -207,14 +209,14 @@ fn emit_log(app: &tauri::AppHandle, level: &str, category: &str, message: &str, 
         detail: detail.to_string(),
         timestamp: now_iso(),
     };
-    
+
     let state = app.state::<AppState>();
     let mut logs = state.recent_logs.write().unwrap();
     logs.push_back(entry.clone());
     if logs.len() > MAX_LOG_ENTRIES {
         logs.pop_front();
     }
-    
+
     let _ = app.emit(
         "log-event",
         serde_json::json!({
@@ -227,38 +229,66 @@ fn emit_log(app: &tauri::AppHandle, level: &str, category: &str, message: &str, 
     );
 }
 
-fn emit_tool_log(app: &tauri::AppHandle, tool_name: &str, params: &str, result: &str, elapsed_ms: u64) {
+fn emit_tool_log(
+    app: &tauri::AppHandle,
+    tool_name: &str,
+    params: &str,
+    result: &str,
+    elapsed_ms: u64,
+) {
     let detail = serde_json::json!({
         "tool": tool_name,
         "params": params,
         "result": result.trim(),
         "elapsed_ms": elapsed_ms
-    }).to_string();
-    emit_log(app, "info", "tool", &format!("Tool call: {}", tool_name), &detail);
+    })
+    .to_string();
+    emit_log(
+        app,
+        "info",
+        "tool",
+        &format!("Tool call: {}", tool_name),
+        &detail,
+    );
 }
 
 fn emit_file_log(app: &tauri::AppHandle, action: &str, path: &str, success: bool, detail: &str) {
     let level = if success { "info" } else { "error" };
-    emit_log(app, level, "file", &format!("[file] {} {}", action, path), detail);
+    emit_log(
+        app,
+        level,
+        "file",
+        &format!("[file] {} {}", action, path),
+        detail,
+    );
 }
 
 // ============================================================
 // Ignore patterns for file tree
 // ============================================================
 
-const IGNORE_PATTERNS: &[&str] = &["target", "node_modules", ".git", "dist", "build", ".idea", "*.log"];
+const IGNORE_PATTERNS: &[&str] = &[
+    "target",
+    "node_modules",
+    ".git",
+    "dist",
+    "build",
+    ".idea",
+    "*.log",
+];
 
 fn is_ignored(name: &str) -> bool {
     if name.starts_with('.') {
         return true;
     }
-    IGNORE_PATTERNS.contains(&name) || IGNORE_PATTERNS.iter().any(|p| {
-        if let Some(suffix) = p.strip_prefix('*') {
-            name.ends_with(suffix)
-        } else {
-            name == *p
-        }
-    })
+    IGNORE_PATTERNS.contains(&name)
+        || IGNORE_PATTERNS.iter().any(|p| {
+            if let Some(suffix) = p.strip_prefix('*') {
+                name.ends_with(suffix)
+            } else {
+                name == *p
+            }
+        })
 }
 
 // ============================================================
@@ -269,7 +299,10 @@ fn get_cache_key(path: &str) -> String {
     path.to_string()
 }
 
-fn should_use_cache<'a>(cache: &'a HashMap<String, (u64, Vec<FileTreeNode>)>, path: &str) -> Option<&'a Vec<FileTreeNode>> {
+fn should_use_cache<'a>(
+    cache: &'a HashMap<String, (u64, Vec<FileTreeNode>)>,
+    path: &str,
+) -> Option<&'a Vec<FileTreeNode>> {
     let key = get_cache_key(path);
     cache.get(&key).and_then(|(timestamp, nodes)| {
         if now_ms() - *timestamp < CACHE_TTL_SECONDS * 1000 {
@@ -280,7 +313,11 @@ fn should_use_cache<'a>(cache: &'a HashMap<String, (u64, Vec<FileTreeNode>)>, pa
     })
 }
 
-fn update_cache(cache: &mut HashMap<String, (u64, Vec<FileTreeNode>)>, path: &str, nodes: Vec<FileTreeNode>) {
+fn update_cache(
+    cache: &mut HashMap<String, (u64, Vec<FileTreeNode>)>,
+    path: &str,
+    nodes: Vec<FileTreeNode>,
+) {
     cache.insert(get_cache_key(path), (now_ms(), nodes));
 }
 
@@ -343,24 +380,41 @@ pub async fn chat_send(
     let temp = params.as_ref().and_then(|p| p.temperature).unwrap_or(0.7);
     let max_tok = params.as_ref().and_then(|p| p.max_tokens).unwrap_or(4096);
 
-    emit_log(&app, "info", "llm", "LLM request", &format!(
-        "model=default temperature={} max_tokens={} input_len={}",
-        temp, max_tok, message.len()
-    ));
+    emit_log(
+        &app,
+        "info",
+        "llm",
+        "LLM request",
+        &format!(
+            "model=default temperature={} max_tokens={} input_len={}",
+            temp,
+            max_tok,
+            message.len()
+        ),
+    );
 
     let tool_name = "read_file";
     let tool_params = r#"{"path": "src/main.rs"}"#;
-    emit_tool_log(&app, tool_name, tool_params, "// tool result placeholder", 12);
+    emit_tool_log(
+        &app,
+        tool_name,
+        tool_params,
+        "// tool result placeholder",
+        12,
+    );
     tokio::time::sleep(std::time::Duration::from_millis(20)).await;
 
     let tool_name2 = "search_codebase";
-    emit_tool_log(&app, tool_name2, r#"{"query": "main function"}"#, "found 3 matches", 45);
+    emit_tool_log(
+        &app,
+        tool_name2,
+        r#"{"query": "main function"}"#,
+        "found 3 matches",
+        45,
+    );
     tokio::time::sleep(std::time::Duration::from_millis(20)).await;
 
-    let full_response = format!(
-        "Echo (temp={}, max_tok={}): {}",
-        temp, max_tok, message
-    );
+    let full_response = format!("Echo (temp={}, max_tok={}): {}", temp, max_tok, message);
 
     for (i, _) in message.split_whitespace().enumerate() {
         let end = std::cmp::min((i + 1) * 6, full_response.len());
@@ -372,7 +426,16 @@ pub async fn chat_send(
         tokio::time::sleep(std::time::Duration::from_millis(30)).await;
     }
 
-    emit_log(&app, "info", "llm", &format!("LLM response complete — {} tokens", full_response.split_whitespace().count()), "");
+    emit_log(
+        &app,
+        "info",
+        "llm",
+        &format!(
+            "LLM response complete — {} tokens",
+            full_response.split_whitespace().count()
+        ),
+        "",
+    );
 
     let _ = app.emit(
         "agent_done",
@@ -390,7 +453,11 @@ pub async fn plan_list(
     _state: State<'_, AppState>,
     agent_state: State<'_, crate::commands::AgentState>,
 ) -> Result<Vec<PlanSummary>, String> {
-    let plans = agent_state.repo.list_plans(20, 0).await.map_err(|e| format!("Failed to list plans: {}", e))?;
+    let plans = agent_state
+        .repo
+        .list_plans(20, 0)
+        .await
+        .map_err(|e| format!("Failed to list plans: {}", e))?;
 
     Ok(plans
         .into_iter()
@@ -412,7 +479,11 @@ pub async fn plan_create(
     req: CreatePlanRequest,
 ) -> Result<PlanSummary, String> {
     let plan = rupoo::task::Plan::new(&req.name, vec![]);
-    agent_state.repo.save_plan(&plan).await.map_err(|e| format!("Failed to save plan: {}", e))?;
+    agent_state
+        .repo
+        .save_plan(&plan)
+        .await
+        .map_err(|e| format!("Failed to save plan: {}", e))?;
 
     Ok(PlanSummary {
         id: plan.id,
@@ -434,7 +505,13 @@ pub async fn plan_execute(app: tauri::AppHandle, plan_id: String) -> Result<Stri
         }),
     );
 
-    emit_log(&app, "info", "plan", &format!("Plan execution started: {}", plan_id), "");
+    emit_log(
+        &app,
+        "info",
+        "plan",
+        &format!("Plan execution started: {}", plan_id),
+        "",
+    );
     Ok(format!("Plan {} execution started", plan_id))
 }
 
@@ -444,7 +521,11 @@ pub async fn plan_delete(
     agent_state: State<'_, crate::commands::AgentState>,
     plan_id: String,
 ) -> Result<bool, String> {
-    agent_state.repo.delete_plan(&plan_id).await.map_err(|e| format!("Failed to delete plan: {}", e))?;
+    agent_state
+        .repo
+        .delete_plan(&plan_id)
+        .await
+        .map_err(|e| format!("Failed to delete plan: {}", e))?;
     Ok(true)
 }
 
@@ -480,7 +561,11 @@ pub async fn config_get(
     agent_state: State<'_, crate::commands::AgentState>,
     key: String,
 ) -> Result<Option<String>, String> {
-    agent_state.repo.get_setting(&key).await.map_err(|e| format!("Failed to get config: {}", e))
+    agent_state
+        .repo
+        .get_setting(&key)
+        .await
+        .map_err(|e| format!("Failed to get config: {}", e))
 }
 
 #[tauri::command]
@@ -490,7 +575,11 @@ pub async fn config_set(
     key: String,
     value: String,
 ) -> Result<bool, String> {
-    agent_state.repo.set_setting(&key, &value).await.map_err(|e| format!("Failed to set config: {}", e))?;
+    agent_state
+        .repo
+        .set_setting(&key, &value)
+        .await
+        .map_err(|e| format!("Failed to set config: {}", e))?;
     Ok(true)
 }
 
@@ -503,7 +592,11 @@ fn resolve_workspace_path(state: &AppState, relative: &str) -> String {
     if relative.starts_with('/') {
         relative.to_string()
     } else {
-        format!("{}/{}", root.trim_end_matches('/'), relative.trim_start_matches('/'))
+        format!(
+            "{}/{}",
+            root.trim_end_matches('/'),
+            relative.trim_start_matches('/')
+        )
     }
 }
 
@@ -515,20 +608,26 @@ pub async fn file_read_tree(
 ) -> Result<Vec<FileTreeNode>, String> {
     let abs = resolve_workspace_path(&state, &dir);
     let path = std::path::Path::new(&abs);
-    
+
     if !path.exists() {
         return Err(format!("Directory not found: {}", abs));
     }
 
     let cache = state.file_tree_cache.read().unwrap();
     if let Some(nodes) = should_use_cache(&cache, &abs) {
-        emit_log(&app, "info", "cache", &format!("Using cached tree for: {}", abs), "");
+        emit_log(
+            &app,
+            "info",
+            "cache",
+            &format!("Using cached tree for: {}", abs),
+            "",
+        );
         return Ok(nodes.clone());
     }
     drop(cache);
 
     let nodes = build_tree(path);
-    
+
     let mut cache = state.file_tree_cache.write().unwrap();
     update_cache(&mut cache, &abs, nodes.clone());
 
@@ -536,20 +635,26 @@ pub async fn file_read_tree(
 }
 
 #[tauri::command]
-pub async fn file_read_content(state: State<'_, AppState>, file_path: String) -> Result<String, String> {
+pub async fn file_read_content(
+    state: State<'_, AppState>,
+    file_path: String,
+) -> Result<String, String> {
     let open_files = state.open_files.read().unwrap();
-    
+
     if let Some((timestamp, content)) = open_files.get(&file_path) {
         let file_meta = match std::fs::metadata(&file_path) {
             Ok(m) => m,
             Err(e) => return Err(format!("Failed to read file metadata: {}", e)),
         };
-        
+
         let file_modified = match file_meta.modified() {
-            Ok(t) => t.duration_since(SystemTime::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0),
+            Ok(t) => t
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .map(|d| d.as_millis() as u64)
+                .unwrap_or(0),
             Err(_) => 0,
         };
-        
+
         if *timestamp >= file_modified {
             return Ok(content.clone());
         }
@@ -573,18 +678,24 @@ pub async fn file_write(
 ) -> Result<bool, String> {
     let now = now_ms();
     let mut last_write = state.last_write_time.lock().unwrap();
-    
+
     if let Some(&last) = last_write.get(&req.path) {
         if now - last < WRITE_DEBOUNCE_MS {
             let mut pending = state.pending_writes.lock().unwrap();
             pending.insert(req.path.clone(), req.content.clone());
-            emit_log(&app, "info", "file", "Write debounced", &format!("path={}", req.path));
+            emit_log(
+                &app,
+                "info",
+                "file",
+                "Write debounced",
+                &format!("path={}", req.path),
+            );
             return Ok(true);
         }
     }
-    
+
     last_write.insert(req.path.clone(), now);
-    
+
     std::fs::write(&req.path, &req.content)
         .map_err(|e| format!("Failed to write {}: {}", req.path, e))?;
 
@@ -594,12 +705,21 @@ pub async fn file_write(
     let mut pending = state.pending_writes.lock().unwrap();
     pending.remove(&req.path);
 
-    emit_file_log(&app, "write", &req.path, true, &format!("{} bytes", req.content.len()));
+    emit_file_log(
+        &app,
+        "write",
+        &req.path,
+        true,
+        &format!("{} bytes", req.content.len()),
+    );
     Ok(true)
 }
 
 #[tauri::command]
-pub async fn flush_pending_writes(app: tauri::AppHandle, state: State<'_, AppState>) -> Result<usize, String> {
+pub async fn flush_pending_writes(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+) -> Result<usize, String> {
     let pending = state.pending_writes.lock().unwrap().clone();
     let mut count = 0;
 
@@ -608,18 +728,30 @@ pub async fn flush_pending_writes(app: tauri::AppHandle, state: State<'_, AppSta
             Ok(_) => {
                 let mut open_files = state.open_files.write().unwrap();
                 open_files.insert(path.clone(), (now_ms(), content.clone()));
-                
+
                 let mut pending = state.pending_writes.lock().unwrap();
                 pending.remove(&path);
-                
+
                 let mut last_write = state.last_write_time.lock().unwrap();
                 last_write.insert(path.clone(), now_ms());
-                
-                emit_file_log(&app, "write", &path, true, &format!("{} bytes (flushed)", content.len()));
+
+                emit_file_log(
+                    &app,
+                    "write",
+                    &path,
+                    true,
+                    &format!("{} bytes (flushed)", content.len()),
+                );
                 count += 1;
             }
             Err(e) => {
-                emit_log(&app, "error", "file", &format!("Failed to flush {}", path), &e.to_string());
+                emit_log(
+                    &app,
+                    "error",
+                    "file",
+                    &format!("Failed to flush {}", path),
+                    &e.to_string(),
+                );
             }
         }
     }
@@ -645,12 +777,10 @@ pub async fn file_create(
     }
 
     if req.is_dir {
-        std::fs::create_dir_all(&target)
-            .map_err(|e| format!("Failed to create dir: {}", e))?;
+        std::fs::create_dir_all(&target).map_err(|e| format!("Failed to create dir: {}", e))?;
         emit_file_log(&app, "create_dir", &target_str, true, "");
     } else {
-        std::fs::write(&target, "")
-            .map_err(|e| format!("Failed to create file: {}", e))?;
+        std::fs::write(&target, "").map_err(|e| format!("Failed to create file: {}", e))?;
         emit_file_log(&app, "create_file", &target_str, true, "");
     }
 
@@ -674,12 +804,10 @@ pub async fn file_delete(
     }
 
     if req.is_dir {
-        std::fs::remove_dir_all(path)
-            .map_err(|e| format!("Failed to delete dir: {}", e))?;
+        std::fs::remove_dir_all(path).map_err(|e| format!("Failed to delete dir: {}", e))?;
     } else {
-        std::fs::remove_file(path)
-            .map_err(|e| format!("Failed to delete file: {}", e))?;
-        
+        std::fs::remove_file(path).map_err(|e| format!("Failed to delete file: {}", e))?;
+
         let mut open_files = state.open_files.write().unwrap();
         open_files.remove(&req.path);
     }
@@ -702,15 +830,17 @@ pub async fn file_rename(
         return Err(format!("Not found: {}", req.old_path));
     }
 
-    let new_path = old.parent().unwrap_or(std::path::Path::new(".")).join(&req.new_name);
+    let new_path = old
+        .parent()
+        .unwrap_or(std::path::Path::new("."))
+        .join(&req.new_name);
     let new_str = new_path.to_string_lossy().to_string();
 
     if new_path.exists() {
         return Err(format!("Already exists: {}", new_str));
     }
 
-    std::fs::rename(old, &new_path)
-        .map_err(|e| format!("Failed to rename: {}", e))?;
+    std::fs::rename(old, &new_path).map_err(|e| format!("Failed to rename: {}", e))?;
 
     let mut open_files = state.open_files.write().unwrap();
     if let Some((_, content)) = open_files.remove(&req.old_path) {
@@ -720,7 +850,13 @@ pub async fn file_rename(
     let mut cache = state.file_tree_cache.write().unwrap();
     cache.clear();
 
-    emit_file_log(&app, "rename", &req.old_path, true, &format!("→ {}", new_str));
+    emit_file_log(
+        &app,
+        "rename",
+        &req.old_path,
+        true,
+        &format!("→ {}", new_str),
+    );
     Ok(new_str)
 }
 
@@ -738,7 +874,8 @@ pub async fn file_read_large(
 
     if size <= 1_048_576 && offset == 0 && limit == 0 {
         let mut buf = String::new();
-        f.read_to_string(&mut buf).map_err(|e| format!("Read error: {}", e))?;
+        f.read_to_string(&mut buf)
+            .map_err(|e| format!("Read error: {}", e))?;
         return Ok(buf);
     }
 
@@ -771,21 +908,33 @@ pub async fn file_import_external(
         return Err(format!("Target is not a directory: {}", target_dir));
     }
 
-    let file_name = source.file_name().unwrap_or_default().to_string_lossy().to_string();
+    let file_name = source
+        .file_name()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .to_string();
     let dest_path = target.join(&file_name);
-    
+
     if dest_path.exists() {
-        return Err(format!("File already exists: {}", dest_path.to_string_lossy()));
+        return Err(format!(
+            "File already exists: {}",
+            dest_path.to_string_lossy()
+        ));
     }
 
-    std::fs::copy(source, &dest_path)
-        .map_err(|e| format!("Failed to copy file: {}", e))?;
+    std::fs::copy(source, &dest_path).map_err(|e| format!("Failed to copy file: {}", e))?;
 
     let mut cache = state.file_tree_cache.write().unwrap();
     cache.clear();
 
     let dest_str = dest_path.to_string_lossy().to_string();
-    emit_file_log(&app, "import", &dest_str, true, &format!("from: {}", source_path));
+    emit_file_log(
+        &app,
+        "import",
+        &dest_str,
+        true,
+        &format!("from: {}", source_path),
+    );
     Ok(dest_str)
 }
 
@@ -811,7 +960,7 @@ pub async fn log_get_recent(
 ) -> Result<Vec<LogEntry>, String> {
     let logs = state.recent_logs.read().unwrap();
     let limit = filter.as_ref().and_then(|f| f.limit).unwrap_or(100);
-    
+
     let filtered: Vec<LogEntry> = logs
         .iter()
         .rev()
@@ -865,7 +1014,8 @@ pub async fn layout_save(
         "console_height": req.console_height,
     });
 
-    agent_state.repo
+    agent_state
+        .repo
         .set_setting("layout:panel_sizes", &config.to_string())
         .await
         .map_err(|e| format!("Failed to save layout: {}", e))?;
@@ -878,7 +1028,8 @@ pub async fn theme_set(
     agent_state: State<'_, crate::commands::AgentState>,
     theme: String,
 ) -> Result<bool, String> {
-    agent_state.repo
+    agent_state
+        .repo
         .set_setting("ui:theme", &theme)
         .await
         .map_err(|e| format!("Failed to save theme: {}", e))?;
@@ -887,8 +1038,11 @@ pub async fn theme_set(
 }
 
 #[tauri::command]
-pub async fn theme_get(agent_state: State<'_, crate::commands::AgentState>) -> Result<String, String> {
-    agent_state.repo
+pub async fn theme_get(
+    agent_state: State<'_, crate::commands::AgentState>,
+) -> Result<String, String> {
+    agent_state
+        .repo
         .get_setting("ui:theme")
         .await
         .map_err(|e| format!("Failed to get theme: {}", e))?
@@ -907,7 +1061,8 @@ pub async fn window_state_save(
         "height": req.height,
     });
 
-    agent_state.repo
+    agent_state
+        .repo
         .set_setting("window:state", &state.to_string())
         .await
         .map_err(|e| format!("Failed to save window state: {}", e))?;
@@ -916,8 +1071,11 @@ pub async fn window_state_save(
 }
 
 #[tauri::command]
-pub async fn window_state_get(agent_state: State<'_, crate::commands::AgentState>) -> Result<serde_json::Value, String> {
-    agent_state.repo
+pub async fn window_state_get(
+    agent_state: State<'_, crate::commands::AgentState>,
+) -> Result<serde_json::Value, String> {
+    agent_state
+        .repo
         .get_setting("window:state")
         .await
         .map_err(|e| format!("Failed to get window state: {}", e))?

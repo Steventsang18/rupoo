@@ -51,7 +51,9 @@ impl Completer for RupooHelper {
         } else if line.starts_with("/cmd ") {
             // Shell command completion after /cmd
             let cmd_part = &line[5..pos];
-            let common_cmds = ["ls", "cd", "cat", "grep", "find", "git", "cargo", "npm", "pwd", "echo", "mkdir"];
+            let common_cmds = [
+                "ls", "cd", "cat", "grep", "find", "git", "cargo", "npm", "pwd", "echo", "mkdir",
+            ];
             let matches: Vec<_> = common_cmds
                 .iter()
                 .filter(|c| c.starts_with(cmd_part))

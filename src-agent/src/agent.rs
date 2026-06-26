@@ -253,13 +253,11 @@ impl Agent {
         let conversation_context = std::sync::Mutex::new(ConversationContext::collect());
         let tool_registry = ToolRegistry::new();
         let tool_usage_tracker = std::sync::Arc::new(ToolUsageTracker::new());
-        let loop_engine = Some(std::sync::Arc::new(
-            crate::loop_engine::LoopEngine::new(
-                Arc::clone(&repo),
-                Arc::clone(&memory_cache),
-                SafetyContext::default(),
-            ),
-        ));
+        let loop_engine = Some(std::sync::Arc::new(crate::loop_engine::LoopEngine::new(
+            Arc::clone(&repo),
+            Arc::clone(&memory_cache),
+            SafetyContext::default(),
+        )));
         Self {
             repo,
             memory_cache,
@@ -363,72 +361,55 @@ impl Agent {
     /// Access the unified conversation context.
     /// Returns a MutexGuard for thread-safe read/write access.
     pub fn context(&self) -> std::sync::MutexGuard<'_, ConversationContext> {
-        self.conversation_context
-            .lock()
-            .unwrap_or_else(|e| {
-                warn!("agent conversation_context lock poisoned, recovering");
-                e.into_inner()
-            })
+        self.conversation_context.lock().unwrap_or_else(|e| {
+            warn!("agent conversation_context lock poisoned, recovering");
+            e.into_inner()
+        })
     }
 
     /// Reset the conversation context (start a new conversation).
     pub fn reset_context(&self) {
-        let mut ctx = self
-            .conversation_context
-            .lock()
-            .unwrap_or_else(|e| {
-                warn!("agent conversation_context lock poisoned, recovering");
-                e.into_inner()
-            });
+        let mut ctx = self.conversation_context.lock().unwrap_or_else(|e| {
+            warn!("agent conversation_context lock poisoned, recovering");
+            e.into_inner()
+        });
         ctx.reset();
         info!("conversation context reset");
     }
 
     /// Record a user message in the conversation context.
     pub fn record_user_message(&self, content: &str) {
-        let mut ctx = self
-            .conversation_context
-            .lock()
-            .unwrap_or_else(|e| {
-                warn!("agent conversation_context lock poisoned, recovering");
-                e.into_inner()
-            });
+        let mut ctx = self.conversation_context.lock().unwrap_or_else(|e| {
+            warn!("agent conversation_context lock poisoned, recovering");
+            e.into_inner()
+        });
         ctx.record_user_message(content);
     }
 
     /// Record an assistant response in the conversation context.
     pub fn record_assistant_response(&self, content: &str) {
-        let mut ctx = self
-            .conversation_context
-            .lock()
-            .unwrap_or_else(|e| {
-                warn!("agent conversation_context lock poisoned, recovering");
-                e.into_inner()
-            });
+        let mut ctx = self.conversation_context.lock().unwrap_or_else(|e| {
+            warn!("agent conversation_context lock poisoned, recovering");
+            e.into_inner()
+        });
         ctx.record_assistant_response(content);
     }
 
     /// Record a tool call in the conversation context.
     pub fn record_tool_call(&self, tool_name: &str) {
-        let mut ctx = self
-            .conversation_context
-            .lock()
-            .unwrap_or_else(|e| {
-                warn!("agent conversation_context lock poisoned, recovering");
-                e.into_inner()
-            });
+        let mut ctx = self.conversation_context.lock().unwrap_or_else(|e| {
+            warn!("agent conversation_context lock poisoned, recovering");
+            e.into_inner()
+        });
         ctx.record_tool_call(tool_name);
     }
 
     /// Inject memory context for the current conversation turn.
     pub fn inject_memory_context(&self, memories: &[MemoryEntry]) {
-        let mut ctx = self
-            .conversation_context
-            .lock()
-            .unwrap_or_else(|e| {
-                warn!("agent conversation_context lock poisoned, recovering");
-                e.into_inner()
-            });
+        let mut ctx = self.conversation_context.lock().unwrap_or_else(|e| {
+            warn!("agent conversation_context lock poisoned, recovering");
+            e.into_inner()
+        });
         *ctx = std::mem::take(&mut *ctx).with_memories(memories.to_vec());
     }
 
@@ -655,7 +636,8 @@ impl Agent {
     /// Start a new loop with the given goal.
     /// Requires an LLM gateway to be configured.
     pub async fn start_loop(&self, goal: &str) -> AgentResult<crate::loop_engine::Loop> {
-        let engine = self.loop_engine
+        let engine = self
+            .loop_engine
             .as_ref()
             .ok_or_else(|| AgentError::Other("loop engine not initialized".into()))?;
         let llm = self.llm_gateway.as_ref();
@@ -667,7 +649,8 @@ impl Agent {
 
     /// Resume a paused/budget-exceeded loop.
     pub async fn resume_loop(&self, loop_id: &str) -> AgentResult<crate::loop_engine::Loop> {
-        let engine = self.loop_engine
+        let engine = self
+            .loop_engine
             .as_ref()
             .ok_or_else(|| AgentError::Other("loop engine not initialized".into()))?;
         let llm = self.llm_gateway.as_ref();
@@ -677,7 +660,8 @@ impl Agent {
 
     /// Pause a running loop.
     pub async fn pause_loop(&self, loop_id: &str) -> AgentResult<()> {
-        let engine = self.loop_engine
+        let engine = self
+            .loop_engine
             .as_ref()
             .ok_or_else(|| AgentError::Other("loop engine not initialized".into()))?;
         engine.pause_loop(loop_id).await
@@ -685,7 +669,8 @@ impl Agent {
 
     /// Cancel a loop.
     pub async fn cancel_loop(&self, loop_id: &str) -> AgentResult<()> {
-        let engine = self.loop_engine
+        let engine = self
+            .loop_engine
             .as_ref()
             .ok_or_else(|| AgentError::Other("loop engine not initialized".into()))?;
         engine.cancel_loop(loop_id).await
@@ -693,7 +678,8 @@ impl Agent {
 
     /// Get the current status of a loop.
     pub async fn get_loop_status(&self, loop_id: &str) -> AgentResult<crate::loop_engine::Loop> {
-        let engine = self.loop_engine
+        let engine = self
+            .loop_engine
             .as_ref()
             .ok_or_else(|| AgentError::Other("loop engine not initialized".into()))?;
         engine.get_loop_status(loop_id).await
@@ -705,7 +691,8 @@ impl Agent {
         limit: usize,
         offset: usize,
     ) -> AgentResult<Vec<crate::loop_engine::Loop>> {
-        let engine = self.loop_engine
+        let engine = self
+            .loop_engine
             .as_ref()
             .ok_or_else(|| AgentError::Other("loop engine not initialized".into()))?;
         engine.list_loops(limit, offset).await
@@ -720,8 +707,14 @@ impl Agent {
             memory_cache: Arc::clone(&self.memory_cache),
             memory_store: Arc::clone(&self.memory_store),
             embedding_service: self.embedding_service.clone(),
-            memory_enabled: AtomicBool::new(self.memory_enabled.load(std::sync::atomic::Ordering::SeqCst)),
-            hybrid_search_enabled: AtomicBool::new(self.hybrid_search_enabled.load(std::sync::atomic::Ordering::SeqCst)),
+            memory_enabled: AtomicBool::new(
+                self.memory_enabled
+                    .load(std::sync::atomic::Ordering::SeqCst),
+            ),
+            hybrid_search_enabled: AtomicBool::new(
+                self.hybrid_search_enabled
+                    .load(std::sync::atomic::Ordering::SeqCst),
+            ),
             tool_executor: std::sync::Arc::clone(&self.tool_executor),
             llm_gateway: self.llm_gateway.as_ref().map(|g| {
                 // Create a new gateway with the same config
@@ -804,10 +797,7 @@ impl Agent {
         // Store conversation memory after successful chat
         if self.is_memory_enabled() {
             let mem_content = format!("User: {}\nAssistant: {}", user_message, response);
-            match self
-                .remember(&mem_content, &["chat", "conversation"])
-                .await
-            {
+            match self.remember(&mem_content, &["chat", "conversation"]).await {
                 Ok(id) => {
                     info!(memory_id = %id, "conversation memory stored successfully");
                 }

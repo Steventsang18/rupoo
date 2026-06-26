@@ -533,7 +533,7 @@ Respond with a JSON array of steps."#;
 
 /// Extract JSON from an LLM response that may contain markdown fences and
 /// preamble text (e.g. "Ok, let me analyze... ```json [...] ```").
-fn extract_json_from_llm_response(response: &str) -> &str {
+pub fn extract_json_from_llm_response(response: &str) -> &str {
     let trimmed = response.trim();
 
     // If the whole response is already valid-looking JSON, return as-is

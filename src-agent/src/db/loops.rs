@@ -194,21 +194,22 @@ impl TaskRepo {
             })?;
 
             let mut results = Vec::new();
-            for row in rows {
-                if let Ok((id, goal, status_str, config_json, current_run_id, created_at, updated_at)) = row {
-                    let status = str_to_loop_status(&status_str).unwrap_or(crate::loop_engine::LoopStatus::Failed);
-                    let config: crate::loop_engine::LoopConfig =
-                        serde_json::from_str(&config_json).unwrap_or_default();
-                    results.push(crate::loop_engine::Loop {
-                        id,
-                        goal,
-                        status,
-                        config,
-                        current_run_id,
-                        created_at,
-                        updated_at,
-                    });
-                }
+            for (id, goal, status_str, config_json, current_run_id, created_at, updated_at) in
+                rows.flatten()
+            {
+                let status = str_to_loop_status(&status_str)
+                    .unwrap_or(crate::loop_engine::LoopStatus::Failed);
+                let config: crate::loop_engine::LoopConfig =
+                    serde_json::from_str(&config_json).unwrap_or_default();
+                results.push(crate::loop_engine::Loop {
+                    id,
+                    goal,
+                    status,
+                    config,
+                    current_run_id,
+                    created_at,
+                    updated_at,
+                });
             }
             Ok(results)
         })
@@ -241,21 +242,21 @@ impl TaskRepo {
             })?;
 
             let mut results = Vec::new();
-            for row in rows {
-                if let Ok((id, goal, s, config_json, current_run_id, created_at, updated_at)) = row {
-                    let status = str_to_loop_status(&s).unwrap_or(crate::loop_engine::LoopStatus::Failed);
-                    let config: crate::loop_engine::LoopConfig =
-                        serde_json::from_str(&config_json).unwrap_or_default();
-                    results.push(crate::loop_engine::Loop {
-                        id,
-                        goal,
-                        status,
-                        config,
-                        current_run_id,
-                        created_at,
-                        updated_at,
-                    });
-                }
+            for (id, goal, s, config_json, current_run_id, created_at, updated_at) in rows.flatten()
+            {
+                let status =
+                    str_to_loop_status(&s).unwrap_or(crate::loop_engine::LoopStatus::Failed);
+                let config: crate::loop_engine::LoopConfig =
+                    serde_json::from_str(&config_json).unwrap_or_default();
+                results.push(crate::loop_engine::Loop {
+                    id,
+                    goal,
+                    status,
+                    config,
+                    current_run_id,
+                    created_at,
+                    updated_at,
+                });
             }
             Ok(results)
         })
@@ -293,7 +294,7 @@ impl TaskRepo {
         let evaluation_json = run
             .evaluation
             .as_ref()
-            .map(|e| serde_json::to_string(e))
+            .map(serde_json::to_string)
             .transpose()?;
         let decision = run.decision.as_ref().map(|d| {
             match d {
@@ -307,7 +308,7 @@ impl TaskRepo {
         let token_usage_json = run
             .token_usage
             .as_ref()
-            .map(|t| serde_json::to_string(t))
+            .map(serde_json::to_string)
             .transpose()?;
         let started_at = run.started_at;
         let finished_at = run.finished_at;
@@ -324,10 +325,7 @@ impl TaskRepo {
     }
 
     /// Load a LoopRun by ID.
-    pub async fn load_loop_run(
-        &self,
-        run_id: &str,
-    ) -> AgentResult<crate::loop_engine::LoopRun> {
+    pub async fn load_loop_run(&self, run_id: &str) -> AgentResult<crate::loop_engine::LoopRun> {
         let rid = run_id.to_string();
         self.with_read_conn(move |conn| {
             let mut stmt = conn.prepare(
@@ -483,7 +481,7 @@ impl TaskRepo {
     ) -> AgentResult<()> {
         let rid = run_id.to_string();
         let status_str = loop_run_status_to_str(status);
-        let evaluation_json = evaluation.map(|e| serde_json::to_string(e)).transpose()?;
+        let evaluation_json = evaluation.map(serde_json::to_string).transpose()?;
         let decision_str = decision.map(|d| {
             match d {
                 crate::loop_engine::LoopDecision::Done => "Done",
@@ -493,7 +491,7 @@ impl TaskRepo {
             }
             .to_string()
         });
-        let token_json = token_usage.map(|t| serde_json::to_string(t)).transpose()?;
+        let token_json = token_usage.map(serde_json::to_string).transpose()?;
         let now = chrono::Utc::now().timestamp();
 
         self.with_conn(move |conn| {
@@ -542,17 +540,15 @@ impl TaskRepo {
             })?;
 
             let mut results = Vec::new();
-            for row in rows.flatten() {
-                if let Some(d) = row {
-                    let decision = match d.as_str() {
-                        "Done" => crate::loop_engine::LoopDecision::Done,
-                        "Continue" => crate::loop_engine::LoopDecision::Continue,
-                        "Decompose" => crate::loop_engine::LoopDecision::Decompose,
-                        "Impossible" => crate::loop_engine::LoopDecision::Impossible,
-                        _ => continue,
-                    };
-                    results.push(decision);
-                }
+            for d in rows.flatten().flatten() {
+                let decision = match d.as_str() {
+                    "Done" => crate::loop_engine::LoopDecision::Done,
+                    "Continue" => crate::loop_engine::LoopDecision::Continue,
+                    "Decompose" => crate::loop_engine::LoopDecision::Decompose,
+                    "Impossible" => crate::loop_engine::LoopDecision::Impossible,
+                    _ => continue,
+                };
+                results.push(decision);
             }
             // Reverse to get chronological order (oldest first)
             results.reverse();
@@ -563,11 +559,7 @@ impl TaskRepo {
 
     /// Get recent unmet counts for a Loop (for stall detection).
     /// Returns the unmet count for the last `n` runs that have evaluations.
-    pub async fn recent_unmet_counts(
-        &self,
-        loop_id: &str,
-        n: usize,
-    ) -> AgentResult<Vec<usize>> {
+    pub async fn recent_unmet_counts(&self, loop_id: &str, n: usize) -> AgentResult<Vec<usize>> {
         let lid = loop_id.to_string();
         self.with_read_conn(move |conn| {
             let mut stmt = conn.prepare(
@@ -582,13 +574,11 @@ impl TaskRepo {
             })?;
 
             let mut counts = Vec::new();
-            for row in rows.flatten() {
-                if let Some(json_str) = row {
-                    if let Ok(eval) =
-                        serde_json::from_str::<crate::loop_engine::EvaluationResult>(&json_str)
-                    {
-                        counts.push(eval.unmet.len());
-                    }
+            for json_str in rows.flatten().flatten() {
+                if let Ok(eval) =
+                    serde_json::from_str::<crate::loop_engine::EvaluationResult>(&json_str)
+                {
+                    counts.push(eval.unmet.len());
                 }
             }
             counts.reverse(); // chronological order
@@ -642,9 +632,8 @@ impl TaskRepo {
             match result {
                 Ok(Some(json_str)) => {
                     let eval: crate::loop_engine::EvaluationResult =
-                        serde_json::from_str(&json_str).map_err(|e| {
-                            AgentError::Other(format!("parse evaluation: {e}"))
-                        })?;
+                        serde_json::from_str(&json_str)
+                            .map_err(|e| AgentError::Other(format!("parse evaluation: {e}")))?;
                     Ok(Some(eval))
                 }
                 Ok(None) => Ok(None),
@@ -846,7 +835,10 @@ mod tests {
 
         let loaded = repo.load_loop_run(&rid).await.unwrap();
         assert!(loaded.evaluation.is_some());
-        assert_eq!(loaded.decision, Some(crate::loop_engine::LoopDecision::Done));
+        assert_eq!(
+            loaded.decision,
+            Some(crate::loop_engine::LoopDecision::Done)
+        );
     }
 
     #[tokio::test]

@@ -1,9 +1,10 @@
+pub mod engine;
 pub mod goal;
 
-use async_trait::async_trait;
+use crate::cognitive::goal::{AgentGoal, AuthLevel};
 use crate::context::ConversationContext;
 use crate::error::AgentResult;
-use crate::cognitive::goal::{AgentGoal, AuthLevel};
+use async_trait::async_trait;
 
 /// 认知层 Trait——将原始指令解析为结构化目标
 #[async_trait]
@@ -34,8 +35,11 @@ mod tests {
 
     #[test]
     fn test_agent_goal_with_constraint() {
-        let goal = AgentGoal::new("deploy", "部署到生产")
-            .with_constraint("time", "必须在非工作时间", ConstraintSeverity::Required);
+        let goal = AgentGoal::new("deploy", "部署到生产").with_constraint(
+            "time",
+            "必须在非工作时间",
+            ConstraintSeverity::Required,
+        );
         assert_eq!(goal.constraints.len(), 1);
         assert_eq!(goal.constraints[0].field, "time");
     }

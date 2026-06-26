@@ -1,11 +1,11 @@
 //! CLI subcommand dispatch — extracted from main.rs for maintainability.
 
-use std::sync::Arc;
-use tracing::info;
 use rupoo::db::TaskRepo;
 use rupoo::loop_engine::LoopConfig;
 use rupoo::skill::SkillManager;
 use rupoo::task::{finish_step, think_step, tool_call_step, wait_for_input_step, Plan};
+use std::sync::Arc;
+use tracing::info;
 
 // ---------------------------------------------------------------------------
 // Enum definitions (moved from main.rs)
@@ -510,18 +510,32 @@ async fn install_cortex_scout(version: Option<&str>) -> anyhow::Result<()> {
     std::fs::create_dir_all(&bin_dir)?;
 
     let ver = version.unwrap_or("3.3.7");
-    let arch = if cfg!(target_arch = "aarch64") { "arm64" } else { "x86_64" };
-    let os = if cfg!(target_os = "macos") { "macos" } else { "linux" };
+    let arch = if cfg!(target_arch = "aarch64") {
+        "arm64"
+    } else {
+        "x86_64"
+    };
+    let os = if cfg!(target_os = "macos") {
+        "macos"
+    } else {
+        "linux"
+    };
     let filename = format!("cortex-scout-{ver}-{os}-{arch}.tar.gz");
-    let url = format!(
-        "https://github.com/cortex-works/cortex-scout/releases/download/v{ver}/{filename}"
-    );
+    let url =
+        format!("https://github.com/cortex-works/cortex-scout/releases/download/v{ver}/{filename}");
 
-    let binary_name = if cfg!(target_os = "windows") { "cortex-scout-mcp.exe" } else { "cortex-scout-mcp" };
+    let binary_name = if cfg!(target_os = "windows") {
+        "cortex-scout-mcp.exe"
+    } else {
+        "cortex-scout-mcp"
+    };
     let binary_path = bin_dir.join(binary_name);
 
     if binary_path.exists() {
-        println!("cortex-scout already installed at: {}", binary_path.display());
+        println!(
+            "cortex-scout already installed at: {}",
+            binary_path.display()
+        );
         println!("  Run `rupoo tools install-cortex-scout` again to reinstall.");
         return Ok(());
     }
@@ -610,12 +624,15 @@ async fn check_tools_status() -> anyhow::Result<()> {
     let rupoo_home = rupoo::config::rupoo_home();
 
     println!("Tools status:");
-    println!("");
+    println!();
 
     // Check cortex-scout
     let scout_path = rupoo_home.join("bin/cortex-scout-mcp");
     if scout_path.exists() {
-        println!("  ✅ cortex-scout     installed at: {}", scout_path.display());
+        println!(
+            "  ✅ cortex-scout     installed at: {}",
+            scout_path.display()
+        );
         // Check MCP config
         let config_path = rupoo_home.join("config.toml");
         if config_path.exists() {
@@ -623,7 +640,9 @@ async fn check_tools_status() -> anyhow::Result<()> {
             if content.contains("cortex-scout") {
                 println!("     MCP config:      configured");
             } else {
-                println!("     MCP config:      NOT configured (run `rupoo tools install-cortex-scout`)");
+                println!(
+                    "     MCP config:      NOT configured (run `rupoo tools install-cortex-scout`)"
+                );
             }
         }
     } else {
@@ -675,7 +694,10 @@ async fn handle_loop_action(db: String, action: LoopAction) -> anyhow::Result<()
             println!("Loop: {}", l.id);
             println!("  Goal: \"{}\"", l.goal);
             println!("  Status: {:?}", l.status);
-            println!("  Config: max_iters={}, autonomy={:?}", l.config.max_iterations, l.config.autonomy_level);
+            println!(
+                "  Config: max_iters={}, autonomy={:?}",
+                l.config.max_iterations, l.config.autonomy_level
+            );
         }
 
         LoopAction::List { limit } => {

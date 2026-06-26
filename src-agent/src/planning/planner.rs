@@ -1,7 +1,7 @@
-use async_trait::async_trait;
 use crate::cognitive::goal::AgentGoal;
 use crate::error::AgentResult;
 use crate::planning::{ExecutionPlan, PlanScore, Planner};
+use async_trait::async_trait;
 
 /// 规划器默认实现（桩，Task 2.2 填充）
 pub struct PlannerImpl;
@@ -34,9 +34,14 @@ impl Planner for PlannerImpl {
             return Err(crate::error::AgentError::Other("无候选方案".to_string()));
         }
         let mut sorted = candidates;
-        sorted.sort_by(|a, b| b.score.as_ref().map(|s| s.weighted_total).unwrap_or(0.0)
-            .partial_cmp(&a.score.as_ref().map(|s| s.weighted_total).unwrap_or(0.0))
-            .unwrap_or(std::cmp::Ordering::Equal));
+        sorted.sort_by(|a, b| {
+            b.score
+                .as_ref()
+                .map(|s| s.weighted_total)
+                .unwrap_or(0.0)
+                .partial_cmp(&a.score.as_ref().map(|s| s.weighted_total).unwrap_or(0.0))
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
         let best = sorted.remove(0);
         Ok((best, sorted))
     }

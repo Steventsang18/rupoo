@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, Mutex};
-use tokio::task;
 use tauri::{Emitter, State};
+use tokio::task;
 
 use rupoo::{
     agent::Agent,
@@ -37,7 +37,7 @@ impl AgentState {
     pub fn new(repo: Arc<TaskRepo>) -> Self {
         let tool_executor: Arc<dyn rupoo::agent::ToolExecutor> = Arc::new(McpToolExecutor::new());
         let agent = Arc::new(Agent::new(Arc::clone(&repo), tool_executor));
-        Self { 
+        Self {
             repo,
             agent: Arc::new(tokio::sync::Mutex::new(Some(agent))),
             request_queue: Arc::new(Mutex::new(VecDeque::new())),
@@ -117,7 +117,7 @@ pub struct SessionInfo {
 
 fn history_from_messages(messages: &[ChatMessage]) -> ConversationHistory {
     let mut history = ConversationHistory::new(10);
-    
+
     for msg in messages {
         let role = match msg.role.as_str() {
             "system" => rupoo::llm::history::LlmChatRole::System,
@@ -130,7 +130,7 @@ fn history_from_messages(messages: &[ChatMessage]) -> ConversationHistory {
             history.push_assistant(&msg.content);
         }
     }
-    
+
     history
 }
 
@@ -166,11 +166,17 @@ pub async fn run_agent_chat(
     state: State<'_, AgentState>,
     req: AgentChatRequest,
 ) -> Result<AgentChatResponse, String> {
-    emit_log(&app, "info", "llm", "Starting agent chat", &format!(
-        "prompt_len={} history_len={}",
-        req.prompt.len(),
-        req.history.len()
-    ));
+    emit_log(
+        &app,
+        "info",
+        "llm",
+        "Starting agent chat",
+        &format!(
+            "prompt_len={} history_len={}",
+            req.prompt.len(),
+            req.history.len()
+        ),
+    );
 
     let max_turns = req.max_turns.unwrap_or(3);
     let safe_mode = req.safe_mode.unwrap_or(false);
@@ -182,7 +188,9 @@ pub async fn run_agent_chat(
     // Clone the agent Arc to move into the async task
     let agent_arc = {
         let guard = state.agent.lock().await;
-        guard.clone().ok_or_else(|| "Agent not initialized".to_string())?
+        guard
+            .clone()
+            .ok_or_else(|| "Agent not initialized".to_string())?
     };
 
     let result = task::spawn(async move {
@@ -238,7 +246,7 @@ pub async fn run_agent_chat(
 
         full_response = response.clone();
         emit_log(&app_clone, "info", "llm", &format!("Agent chat completed: {} chars", full_response.len()), "");
-        
+
         let _ = app_clone.emit(
             "agent_done",
             serde_json::json!({ "message": full_response.clone() })
@@ -268,11 +276,18 @@ pub async fn save_session(
     state: State<'_, AgentState>,
     req: SaveSessionRequest,
 ) -> Result<bool, String> {
-    emit_log(&app, "info", "session", &format!("Saving session: {}", req.session_id), "");
+    emit_log(
+        &app,
+        "info",
+        "session",
+        &format!("Saving session: {}", req.session_id),
+        "",
+    );
 
-    let session_name = req.name.clone().unwrap_or_else(|| {
-        format!("Chat {}", chrono::Local::now().format("%m-%d %H:%M"))
-    });
+    let session_name = req
+        .name
+        .clone()
+        .unwrap_or_else(|| format!("Chat {}", chrono::Local::now().format("%m-%d %H:%M")));
 
     let data = serde_json::json!({
         "session_id": req.session_id,
@@ -283,12 +298,19 @@ pub async fn save_session(
         "updated_at": chrono::Utc::now().to_rfc3339()
     });
 
-    state.repo
+    state
+        .repo
         .set_setting(&format!("session:{}", req.session_id), &data.to_string())
         .await
         .map_err(|e| format!("Failed to save session: {}", e))?;
 
-    emit_log(&app, "info", "session", &format!("Session saved: {}", req.session_id), "");
+    emit_log(
+        &app,
+        "info",
+        "session",
+        &format!("Session saved: {}", req.session_id),
+        "",
+    );
     Ok(true)
 }
 
@@ -298,31 +320,50 @@ pub async fn load_session(
     state: State<'_, AgentState>,
     req: LoadSessionRequest,
 ) -> Result<LoadSessionResponse, String> {
-    emit_log(&app, "info", "session", &format!("Loading session: {}", req.session_id), "");
+    emit_log(
+        &app,
+        "info",
+        "session",
+        &format!("Loading session: {}", req.session_id),
+        "",
+    );
 
-    let data_str = state.repo
+    let data_str = state
+        .repo
         .get_setting(&format!("session:{}", req.session_id))
         .await
         .map_err(|e| format!("Failed to load session: {}", e))?
         .ok_or_else(|| format!("Session not found: {}", req.session_id))?;
 
-    let data: serde_json::Value = serde_json::from_str(&data_str)
-        .map_err(|e| format!("Invalid session data: {}", e))?;
+    let data: serde_json::Value =
+        serde_json::from_str(&data_str).map_err(|e| format!("Invalid session data: {}", e))?;
 
-    let session_id = data["session_id"].as_str().unwrap_or(&req.session_id).to_string();
-    let name = data["name"].as_str().unwrap_or(&format!("Chat {}", req.session_id)).to_string();
+    let session_id = data["session_id"]
+        .as_str()
+        .unwrap_or(&req.session_id)
+        .to_string();
+    let name = data["name"]
+        .as_str()
+        .unwrap_or(&format!("Chat {}", req.session_id))
+        .to_string();
     let messages: Vec<ChatMessage> = serde_json::from_value(data["messages"].clone())
         .map_err(|e| format!("Failed to parse messages: {}", e))?;
 
     let metadata = data["metadata"].clone();
 
-    emit_log(&app, "info", "session", &format!("Session loaded: {} messages", messages.len()), "");
-    
-    Ok(LoadSessionResponse { 
+    emit_log(
+        &app,
+        "info",
+        "session",
+        &format!("Session loaded: {} messages", messages.len()),
+        "",
+    );
+
+    Ok(LoadSessionResponse {
         session_id,
         name,
-        messages, 
-        metadata 
+        messages,
+        metadata,
     })
 }
 
@@ -332,14 +373,27 @@ pub async fn delete_session(
     state: State<'_, AgentState>,
     session_id: String,
 ) -> Result<bool, String> {
-    emit_log(&app, "info", "session", &format!("Deleting session: {}", session_id), "");
+    emit_log(
+        &app,
+        "info",
+        "session",
+        &format!("Deleting session: {}", session_id),
+        "",
+    );
 
-    state.repo
+    state
+        .repo
         .delete_setting(&format!("session:{}", session_id))
         .await
         .map_err(|e| format!("Failed to delete session: {}", e))?;
 
-    emit_log(&app, "info", "session", &format!("Session deleted: {}", session_id), "");
+    emit_log(
+        &app,
+        "info",
+        "session",
+        &format!("Session deleted: {}", session_id),
+        "",
+    );
     Ok(true)
 }
 
@@ -349,26 +403,40 @@ pub async fn rename_session(
     state: State<'_, AgentState>,
     req: RenameSessionRequest,
 ) -> Result<bool, String> {
-    emit_log(&app, "info", "session", &format!("Renaming session: {} -> {}", req.session_id, req.new_name), "");
+    emit_log(
+        &app,
+        "info",
+        "session",
+        &format!("Renaming session: {} -> {}", req.session_id, req.new_name),
+        "",
+    );
 
-    let data_str = state.repo
+    let data_str = state
+        .repo
         .get_setting(&format!("session:{}", req.session_id))
         .await
         .map_err(|e| format!("Failed to load session: {}", e))?
         .ok_or_else(|| format!("Session not found: {}", req.session_id))?;
 
-    let mut data: serde_json::Value = serde_json::from_str(&data_str)
-        .map_err(|e| format!("Invalid session data: {}", e))?;
+    let mut data: serde_json::Value =
+        serde_json::from_str(&data_str).map_err(|e| format!("Invalid session data: {}", e))?;
 
     data["name"] = serde_json::Value::String(req.new_name.clone());
     data["updated_at"] = serde_json::Value::String(chrono::Utc::now().to_rfc3339());
 
-    state.repo
+    state
+        .repo
         .set_setting(&format!("session:{}", req.session_id), &data.to_string())
         .await
         .map_err(|e| format!("Failed to save session: {}", e))?;
 
-    emit_log(&app, "info", "session", &format!("Session renamed: {}", req.session_id), "");
+    emit_log(
+        &app,
+        "info",
+        "session",
+        &format!("Session renamed: {}", req.session_id),
+        "",
+    );
     Ok(true)
 }
 
@@ -379,7 +447,8 @@ pub async fn list_sessions(
 ) -> Result<Vec<SessionInfo>, String> {
     emit_log(&app, "info", "session", "Listing sessions", "");
 
-    let settings = state.repo
+    let settings = state
+        .repo
         .list_settings()
         .await
         .map_err(|e| format!("Failed to list settings: {}", e))?;
@@ -408,6 +477,12 @@ pub async fn list_sessions(
 
     sessions.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
 
-    emit_log(&app, "info", "session", &format!("Found {} sessions", sessions.len()), "");
+    emit_log(
+        &app,
+        "info",
+        "session",
+        &format!("Found {} sessions", sessions.len()),
+        "",
+    );
     Ok(sessions)
 }

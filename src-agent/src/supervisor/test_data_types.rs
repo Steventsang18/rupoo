@@ -1,7 +1,7 @@
 #[cfg(test)]
 mod tests {
-    use crate::supervisor::{Action, ExecutionMeta};
     use crate::supervisor::audit_logger::{AuditEvent, AuditEventType, AuditResult};
+    use crate::supervisor::{Action, ExecutionMeta};
 
     #[test]
     fn test_action_construction() {

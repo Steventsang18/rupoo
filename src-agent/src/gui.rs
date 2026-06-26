@@ -21,35 +21,35 @@ pub mod inner {
         use eframe::egui::Color32;
 
         // Background hierarchy (4-layer depth)
-        pub const BG_DEEPEST: Color32   = Color32::from_rgb(24, 24, 24);   // #181818
-        pub const BG_BASE: Color32      = Color32::from_rgb(31, 31, 31);   // #1F1F1F
-        pub const BG_ELEVATED: Color32  = Color32::from_rgb(34, 34, 34);   // #222222
-        pub const BG_HOVER: Color32     = Color32::from_rgb(43, 43, 43);   // #2B2B2B
-        pub const BG_INPUT: Color32     = Color32::from_rgb(49, 49, 49);   // #313131
+        pub const BG_DEEPEST: Color32 = Color32::from_rgb(24, 24, 24); // #181818
+        pub const BG_BASE: Color32 = Color32::from_rgb(31, 31, 31); // #1F1F1F
+        pub const BG_ELEVATED: Color32 = Color32::from_rgb(34, 34, 34); // #222222
+        pub const BG_HOVER: Color32 = Color32::from_rgb(43, 43, 43); // #2B2B2B
+        pub const BG_INPUT: Color32 = Color32::from_rgb(49, 49, 49); // #313131
 
         // Borders
-        pub const BORDER_SUBTLE: Color32  = Color32::from_rgb(43, 43, 43);
+        pub const BORDER_SUBTLE: Color32 = Color32::from_rgb(43, 43, 43);
         pub const BORDER_DEFAULT: Color32 = Color32::from_rgb(60, 60, 60);
         #[allow(dead_code)]
-        pub const BORDER_FOCUS: Color32   = Color32::from_rgb(0, 120, 212);
+        pub const BORDER_FOCUS: Color32 = Color32::from_rgb(0, 120, 212);
 
         // Text
-        pub const TEXT_PRIMARY: Color32   = Color32::from_rgb(204, 204, 204);
+        pub const TEXT_PRIMARY: Color32 = Color32::from_rgb(204, 204, 204);
         pub const TEXT_SECONDARY: Color32 = Color32::from_rgb(157, 157, 157);
-        pub const TEXT_DISABLED: Color32  = Color32::from_rgb(134, 134, 134);
+        pub const TEXT_DISABLED: Color32 = Color32::from_rgb(134, 134, 134);
         #[allow(dead_code)]
         pub const TEXT_PLACEHOLDER: Color32 = Color32::from_rgb(152, 152, 152);
 
         // Accent (restrained, functional only)
-        pub const ACCENT: Color32        = Color32::from_rgb(0, 120, 212);
+        pub const ACCENT: Color32 = Color32::from_rgb(0, 120, 212);
         #[allow(dead_code)]
-        pub const ACCENT_HOVER: Color32  = Color32::from_rgb(2, 110, 193);
+        pub const ACCENT_HOVER: Color32 = Color32::from_rgb(2, 110, 193);
         pub const ACCENT_BRIGHT: Color32 = Color32::from_rgb(64, 166, 255);
 
         // Semantic
         pub const SUCCESS: Color32 = Color32::from_rgb(46, 160, 67);
         pub const WARNING: Color32 = Color32::from_rgb(196, 186, 96);
-        pub const ERROR: Color32   = Color32::from_rgb(248, 81, 73);
+        pub const ERROR: Color32 = Color32::from_rgb(248, 81, 73);
     }
 
     // ===================================================================
@@ -207,17 +207,17 @@ pub mod inner {
 
             visuals.widgets.noninteractive.bg_fill = token::BG_ELEVATED;
             visuals.widgets.noninteractive.fg_stroke = egui::Stroke::new(1.0, token::TEXT_PRIMARY);
-            visuals.widgets.inactive.bg_fill  = token::BG_INPUT;
+            visuals.widgets.inactive.bg_fill = token::BG_INPUT;
             visuals.widgets.inactive.fg_stroke = egui::Stroke::new(1.0, token::TEXT_PRIMARY);
-            visuals.widgets.hovered.bg_fill   = token::BG_HOVER;
+            visuals.widgets.hovered.bg_fill = token::BG_HOVER;
             visuals.widgets.hovered.fg_stroke = egui::Stroke::new(1.0, token::TEXT_PRIMARY);
-            visuals.widgets.active.bg_fill    = token::ACCENT;
-            visuals.widgets.active.fg_stroke  = egui::Stroke::new(1.0, Color32::WHITE);
-            visuals.widgets.open.bg_fill      = token::BG_HOVER;
-            visuals.widgets.open.fg_stroke    = egui::Stroke::new(1.0, token::TEXT_PRIMARY);
+            visuals.widgets.active.bg_fill = token::ACCENT;
+            visuals.widgets.active.fg_stroke = egui::Stroke::new(1.0, Color32::WHITE);
+            visuals.widgets.open.bg_fill = token::BG_HOVER;
+            visuals.widgets.open.fg_stroke = egui::Stroke::new(1.0, token::TEXT_PRIMARY);
 
             visuals.selection.bg_fill = token::ACCENT;
-            visuals.selection.stroke  = egui::Stroke::new(1.0, token::ACCENT);
+            visuals.selection.stroke = egui::Stroke::new(1.0, token::ACCENT);
             visuals.hyperlink_color = token::ACCENT_BRIGHT;
 
             visuals.window_rounding = egui::Rounding::same(6.0);
@@ -238,10 +238,14 @@ pub mod inner {
             ui.horizontal(|ui| {
                 ui.add_space(12.0);
                 ui.label(
-                    egui::RichText::new("rupoo").size(13.0).color(token::TEXT_PRIMARY),
+                    egui::RichText::new("rupoo")
+                        .size(13.0)
+                        .color(token::TEXT_PRIMARY),
                 );
                 ui.label(
-                    egui::RichText::new("v0.4.1").size(10.0).color(token::TEXT_DISABLED),
+                    egui::RichText::new("v0.4.1")
+                        .size(10.0)
+                        .color(token::TEXT_DISABLED),
                 );
             });
         }
@@ -276,14 +280,20 @@ pub mod inner {
                 };
                 ui.label(egui::RichText::new("\u{25CF}").size(8.0).color(dot_color));
                 ui.label(
-                    egui::RichText::new(label).size(11.0).color(token::TEXT_SECONDARY),
+                    egui::RichText::new(label)
+                        .size(11.0)
+                        .color(token::TEXT_SECONDARY),
                 );
             });
         }
 
         fn sidebar_nav_item(&mut self, ui: &mut egui::Ui, tab: Tab) {
             let is_selected = self.selected_tab == tab;
-            let bg = if is_selected { token::BG_HOVER } else { Color32::TRANSPARENT };
+            let bg = if is_selected {
+                token::BG_HOVER
+            } else {
+                Color32::TRANSPARENT
+            };
 
             let response = ui.add(
                 egui::Button::new(
@@ -297,7 +307,8 @@ pub mod inner {
 
             if is_selected {
                 let rect = response.rect;
-                let bar = egui::Rect::from_min_size(rect.left_top(), egui::vec2(2.0, rect.height()));
+                let bar =
+                    egui::Rect::from_min_size(rect.left_top(), egui::vec2(2.0, rect.height()));
                 ui.painter().rect_filled(bar, 0.0, token::ACCENT);
             }
 
@@ -401,7 +412,9 @@ pub mod inner {
             ui.add_space(ui.available_height() * 0.3);
             ui.vertical_centered(|ui| {
                 ui.label(
-                    egui::RichText::new("rupoo").size(24.0).color(token::TEXT_PRIMARY),
+                    egui::RichText::new("rupoo")
+                        .size(24.0)
+                        .color(token::TEXT_PRIMARY),
                 );
                 ui.add_space(8.0);
                 ui.label(
@@ -451,20 +464,19 @@ pub mod inner {
                     Color32::TRANSPARENT
                 };
 
-                egui::Frame::none()
-                    .fill(bg)
-                    .rounding(6.0)
-                    .show(ui, |ui| {
-                        ui.set_max_width(max_width);
-                        ui.add_space(8.0);
-                        ui.add(
-                            egui::Label::new(
-                                egui::RichText::new(content).size(13.0).color(token::TEXT_PRIMARY),
-                            )
-                            .wrap(),
-                        );
-                        ui.add_space(8.0);
-                    });
+                egui::Frame::none().fill(bg).rounding(6.0).show(ui, |ui| {
+                    ui.set_max_width(max_width);
+                    ui.add_space(8.0);
+                    ui.add(
+                        egui::Label::new(
+                            egui::RichText::new(content)
+                                .size(13.0)
+                                .color(token::TEXT_PRIMARY),
+                        )
+                        .wrap(),
+                    );
+                    ui.add_space(8.0);
+                });
 
                 ui.add_space(2.0);
                 ui.label(
@@ -536,7 +548,9 @@ pub mod inner {
         fn render_plan(&mut self, ui: &mut egui::Ui) {
             ui.horizontal(|ui| {
                 ui.label(
-                    egui::RichText::new("Plans").size(16.0).color(token::TEXT_PRIMARY),
+                    egui::RichText::new("Plans")
+                        .size(16.0)
+                        .color(token::TEXT_PRIMARY),
                 );
                 ui.add_space(ui.available_width() - 80.0);
                 if ui
@@ -651,7 +665,9 @@ pub mod inner {
         fn render_memory(&mut self, ui: &mut egui::Ui) {
             ui.horizontal(|ui| {
                 ui.label(
-                    egui::RichText::new("Memory").size(16.0).color(token::TEXT_PRIMARY),
+                    egui::RichText::new("Memory")
+                        .size(16.0)
+                        .color(token::TEXT_PRIMARY),
                 );
                 ui.add_space(ui.available_width() - 250.0);
                 ui.add(
@@ -674,11 +690,9 @@ pub mod inner {
                     );
                     ui.add_space(4.0);
                     ui.label(
-                        egui::RichText::new(
-                            "Conversation memories will appear here as you chat.",
-                        )
-                        .size(12.0)
-                        .color(token::TEXT_DISABLED),
+                        egui::RichText::new("Conversation memories will appear here as you chat.")
+                            .size(12.0)
+                            .color(token::TEXT_DISABLED),
                     );
                 });
                 return;
@@ -704,17 +718,17 @@ pub mod inner {
         fn render_skills(&mut self, ui: &mut egui::Ui) {
             ui.horizontal(|ui| {
                 ui.label(
-                    egui::RichText::new("Skills").size(16.0).color(token::TEXT_PRIMARY),
+                    egui::RichText::new("Skills")
+                        .size(16.0)
+                        .color(token::TEXT_PRIMARY),
                 );
                 ui.add_space(ui.available_width() - 170.0);
                 if ui
                     .add(
-                        egui::Button::new(
-                            egui::RichText::new("Install Built-in").size(12.0),
-                        )
-                        .fill(token::ACCENT)
-                        .stroke(egui::Stroke::new(0.0, Color32::TRANSPARENT))
-                        .rounding(4.0),
+                        egui::Button::new(egui::RichText::new("Install Built-in").size(12.0))
+                            .fill(token::ACCENT)
+                            .stroke(egui::Stroke::new(0.0, Color32::TRANSPARENT))
+                            .rounding(4.0),
                     )
                     .clicked()
                 {
@@ -734,11 +748,9 @@ pub mod inner {
                     );
                     ui.add_space(4.0);
                     ui.label(
-                        egui::RichText::new(
-                            "Install built-in skills or create custom ones.",
-                        )
-                        .size(12.0)
-                        .color(token::TEXT_DISABLED),
+                        egui::RichText::new("Install built-in skills or create custom ones.")
+                            .size(12.0)
+                            .color(token::TEXT_DISABLED),
                     );
                 });
                 return;
@@ -764,7 +776,9 @@ pub mod inner {
         // ===========================================================
         fn render_config(&mut self, ui: &mut egui::Ui) {
             ui.label(
-                egui::RichText::new("Settings").size(16.0).color(token::TEXT_PRIMARY),
+                egui::RichText::new("Settings")
+                    .size(16.0)
+                    .color(token::TEXT_PRIMARY),
             );
             ui.add_space(20.0);
 
@@ -862,11 +876,7 @@ pub mod inner {
                             "claude-3-opus".into(),
                             "Claude 3 Opus",
                         );
-                        ui.selectable_value(
-                            &mut self.selected_model,
-                            "gpt-4".into(),
-                            "GPT-4",
-                        );
+                        ui.selectable_value(&mut self.selected_model, "gpt-4".into(), "GPT-4");
                         ui.selectable_value(
                             &mut self.selected_model,
                             "gpt-4-turbo".into(),

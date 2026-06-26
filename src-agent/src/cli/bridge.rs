@@ -43,7 +43,10 @@ pub(super) struct AgentUiBridge {
 impl AgentUiBridge {
     pub(super) async fn run(mut self) {
         loop {
-            match self.rx.recv_timeout(std::time::Duration::from_millis(BRIDGE_POLL_MS)) {
+            match self
+                .rx
+                .recv_timeout(std::time::Duration::from_millis(BRIDGE_POLL_MS))
+            {
                 Ok(TuiToAgent::SubmitMessage(text)) => {
                     self.handle_submit(&text).await;
                 }
@@ -112,7 +115,8 @@ impl AgentUiBridge {
             .send(AgentToTui::Message(ChatMessage::system(format!(
                 "Triggered skill: {}",
                 skill.name
-            )))) {
+            ))))
+        {
             tracing::warn!("failed to send UI event: {}", e);
         }
         let skill_manager =
@@ -124,7 +128,8 @@ impl AgentUiBridge {
                 .send(AgentToTui::Message(ChatMessage::error(format!(
                     "Failed to save skill plan: {}",
                     e
-                )))) {
+                ))))
+            {
                 tracing::warn!("failed to send UI event: {}", e);
             }
         } else {
@@ -143,12 +148,13 @@ impl AgentUiBridge {
                     }
                 }
                 Err(e) => {
-                    if let Err(e) = self
-                        .ui_tx
-                        .send(AgentToTui::Message(ChatMessage::error(format!(
-                            "Skill execution error: {}",
-                            e
-                        )))) {
+                    if let Err(e) =
+                        self.ui_tx
+                            .send(AgentToTui::Message(ChatMessage::error(format!(
+                                "Skill execution error: {}",
+                                e
+                            ))))
+                    {
                         tracing::warn!("failed to send UI event: {}", e);
                     }
                     if let Err(e) = self.ui_tx.send(AgentToTui::Idle) {
@@ -173,7 +179,8 @@ impl AgentUiBridge {
                 .send(AgentToTui::Message(ChatMessage::system(format!(
                     "Current LLM: {}",
                     current
-                )))) {
+                ))))
+            {
                 tracing::warn!("failed to send UI event: {}", e);
             }
         } else {
@@ -189,12 +196,13 @@ impl AgentUiBridge {
                     if let Err(e) = self.repo.set_setting("active_provider", &provider).await {
                         tracing::warn!("failed to save setting: {}", e);
                     }
-                    if let Err(e) = self
-                        .ui_tx
-                        .send(AgentToTui::Message(ChatMessage::system(format!(
-                            "Switched to {}",
-                            label
-                        )))) {
+                    if let Err(e) =
+                        self.ui_tx
+                            .send(AgentToTui::Message(ChatMessage::system(format!(
+                                "Switched to {}",
+                                label
+                            ))))
+                    {
                         tracing::warn!("failed to send UI event: {}", e);
                     }
                     if let Err(e) = self.ui_tx.send(AgentToTui::LlmStatus {
@@ -206,12 +214,13 @@ impl AgentUiBridge {
                     }
                 }
                 Err(e) => {
-                    if let Err(e) = self
-                        .ui_tx
-                        .send(AgentToTui::Message(ChatMessage::error(format!(
-                            "Failed to switch: {}",
-                            e
-                        )))) {
+                    if let Err(e) =
+                        self.ui_tx
+                            .send(AgentToTui::Message(ChatMessage::error(format!(
+                                "Failed to switch: {}",
+                                e
+                            ))))
+                    {
                         tracing::warn!("failed to send UI event: {}", e);
                     }
                 }
@@ -259,7 +268,8 @@ impl AgentUiBridge {
         );
         if let Err(e) = self
             .ui_tx
-            .send(AgentToTui::Message(ChatMessage::system(status))) {
+            .send(AgentToTui::Message(ChatMessage::system(status)))
+        {
             tracing::warn!("failed to send UI event: {}", e);
         }
         if let Err(e) = self.ui_tx.send(AgentToTui::Idle) {
@@ -287,7 +297,8 @@ Available commands:
   Ctrl+C               — Cancel current generation (press twice to quit)";
         if let Err(e) = self
             .ui_tx
-            .send(AgentToTui::Message(ChatMessage::system(help.to_string()))) {
+            .send(AgentToTui::Message(ChatMessage::system(help.to_string())))
+        {
             tracing::warn!("failed to send UI event: {}", e);
         }
         if let Err(e) = self.ui_tx.send(AgentToTui::Idle) {
@@ -353,10 +364,18 @@ Available commands:
             }
         } else if let Some(id) = input.strip_prefix("resume ") {
             let id = id.trim();
-            self.send_system(&format!("Resuming loop {}... (requires LLM)", id)).await;
+            self.send_system(&format!("Resuming loop {}... (requires LLM)", id))
+                .await;
             // Full resume requires async execution with LLM — stub for now
             match self.agent.resume_loop(id).await {
-                Ok(l) => self.send_system(&format!("Loop {} resumed, status: {:?}", &l.id[..8], l.status)).await,
+                Ok(l) => {
+                    self.send_system(&format!(
+                        "Loop {} resumed, status: {:?}",
+                        &l.id[..8],
+                        l.status
+                    ))
+                    .await
+                }
                 Err(e) => self.send_error(&format!("Failed to resume: {e}")).await,
             }
         } else if let Some(id) = input.strip_prefix("cancel ") {
@@ -375,7 +394,8 @@ Available commands:
             let agent = match self.agent.try_clone_lightweight() {
                 Ok(a) => Arc::new(a),
                 Err(e) => {
-                    self.send_error(&format!("Failed to prepare agent: {e}")).await;
+                    self.send_error(&format!("Failed to prepare agent: {e}"))
+                        .await;
                     return;
                 }
             };
@@ -386,8 +406,8 @@ Available commands:
             )).await;
 
             tokio::spawn(async move {
-                use std::panic::AssertUnwindSafe;
                 use futures::future::FutureExt;
+                use std::panic::AssertUnwindSafe;
 
                 let engine = match engine {
                     Some(e) => e,
@@ -410,9 +430,9 @@ Available commands:
                 let repo = Arc::clone(agent_clone.repo());
 
                 // Catch panics (e.g. LLM HTTP buffer overflow) so TUI gets notified
-                let result = AssertUnwindSafe(
-                    engine.start_loop(&goal, config, agent, llm_ref)
-                ).catch_unwind().await;
+                let result = AssertUnwindSafe(engine.start_loop(&goal, config, agent, llm_ref))
+                    .catch_unwind()
+                    .await;
 
                 match result {
                     Ok(Ok(l)) => {
@@ -435,7 +455,10 @@ Available commands:
     }
 
     async fn send_system(&self, msg: &str) {
-        if let Err(e) = self.ui_tx.send(AgentToTui::Message(ChatMessage::system(msg.to_string()))) {
+        if let Err(e) = self
+            .ui_tx
+            .send(AgentToTui::Message(ChatMessage::system(msg.to_string())))
+        {
             tracing::warn!("failed to send UI event: {}", e);
         }
         if let Err(e) = self.ui_tx.send(AgentToTui::Idle) {
@@ -444,7 +467,10 @@ Available commands:
     }
 
     async fn send_error(&self, msg: &str) {
-        if let Err(e) = self.ui_tx.send(AgentToTui::Message(ChatMessage::error(msg.to_string()))) {
+        if let Err(e) = self
+            .ui_tx
+            .send(AgentToTui::Message(ChatMessage::error(msg.to_string())))
+        {
             tracing::warn!("failed to send UI event: {}", e);
         }
         if let Err(e) = self.ui_tx.send(AgentToTui::Idle) {
@@ -470,7 +496,8 @@ Available commands:
             );
             if let Err(e) = self
                 .ui_tx
-                .send(AgentToTui::Message(ChatMessage::system(status))) {
+                .send(AgentToTui::Message(ChatMessage::system(status)))
+            {
                 tracing::warn!("failed to send UI event: {}", e);
             }
         } else {
@@ -498,9 +525,9 @@ Available commands:
                 "list" => match self.agent.recent_memories(10).await {
                     Ok(memories) => {
                         if memories.is_empty() {
-                            if let Err(e) = self.ui_tx.send(AgentToTui::Message(ChatMessage::system(
-                                "No memories found".to_string(),
-                            ))) {
+                            if let Err(e) = self.ui_tx.send(AgentToTui::Message(
+                                ChatMessage::system("No memories found".to_string()),
+                            )) {
                                 tracing::warn!("failed to send UI event: {}", e);
                             }
                         } else {
@@ -510,18 +537,20 @@ Available commands:
                             }
                             if let Err(e) = self
                                 .ui_tx
-                                .send(AgentToTui::Message(ChatMessage::system(list))) {
+                                .send(AgentToTui::Message(ChatMessage::system(list)))
+                            {
                                 tracing::warn!("failed to send UI event: {}", e);
                             }
                         }
                     }
                     Err(e) => {
-                        if let Err(e) = self
-                            .ui_tx
-                            .send(AgentToTui::Message(ChatMessage::error(format!(
-                                "Failed to list memories: {}",
-                                e
-                            )))) {
+                        if let Err(e) =
+                            self.ui_tx
+                                .send(AgentToTui::Message(ChatMessage::error(format!(
+                                    "Failed to list memories: {}",
+                                    e
+                                ))))
+                        {
                             tracing::warn!("failed to send UI event: {}", e);
                         }
                     }
@@ -540,7 +569,8 @@ Available commands:
                                     if let Err(e) =
                                         self.ui_tx.send(AgentToTui::Message(ChatMessage::system(
                                             format!("No memories found matching '{}'", query),
-                                        ))) {
+                                        )))
+                                    {
                                         tracing::warn!("failed to send UI event: {}", e);
                                     }
                                 } else {
@@ -554,15 +584,16 @@ Available commands:
                                     }
                                     if let Err(e) = self
                                         .ui_tx
-                                        .send(AgentToTui::Message(ChatMessage::system(results))) {
+                                        .send(AgentToTui::Message(ChatMessage::system(results)))
+                                    {
                                         tracing::warn!("failed to send UI event: {}", e);
                                     }
                                 }
                             }
                             Err(e) => {
-                                if let Err(e) = self.ui_tx.send(AgentToTui::Message(ChatMessage::error(
-                                    format!("Failed to search memories: {}", e),
-                                ))) {
+                                if let Err(e) = self.ui_tx.send(AgentToTui::Message(
+                                    ChatMessage::error(format!("Failed to search memories: {}", e)),
+                                )) {
                                     tracing::warn!("failed to send UI event: {}", e);
                                 }
                             }
@@ -570,12 +601,13 @@ Available commands:
                     }
                 }
                 _ => {
-                    if let Err(e) = self
-                        .ui_tx
-                        .send(AgentToTui::Message(ChatMessage::error(format!(
-                            "Unknown memory command: {}",
-                            subcmd
-                        )))) {
+                    if let Err(e) =
+                        self.ui_tx
+                            .send(AgentToTui::Message(ChatMessage::error(format!(
+                                "Unknown memory command: {}",
+                                subcmd
+                            ))))
+                    {
                         tracing::warn!("failed to send UI event: {}", e);
                     }
                 }
@@ -599,7 +631,8 @@ Available commands:
             );
             if let Err(e) = self
                 .ui_tx
-                .send(AgentToTui::Message(ChatMessage::system(status))) {
+                .send(AgentToTui::Message(ChatMessage::system(status)))
+            {
                 tracing::warn!("failed to send UI event: {}", e);
             }
         } else {
@@ -613,7 +646,8 @@ Available commands:
                     }
                     if let Err(e) = self
                         .ui_tx
-                        .send(AgentToTui::HybridSearchUpdate { enabled: true }) {
+                        .send(AgentToTui::HybridSearchUpdate { enabled: true })
+                    {
                         tracing::warn!("failed to send UI event: {}", e);
                     }
                 }
@@ -627,17 +661,19 @@ Available commands:
                     }
                     if let Err(e) = self
                         .ui_tx
-                        .send(AgentToTui::HybridSearchUpdate { enabled: false }) {
+                        .send(AgentToTui::HybridSearchUpdate { enabled: false })
+                    {
                         tracing::warn!("failed to send UI event: {}", e);
                     }
                 }
                 _ => {
-                    if let Err(e) = self
-                        .ui_tx
-                        .send(AgentToTui::Message(ChatMessage::error(format!(
-                            "Unknown deep command: {}\nUsage: /deep [on/off]",
-                            args
-                        )))) {
+                    if let Err(e) =
+                        self.ui_tx
+                            .send(AgentToTui::Message(ChatMessage::error(format!(
+                                "Unknown deep command: {}\nUsage: /deep [on/off]",
+                                args
+                            ))))
+                    {
                         tracing::warn!("failed to send UI event: {}", e);
                     }
                 }

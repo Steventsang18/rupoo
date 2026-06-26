@@ -23,10 +23,13 @@ use crate::llm::LlmProvider;
 /// # use rupoo::embedding::EmbeddingService;
 /// # use rupoo::llm::{LlmConfig, LlmProvider};
 /// # use std::sync::Arc;
+/// # async fn example() -> anyhow::Result<()> {
 /// # let config = LlmConfig::new(LlmProvider::OpenAI, Some("api-key".to_string()));
 /// # let http_client = Arc::new(reqwest::Client::new());
 /// let service = EmbeddingService::new(&config, &http_client)?;
 /// let embedding = service.embed("Hello world").await?;
+/// # Ok(())
+/// # }
 /// ```
 pub struct EmbeddingService {
     /// Dimension of embeddings

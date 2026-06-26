@@ -319,6 +319,3 @@ pub fn task_list(tasks: &[(String, TaskStatus)]) {
 
     println!();
 }
-
-
-

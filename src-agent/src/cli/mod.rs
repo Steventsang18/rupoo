@@ -239,11 +239,10 @@ impl ReplSession {
                                 if input == "/quit" {
                                     println!("\n  Bye! 👋");
                                     true
-                                } else if input.is_empty() {
-                                    false // SIGINT, continue
-                                } else if input.starts_with('/') && self.handle_command(&input) {
-                                    false
-                                } else if self.handle_quick_action(&input) {
+                                } else if input.is_empty()
+                                    || (input.starts_with('/') && self.handle_command(&input))
+                                    || self.handle_quick_action(&input)
+                                {
                                     false
                                 } else {
                                     self.submit_message(&input);
@@ -254,14 +253,11 @@ impl ReplSession {
                         }
                     }
                     recv(rx) -> msg => {
-                        match msg {
-                            Ok(AgentToTui::Message(m)) => {
-                                if m.role == rupoo::MessageRole::System && !m.content.is_empty() {
-                                    println!();
-                                    output::system(&m.content);
-                                }
+                        if let Ok(AgentToTui::Message(m)) = msg {
+                            if m.role == rupoo::MessageRole::System && !m.content.is_empty() {
+                                println!();
+                                output::system(&m.content);
                             }
-                            _ => {}
                         }
                         false
                     }
@@ -269,11 +265,17 @@ impl ReplSession {
             } else {
                 match input_rx.recv() {
                     Ok(input) => {
-                        if input == "/quit" { true }
-                        else if input.is_empty() { false }
-                        else if input.starts_with('/') && self.handle_command(&input) { false }
-                        else if self.handle_quick_action(&input) { false }
-                        else { self.submit_message(&input); false }
+                        if input == "/quit" {
+                            true
+                        } else if input.is_empty()
+                            || (input.starts_with('/') && self.handle_command(&input))
+                            || self.handle_quick_action(&input)
+                        {
+                            false
+                        } else {
+                            self.submit_message(&input);
+                            false
+                        }
                     }
                     Err(_) => true,
                 }
@@ -286,6 +288,7 @@ impl ReplSession {
     }
 
     /// Build the input prompt string.
+    #[allow(dead_code)]
     fn build_prompt(&self) -> String {
         format!("{} ", PROMPT_SYMBOL.green().bold())
     }
@@ -846,7 +849,8 @@ impl ReplSession {
         // Switch to new
         self.app.sessions.push(tab);
         self.app.messages = Vec::new();
-        self.app.conversation_history = ConversationHistory::new(HISTORY_DEFAULT_MAX_TURNS).with_token_budget(DEFAULT_TOKEN_BUDGET);
+        self.app.conversation_history = ConversationHistory::new(HISTORY_DEFAULT_MAX_TURNS)
+            .with_token_budget(DEFAULT_TOKEN_BUDGET);
         self.app.intent_state = rupoo::signal::IntentState::new();
         self.app.persist_sessions();
 
@@ -1117,7 +1121,10 @@ pub fn run_tui_with_agent(
             .await
             .ok()
             .flatten()
-            .unwrap_or_else(|| ConversationHistory::new(HISTORY_DEFAULT_MAX_TURNS).with_token_budget(DEFAULT_TOKEN_BUDGET));
+            .unwrap_or_else(|| {
+                ConversationHistory::new(HISTORY_DEFAULT_MAX_TURNS)
+                    .with_token_budget(DEFAULT_TOKEN_BUDGET)
+            });
         if conversation_history.token_budget() == 0 {
             conversation_history = conversation_history.with_token_budget(DEFAULT_TOKEN_BUDGET);
         }

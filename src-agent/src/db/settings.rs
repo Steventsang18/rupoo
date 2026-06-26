@@ -470,6 +470,22 @@ impl TaskRepo {
         })
         .await
     }
+
+    /// Delete a memory entry by content_id.
+    pub async fn delete_memory(&self, id: &str) -> AgentResult<()> {
+        let id = id.to_string();
+        self.with_conn(move |conn| {
+            let affected = conn.execute(
+                "DELETE FROM memories WHERE content_id = ?1",
+                rusqlite::params![id],
+            )?;
+            if affected == 0 {
+                warn!(memory_id = %id, "delete_memory: no matching entry found");
+            }
+            Ok(())
+        })
+        .await
+    }
 }
 
 // ---------------------------------------------------------------------------

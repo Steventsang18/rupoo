@@ -2,8 +2,8 @@ pub mod audit_logger;
 pub mod compliance;
 pub use self::compliance::ComplianceChecker;
 pub use self::compliance::ComplianceResult;
-pub mod confidence;
 pub mod circuit_breaker;
+pub mod confidence;
 
 #[cfg(test)]
 mod test_data_types;
@@ -107,10 +107,13 @@ impl SupervisorImpl {
         let confidence = ConfidenceChecker::default();
         let circuit_breaker =
             CircuitBreaker::new(crate::supervisor::circuit_breaker::BreakerConfig::default());
-        let audit_logger = Arc::new(
-            crate::supervisor::audit_logger::SqliteAuditLogger::new()?,
-        );
-        Ok(Self::new(compliance, confidence, circuit_breaker, audit_logger))
+        let audit_logger = Arc::new(crate::supervisor::audit_logger::SqliteAuditLogger::new()?);
+        Ok(Self::new(
+            compliance,
+            confidence,
+            circuit_breaker,
+            audit_logger,
+        ))
     }
 }
 
@@ -210,12 +213,17 @@ mod integration_tests {
     use crate::supervisor::audit_logger::SqliteAuditLogger;
     use crate::supervisor::circuit_breaker::BreakerConfig;
 
+    fn create_memory_audit_logger() -> Arc<SqliteAuditLogger> {
+        let repo = Arc::new(crate::db::TaskRepo::new(":memory:").unwrap());
+        Arc::new(SqliteAuditLogger::with_repo(repo))
+    }
+
     #[tokio::test]
     async fn test_supervisor_approves_safe_action() {
         let compliance = ComplianceChecker::new(vec!["sudo".to_string()], vec![]);
         let confidence = ConfidenceChecker::default();
         let breaker = CircuitBreaker::new(BreakerConfig::default());
-        let audit = Arc::new(SqliteAuditLogger::new().unwrap());
+        let audit = create_memory_audit_logger();
         let supervisor = SupervisorImpl::new(compliance, confidence, breaker, audit);
         let action = Action::new("echo", "echo hello");
         let meta = ExecutionMeta::with_confidence(0.95);
@@ -229,7 +237,7 @@ mod integration_tests {
             compliance,
             ConfidenceChecker::default(),
             CircuitBreaker::new(BreakerConfig::default()),
-            Arc::new(SqliteAuditLogger::new().unwrap()),
+            create_memory_audit_logger(),
         );
         assert!(supervisor
             .intercept(
@@ -247,7 +255,7 @@ mod integration_tests {
             compliance,
             ConfidenceChecker::default(),
             CircuitBreaker::new(BreakerConfig::default()),
-            Arc::new(SqliteAuditLogger::new().unwrap()),
+            create_memory_audit_logger(),
         );
         let meta = ExecutionMeta::with_confidence(0.3);
         assert!(supervisor
@@ -269,7 +277,7 @@ mod integration_tests {
             ComplianceChecker::new(vec![], vec![]),
             ConfidenceChecker::default(),
             breaker,
-            Arc::new(SqliteAuditLogger::new().unwrap()),
+            create_memory_audit_logger(),
         );
         assert!(supervisor
             .intercept(

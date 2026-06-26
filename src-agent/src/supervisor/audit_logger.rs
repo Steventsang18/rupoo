@@ -1,7 +1,7 @@
+use crate::error::{AgentError, AgentResult};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use crate::error::{AgentError, AgentResult};
 
 /// 审计事件类型
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -64,7 +64,11 @@ impl AuditEvent {
 #[async_trait]
 pub trait AuditLogger: Send + Sync {
     async fn record(&self, event: AuditEvent) -> AgentResult<()>;
-    async fn query_by_type(&self, event_type: AuditEventType, limit: usize) -> AgentResult<Vec<AuditEvent>>;
+    async fn query_by_type(
+        &self,
+        event_type: AuditEventType,
+        limit: usize,
+    ) -> AgentResult<Vec<AuditEvent>>;
     async fn query_blocked(&self, limit: usize) -> AgentResult<Vec<AuditEvent>>;
     async fn count_events(&self) -> AgentResult<usize>;
 }
@@ -88,7 +92,6 @@ impl SqliteAuditLogger {
         Self { repo }
     }
 }
-
 
 #[async_trait]
 impl AuditLogger for SqliteAuditLogger {

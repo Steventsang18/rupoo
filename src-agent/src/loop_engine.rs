@@ -23,24 +23,19 @@ use crate::llm::{LlmGateway, TokenUsage};
 // ---------------------------------------------------------------------------
 
 /// Autonomy level — controls the approval gating during loop execution.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 pub enum AutonomyLevel {
     /// Manual: every step requires approval.
     L1Manual,
     /// Step check: only high-risk steps require approval.
     L2StepCheck,
     /// Round check: approve after each iteration (default).
+    #[default]
     L3RoundCheck,
     /// Auto-correct: autonomous unless an unrecoverable error occurs.
     L4AutoCorrect,
     /// Full auto: no approval gates at all.
     L5FullAuto,
-}
-
-impl Default for AutonomyLevel {
-    fn default() -> Self {
-        Self::L3RoundCheck
-    }
 }
 
 /// Configuration for a single Loop execution.
@@ -293,11 +288,7 @@ impl BudgetTracker {
         self.total_tokens += tokens;
     }
 
-    pub fn check(
-        &self,
-        token_budget: Option<u64>,
-        time_budget_secs: Option<u64>,
-    ) -> BudgetStatus {
+    pub fn check(&self, token_budget: Option<u64>, time_budget_secs: Option<u64>) -> BudgetStatus {
         let now = chrono::Utc::now().timestamp();
         let elapsed = (now - self.started_at).max(0) as u64;
 
@@ -336,10 +327,18 @@ pub fn detect_oscillation(history: &[LoopDecision]) -> bool {
     let last3 = &history[history.len() - 3..];
     matches!(
         last3,
-        [LoopDecision::Done, LoopDecision::Continue, LoopDecision::Done]
+        [
+            LoopDecision::Done,
+            LoopDecision::Continue,
+            LoopDecision::Done
+        ]
     ) || matches!(
         last3,
-        [LoopDecision::Continue, LoopDecision::Done, LoopDecision::Continue]
+        [
+            LoopDecision::Continue,
+            LoopDecision::Done,
+            LoopDecision::Continue
+        ]
     )
 }
 
@@ -363,11 +362,7 @@ pub fn detect_stall(unmet_counts: &[usize]) -> bool {
 pub fn vanished_unmet(prev_unmet: &[String], current_met: &[String]) -> Vec<String> {
     prev_unmet
         .iter()
-        .filter(|u| {
-            !current_met
-                .iter()
-                .any(|m| fuzzy_match(m, u))
-        })
+        .filter(|u| !current_met.iter().any(|m| fuzzy_match(m, u)))
         .cloned()
         .collect()
 }
@@ -418,17 +413,50 @@ fn fuzzy_match(a: &str, b: &str) -> bool {
     fn is_stop_word(t: &str) -> bool {
         matches!(
             t,
-            "a" | "an" | "the" | "is" | "are" | "was" | "were"
-                | "to" | "for" | "of" | "in" | "on" | "at" | "by"
-                | "and" | "or" | "not" | "but" | "it" | "be" | "has"
-                | "have" | "do" | "does" | "with" | "from" | "this"
-                | "that" | "these" | "those" | "can" | "will" | "should"
-                | "could" | "would" | "may" | "just"
+            "a" | "an"
+                | "the"
+                | "is"
+                | "are"
+                | "was"
+                | "were"
+                | "to"
+                | "for"
+                | "of"
+                | "in"
+                | "on"
+                | "at"
+                | "by"
+                | "and"
+                | "or"
+                | "not"
+                | "but"
+                | "it"
+                | "be"
+                | "has"
+                | "have"
+                | "do"
+                | "does"
+                | "with"
+                | "from"
+                | "this"
+                | "that"
+                | "these"
+                | "those"
+                | "can"
+                | "will"
+                | "should"
+                | "could"
+                | "would"
+                | "may"
+                | "just"
         )
     }
 
     fn is_stop_word_char(c: char) -> bool {
-        matches!(c, '的' | '了' | '是' | '在' | '和' | '与' | '或' | '不' | '也' | '就' | '都')
+        matches!(
+            c,
+            '的' | '了' | '是' | '在' | '和' | '与' | '或' | '不' | '也' | '就' | '都'
+        )
     }
 
     let tokens_a = tokens(a);
@@ -444,16 +472,11 @@ fn fuzzy_match(a: &str, b: &str) -> bool {
 
 /// Sanitise a Done verdict: if confidence is too low or unmet items vanished,
 /// downgrade to Continue.
-pub fn sanitise_verdict(
-    result: &mut EvaluationResult,
-    prev_unmet: Option<&[String]>,
-) {
+pub fn sanitise_verdict(result: &mut EvaluationResult, prev_unmet: Option<&[String]>) {
     // Rule 1: low confidence Done → Continue
     if result.verdict == LoopDecision::Done && result.confidence < 0.7 {
         result.verdict = LoopDecision::Continue;
-        result
-            .unmet
-            .push("置信度过低，需要重新验证".into());
+        result.unmet.push("置信度过低，需要重新验证".into());
     }
 
     // Rule 2: vanished unmet items → Continue
@@ -471,8 +494,8 @@ pub fn sanitise_verdict(
 // ---------------------------------------------------------------------------
 
 use crate::agent::Agent;
-use crate::safety::SafetyContext;
 use crate::memory_cache::MemoryCache;
+use crate::safety::SafetyContext;
 
 /// In-memory state for an actively running Loop.
 #[allow(dead_code)] // fields used in later phases
@@ -494,11 +517,7 @@ pub struct LoopEngine {
 }
 
 impl LoopEngine {
-    pub fn new(
-        repo: Arc<TaskRepo>,
-        memory: Arc<MemoryCache>,
-        safety: SafetyContext,
-    ) -> Self {
+    pub fn new(repo: Arc<TaskRepo>, memory: Arc<MemoryCache>, safety: SafetyContext) -> Self {
         Self {
             repo,
             memory,
@@ -555,7 +574,9 @@ impl LoopEngine {
         self.repo.save_loop_run(&current_run).await?;
 
         loop_data.current_run_id = Some(current_run.id.clone());
-        self.repo.update_loop_status(&loop_id, &LoopStatus::Running, Some(&current_run.id)).await?;
+        self.repo
+            .update_loop_status(&loop_id, &LoopStatus::Running, Some(&current_run.id))
+            .await?;
 
         info!(loop_id = %loop_id, goal = %goal, "loop started");
 
@@ -621,7 +642,9 @@ impl LoopEngine {
         }
 
         loop_data.current_run_id = Some(latest_run.id.clone());
-        self.repo.update_loop_status(loop_id, &loop_data.status, Some(&latest_run.id)).await?;
+        self.repo
+            .update_loop_status(loop_id, &loop_data.status, Some(&latest_run.id))
+            .await?;
 
         info!(loop_id = %loop_id, status = ?loop_data.status, "loop resumed");
 
@@ -699,7 +722,9 @@ impl LoopEngine {
         loop {
             // --- Guard checks ---
             if self.is_cancelled() {
-                self.repo.update_loop_status(loop_id, &LoopStatus::Cancelled, None).await?;
+                self.repo
+                    .update_loop_status(loop_id, &LoopStatus::Cancelled, None)
+                    .await?;
                 return Ok(Loop {
                     id: loop_id.to_string(),
                     goal: String::new(),
@@ -723,12 +748,16 @@ impl LoopEngine {
                 loop_data.config.time_budget_secs,
             ) {
                 BudgetStatus::TokenExceeded { .. } => {
-                    self.repo.update_loop_status(loop_id, &LoopStatus::BudgetExceeded, None).await?;
+                    self.repo
+                        .update_loop_status(loop_id, &LoopStatus::BudgetExceeded, None)
+                        .await?;
                     loop_data.status = LoopStatus::BudgetExceeded;
                     return Ok(loop_data);
                 }
                 BudgetStatus::TimeExceeded { .. } => {
-                    self.repo.update_loop_status(loop_id, &LoopStatus::TimedOut, None).await?;
+                    self.repo
+                        .update_loop_status(loop_id, &LoopStatus::TimedOut, None)
+                        .await?;
                     loop_data.status = LoopStatus::TimedOut;
                     return Ok(loop_data);
                 }
@@ -736,9 +765,11 @@ impl LoopEngine {
             }
 
             // Iteration cap — allow up to max_iterations total LoopRuns
-            let total_iters = self.repo.count_loop_runs(&loop_id).await?;
+            let total_iters = self.repo.count_loop_runs(loop_id).await?;
             if total_iters > loop_data.config.max_iterations {
-                self.repo.update_loop_status(loop_id, &LoopStatus::Failed, None).await?;
+                self.repo
+                    .update_loop_status(loop_id, &LoopStatus::Failed, None)
+                    .await?;
                 loop_data.status = LoopStatus::Failed;
                 warn!(loop_id = %loop_id, iterations = total_iters, "loop exhausted max iterations");
                 return Ok(loop_data);
@@ -747,14 +778,18 @@ impl LoopEngine {
             // Oscillation / stall detection
             let recent_decisions = self.repo.recent_loop_decisions(loop_id, 3).await?;
             if detect_oscillation(&recent_decisions) {
-                self.repo.update_loop_status(loop_id, &LoopStatus::Paused, None).await?;
+                self.repo
+                    .update_loop_status(loop_id, &LoopStatus::Paused, None)
+                    .await?;
                 loop_data.status = LoopStatus::Paused;
                 warn!(loop_id = %loop_id, "loop oscillating, paused for human intervention");
                 return Ok(loop_data);
             }
             let recent_unmet = self.repo.recent_unmet_counts(loop_id, 3).await?;
             if detect_stall(&recent_unmet) {
-                self.repo.update_loop_status(loop_id, &LoopStatus::Paused, None).await?;
+                self.repo
+                    .update_loop_status(loop_id, &LoopStatus::Paused, None)
+                    .await?;
                 loop_data.status = LoopStatus::Paused;
                 warn!(loop_id = %loop_id, "loop stalled (no progress in unmet count), paused");
                 return Ok(loop_data);
@@ -766,7 +801,7 @@ impl LoopEngine {
                     // Execute the Plan wrapped by the current LoopRun
                     let current_run = self
                         .repo
-                        .get_latest_loop_run(&loop_id)
+                        .get_latest_loop_run(loop_id)
                         .await?
                         .ok_or_else(|| AgentError::Other("no loop run".into()))?;
 
@@ -777,12 +812,16 @@ impl LoopEngine {
 
                     match plan_result {
                         Ok(()) => {
-                            self.repo.update_loop_status(loop_id, &LoopStatus::StepComplete, None).await?;
+                            self.repo
+                                .update_loop_status(loop_id, &LoopStatus::StepComplete, None)
+                                .await?;
                         }
                         Err(e) => {
                             // Step failure — let evaluation decide
                             warn!(loop_id = %loop_id, error = %e, "plan step failed, moving to evaluation");
-                            self.repo.update_loop_status(loop_id, &LoopStatus::StepComplete, None).await?;
+                            self.repo
+                                .update_loop_status(loop_id, &LoopStatus::StepComplete, None)
+                                .await?;
                         }
                     }
                 }
@@ -822,7 +861,7 @@ impl LoopEngine {
 
                     let current_run = self
                         .repo
-                        .get_latest_loop_run(&loop_id)
+                        .get_latest_loop_run(loop_id)
                         .await?
                         .ok_or_else(|| AgentError::Other("no loop run to evaluate".into()))?;
 
@@ -839,9 +878,8 @@ impl LoopEngine {
                         .await?;
 
                     // Sanitise the verdict
-                    let prev_unmet: Option<Vec<String>> = prev_eval
-                        .as_ref()
-                        .map(|e| e.unmet.clone());
+                    let prev_unmet: Option<Vec<String>> =
+                        prev_eval.as_ref().map(|e| e.unmet.clone());
                     sanitise_verdict(&mut eval, prev_unmet.as_deref());
 
                     // Save evaluation result
@@ -858,7 +896,9 @@ impl LoopEngine {
                     // Act on the verdict
                     match eval.verdict {
                         LoopDecision::Done => {
-                            self.repo.update_loop_status(loop_id, &LoopStatus::Completed, None).await?;
+                            self.repo
+                                .update_loop_status(loop_id, &LoopStatus::Completed, None)
+                                .await?;
                             loop_data.status = LoopStatus::Completed;
                             info!(loop_id = %loop_id, "loop completed");
                             return Ok(loop_data);
@@ -873,15 +913,25 @@ impl LoopEngine {
                             let next_iter = current_run.iteration + 1;
                             let new_run = LoopRun::new(loop_id, next_iter, &correction_plan.id);
                             self.repo.save_loop_run(&new_run).await?;
-                            self.repo.update_loop_status(loop_id, &LoopStatus::Running, Some(&new_run.id)).await?;
+                            self.repo
+                                .update_loop_status(
+                                    loop_id,
+                                    &LoopStatus::Running,
+                                    Some(&new_run.id),
+                                )
+                                .await?;
                         }
                         LoopDecision::Decompose => {
                             // Phase B: recursive decomposition
-                            self.repo.update_loop_status(loop_id, &LoopStatus::Decomposing, None).await?;
+                            self.repo
+                                .update_loop_status(loop_id, &LoopStatus::Decomposing, None)
+                                .await?;
                             info!(loop_id = %loop_id, unmet_count = eval.unmet.len(), "decomposing goal into sub-goals");
                         }
                         LoopDecision::Impossible => {
-                            self.repo.update_loop_status(loop_id, &LoopStatus::Failed, None).await?;
+                            self.repo
+                                .update_loop_status(loop_id, &LoopStatus::Failed, None)
+                                .await?;
                             loop_data.status = LoopStatus::Failed;
                             warn!(loop_id = %loop_id, "loop deemed impossible by evaluator");
                             return Ok(loop_data);
@@ -898,7 +948,7 @@ impl LoopEngine {
                     // Load the evaluation that triggered decomposition
                     let trigger_run = self
                         .repo
-                        .get_latest_loop_run(&loop_id)
+                        .get_latest_loop_run(loop_id)
                         .await?
                         .ok_or_else(|| AgentError::Other("no loop run for decomposition".into()))?;
 
@@ -924,7 +974,8 @@ impl LoopEngine {
                         (remaining / sub_goals.len().max(1) as u64).max(1)
                     });
                     let child_time_budget = loop_data.config.time_budget_secs.map(|t| {
-                        let elapsed = (chrono::Utc::now().timestamp() - loop_data.created_at).max(0) as u64;
+                        let elapsed =
+                            (chrono::Utc::now().timestamp() - loop_data.created_at).max(0) as u64;
                         let remaining = t.saturating_sub(elapsed);
                         (remaining / sub_goals.len().max(1) as u64).max(1)
                     });
@@ -938,7 +989,10 @@ impl LoopEngine {
                         }
 
                         let mut child_config = LoopConfig {
-                            max_iterations: loop_data.config.max_iterations.saturating_sub(sub_goals.len() as u32 * 2),
+                            max_iterations: loop_data
+                                .config
+                                .max_iterations
+                                .saturating_sub(sub_goals.len() as u32 * 2),
                             token_budget: child_budget,
                             time_budget_secs: child_time_budget,
                             ..Default::default()
@@ -957,7 +1011,13 @@ impl LoopEngine {
 
                         let child_run = LoopRun::new(&child_loop.id, 0, &child_plan.id);
                         self.repo.save_loop_run(&child_run).await?;
-                        self.repo.update_loop_status(&child_loop.id, &LoopStatus::Running, Some(&child_run.id)).await?;
+                        self.repo
+                            .update_loop_status(
+                                &child_loop.id,
+                                &LoopStatus::Running,
+                                Some(&child_run.id),
+                            )
+                            .await?;
 
                         info!(
                             parent = %loop_id,
@@ -1005,10 +1065,7 @@ impl LoopEngine {
                             .map(|c| format!("{}: completed", c.goal))
                             .collect(),
                         unmet: if failed_count > 0 {
-                            vec![format!(
-                                "{} sub-goals failed to complete",
-                                failed_count
-                            )]
+                            vec![format!("{} sub-goals failed to complete", failed_count)]
                         } else {
                             vec![]
                         },
@@ -1030,13 +1087,17 @@ impl LoopEngine {
                     // Act on aggregated verdict directly — don't re-evaluate via LLM
                     match agg_eval.verdict {
                         LoopDecision::Done => {
-                            self.repo.update_loop_status(loop_id, &LoopStatus::Completed, None).await?;
+                            self.repo
+                                .update_loop_status(loop_id, &LoopStatus::Completed, None)
+                                .await?;
                             loop_data.status = LoopStatus::Completed;
                             info!(loop_id = %loop_id, children = completed_children.len(), "loop completed via decomposition");
                             return Ok(loop_data);
                         }
                         LoopDecision::Impossible => {
-                            self.repo.update_loop_status(loop_id, &LoopStatus::Failed, None).await?;
+                            self.repo
+                                .update_loop_status(loop_id, &LoopStatus::Failed, None)
+                                .await?;
                             loop_data.status = LoopStatus::Failed;
                             warn!(loop_id = %loop_id, "loop deemed impossible after decomposition");
                             return Ok(loop_data);
@@ -1044,7 +1105,9 @@ impl LoopEngine {
                         LoopDecision::Continue | LoopDecision::Decompose => {
                             // There's remaining work — go back to Evaluating for
                             // a fresh LLM assessment of what to do next.
-                            self.repo.update_loop_status(loop_id, &LoopStatus::Evaluating, None).await?;
+                            self.repo
+                                .update_loop_status(loop_id, &LoopStatus::Evaluating, None)
+                                .await?;
                             info!(
                                 loop_id = %loop_id,
                                 completed = completed_children.len(),
@@ -1069,7 +1132,9 @@ impl LoopEngine {
 
                 LoopStatus::Pending => {
                     // Should not reach here
-                    self.repo.update_loop_status(loop_id, &LoopStatus::Running, None).await?;
+                    self.repo
+                        .update_loop_status(loop_id, &LoopStatus::Running, None)
+                        .await?;
                 }
             }
         }
@@ -1126,9 +1191,7 @@ impl LoopEngine {
         let plan = self.repo.load_plan(&run.plan_id).await?;
 
         // Build compressed context (avoid linear context growth)
-        let prev_unmet_str = prev_eval
-            .map(|e| e.unmet.join("\n"))
-            .unwrap_or_default();
+        let prev_unmet_str = prev_eval.map(|e| e.unmet.join("\n")).unwrap_or_default();
 
         let plan_summary = plan.name.clone();
 
@@ -1188,11 +1251,10 @@ Actual results: {actual_output}
                             if result.met.is_empty()
                                 && result.unmet.is_empty()
                                 && result.verdict == LoopDecision::Done
+                                && attempt < MAX_EVAL_RETRIES
                             {
-                                if attempt < MAX_EVAL_RETRIES {
-                                    warn!(attempt, "empty evaluation with Done verdict, retrying");
-                                    continue;
-                                }
+                                warn!(attempt, "empty evaluation with Done verdict, retrying");
+                                continue;
                             }
                             return Ok(result);
                         }
@@ -1214,8 +1276,7 @@ Actual results: {actual_output}
                     warn!(attempt, error = %e, "evaluation attempt failed");
                     _last_err = Some(e);
                     if attempt < MAX_EVAL_RETRIES {
-                        tokio::time::sleep(std::time::Duration::from_secs(2u64.pow(attempt)))
-                            .await;
+                        tokio::time::sleep(std::time::Duration::from_secs(2u64.pow(attempt))).await;
                     }
                 }
             }
@@ -1264,10 +1325,7 @@ Suggested approach: {next_action}"#,
     }
 
     /// Convert StepSpecs (from generate_plan) into a Plan with proper Step variants.
-    fn step_specs_to_plan(
-        name: &str,
-        specs: &[crate::llm::StepSpec],
-    ) -> crate::task::Plan {
+    fn step_specs_to_plan(name: &str, specs: &[crate::llm::StepSpec]) -> crate::task::Plan {
         let steps: Vec<crate::task::Step> = specs
             .iter()
             .map(|spec| match spec.step_type.as_str() {
@@ -1339,22 +1397,31 @@ Suggested approach: {next_action}"#,
             let status = step.status();
             let detail = match step {
                 crate::task::Step::Think { output, .. } => output.clone().unwrap_or_default(),
-                crate::task::Step::ToolCall { result, .. } => result
-                    .as_ref()
-                    .map(|r| r.to_string())
-                    .unwrap_or_default(),
+                crate::task::Step::ToolCall { result, .. } => {
+                    result.as_ref().map(|r| r.to_string()).unwrap_or_default()
+                }
                 crate::task::Step::Exec { output, .. } => output.clone().unwrap_or_default(),
-                crate::task::Step::HttpRequest { response, .. } => response.clone().unwrap_or_default(),
+                crate::task::Step::HttpRequest { response, .. } => {
+                    response.clone().unwrap_or_default()
+                }
                 crate::task::Step::Finish { summary, .. } => summary.clone(),
                 crate::task::Step::WaitForInput { .. } => "(waiting for input)".into(),
-                crate::task::Step::BrowserAction { output, .. } => output.clone().unwrap_or_default(),
+                crate::task::Step::BrowserAction { output, .. } => {
+                    output.clone().unwrap_or_default()
+                }
             };
 
             // Truncate each step's detail to head+tail
             let compressed = if detail.len() > 400 {
                 let head: String = detail.chars().take(200).collect();
-                let tail: String = detail.chars().rev().take(200).collect::<String>()
-                    .chars().rev().collect();
+                let tail: String = detail
+                    .chars()
+                    .rev()
+                    .take(200)
+                    .collect::<String>()
+                    .chars()
+                    .rev()
+                    .collect();
                 format!("{}...{}", head, tail)
             } else {
                 detail
@@ -1381,7 +1448,9 @@ Suggested approach: {next_action}"#,
             return Ok(None);
         }
         let prev_iter = current_iteration - 1;
-        self.repo.load_loop_run_by_iteration(loop_id, prev_iter).await
+        self.repo
+            .load_loop_run_by_iteration(loop_id, prev_iter)
+            .await
     }
 
     /// Compute total tokens consumed across ALL LoopRuns in this Loop.
@@ -1394,17 +1463,15 @@ Suggested approach: {next_action}"#,
     // -----------------------------------------------------------------------
 
     /// Run a child loop (simplified child execution, takes &self).
-    async fn run_child_loop(
-        &self,
-        child_loop_id: &str,
-        llm: &LlmGateway,
-    ) -> AgentResult<Loop> {
+    async fn run_child_loop(&self, child_loop_id: &str, llm: &LlmGateway) -> AgentResult<Loop> {
         let mut loop_data = self.repo.load_loop(child_loop_id).await?;
         let max_iterations = loop_data.config.max_iterations;
 
         for _round in 0..max_iterations {
             if self.is_cancelled() {
-                self.repo.update_loop_status(child_loop_id, &LoopStatus::Cancelled, None).await?;
+                self.repo
+                    .update_loop_status(child_loop_id, &LoopStatus::Cancelled, None)
+                    .await?;
                 loop_data.status = LoopStatus::Cancelled;
                 return Ok(loop_data);
             }
@@ -1424,11 +1491,15 @@ Suggested approach: {next_action}"#,
                     if plan_result.is_err() {
                         warn!(child = %child_loop_id, "child plan step failed, moving to evaluation");
                     }
-                    self.repo.update_loop_status(child_loop_id, &LoopStatus::StepComplete, None).await?;
+                    self.repo
+                        .update_loop_status(child_loop_id, &LoopStatus::StepComplete, None)
+                        .await?;
                 }
 
                 LoopStatus::StepComplete => {
-                    self.repo.update_loop_status(child_loop_id, &LoopStatus::Evaluating, None).await?;
+                    self.repo
+                        .update_loop_status(child_loop_id, &LoopStatus::Evaluating, None)
+                        .await?;
                 }
 
                 LoopStatus::Evaluating => {
@@ -1439,14 +1510,14 @@ Suggested approach: {next_action}"#,
                         .ok_or_else(|| AgentError::Other("no child run to evaluate".into()))?;
 
                     let prev_eval = if run.iteration > 0 {
-                        self.load_prev_evaluation(child_loop_id, run.iteration).await?
+                        self.load_prev_evaluation(child_loop_id, run.iteration)
+                            .await?
                     } else {
                         None
                     };
 
-                    let prev_unmet: Option<Vec<String>> = prev_eval
-                        .as_ref()
-                        .map(|e| e.unmet.clone());
+                    let prev_unmet: Option<Vec<String>> =
+                        prev_eval.as_ref().map(|e| e.unmet.clone());
 
                     let mut eval = self
                         .evaluate(llm, &loop_data.goal, &run, prev_eval.as_ref())
@@ -1466,7 +1537,9 @@ Suggested approach: {next_action}"#,
 
                     match eval.verdict {
                         LoopDecision::Done => {
-                            self.repo.update_loop_status(child_loop_id, &LoopStatus::Completed, None).await?;
+                            self.repo
+                                .update_loop_status(child_loop_id, &LoopStatus::Completed, None)
+                                .await?;
                             loop_data.status = LoopStatus::Completed;
                             return Ok(loop_data);
                         }
@@ -1478,7 +1551,13 @@ Suggested approach: {next_action}"#,
                             let next_iter = run.iteration + 1;
                             let new_run = LoopRun::new(child_loop_id, next_iter, &correction.id);
                             self.repo.save_loop_run(&new_run).await?;
-                            self.repo.update_loop_status(child_loop_id, &LoopStatus::Running, Some(&new_run.id)).await?;
+                            self.repo
+                                .update_loop_status(
+                                    child_loop_id,
+                                    &LoopStatus::Running,
+                                    Some(&new_run.id),
+                                )
+                                .await?;
                         }
                         LoopDecision::Decompose => {
                             // Children can decompose too — but to limit recursion depth,
@@ -1491,10 +1570,18 @@ Suggested approach: {next_action}"#,
                             let next_iter = run.iteration + 1;
                             let new_run = LoopRun::new(child_loop_id, next_iter, &correction.id);
                             self.repo.save_loop_run(&new_run).await?;
-                            self.repo.update_loop_status(child_loop_id, &LoopStatus::Running, Some(&new_run.id)).await?;
+                            self.repo
+                                .update_loop_status(
+                                    child_loop_id,
+                                    &LoopStatus::Running,
+                                    Some(&new_run.id),
+                                )
+                                .await?;
                         }
                         LoopDecision::Impossible => {
-                            self.repo.update_loop_status(child_loop_id, &LoopStatus::Failed, None).await?;
+                            self.repo
+                                .update_loop_status(child_loop_id, &LoopStatus::Failed, None)
+                                .await?;
                             loop_data.status = LoopStatus::Failed;
                             return Ok(loop_data);
                         }
@@ -1507,22 +1594,23 @@ Suggested approach: {next_action}"#,
                 }
 
                 _ => {
-                    self.repo.update_loop_status(child_loop_id, &LoopStatus::Running, None).await?;
+                    self.repo
+                        .update_loop_status(child_loop_id, &LoopStatus::Running, None)
+                        .await?;
                 }
             }
         }
 
         // Exhausted iterations
-        self.repo.update_loop_status(child_loop_id, &LoopStatus::Failed, None).await?;
+        self.repo
+            .update_loop_status(child_loop_id, &LoopStatus::Failed, None)
+            .await?;
         loop_data.status = LoopStatus::Failed;
         Ok(loop_data)
     }
 
     /// Execute plan steps without an Agent reference (for child loops).
-    async fn execute_plan_inner(
-        &self,
-        plan: &mut crate::task::Plan,
-    ) -> AgentResult<()> {
+    async fn execute_plan_inner(&self, plan: &mut crate::task::Plan) -> AgentResult<()> {
         use crate::task::PlanStatus;
 
         if plan.status == PlanStatus::Pending || plan.status == PlanStatus::Running {
@@ -1599,7 +1687,7 @@ Example output:
             .filter_map(|line| {
                 let trimmed = line.trim();
                 if trimmed.starts_with("- ") {
-                    let goal = trimmed[2..].trim();
+                    let goal = trimmed.strip_prefix("- ").unwrap_or("").trim();
                     if !goal.is_empty() {
                         Some(goal.to_string())
                     } else {
@@ -1614,10 +1702,7 @@ Example output:
 
         if sub_goals.is_empty() {
             // If parsing fails, create a single sub-goal from the unmet items
-            return Ok(vec![format!(
-                "Address the following: {}",
-                unmet.join("; ")
-            )]);
+            return Ok(vec![format!("Address the following: {}", unmet.join("; "))]);
         }
 
         Ok(sub_goals)
@@ -1727,7 +1812,10 @@ mod tests {
 
     #[test]
     fn test_detect_oscillation_short_history() {
-        assert!(!detect_oscillation(&vec![LoopDecision::Continue, LoopDecision::Done]));
+        assert!(!detect_oscillation(&[
+            LoopDecision::Continue,
+            LoopDecision::Done
+        ]));
     }
 
     #[test]

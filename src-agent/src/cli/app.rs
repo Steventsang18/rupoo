@@ -184,7 +184,8 @@ impl RupooApp {
             session_messages: std::collections::HashMap::new(),
             rt_handle: Some(rt_handle),
             scroll_bottom: true,
-            conversation_history: ConversationHistory::new(crate::cli::HISTORY_DEFAULT_MAX_TURNS).with_token_budget(crate::cli::DEFAULT_TOKEN_BUDGET),
+            conversation_history: ConversationHistory::new(crate::cli::HISTORY_DEFAULT_MAX_TURNS)
+                .with_token_budget(crate::cli::DEFAULT_TOKEN_BUDGET),
             intent_state: rupoo::signal::IntentState::new(),
             llm_configured: false,
             llm_provider: String::new(),

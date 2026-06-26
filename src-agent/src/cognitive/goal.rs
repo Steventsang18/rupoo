@@ -1,5 +1,5 @@
-use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 /// 权限级别
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
@@ -76,7 +76,12 @@ impl AgentGoal {
     }
 
     /// 添加一个约束
-    pub fn with_constraint(mut self, field: &str, desc: &str, severity: ConstraintSeverity) -> Self {
+    pub fn with_constraint(
+        mut self,
+        field: &str,
+        desc: &str,
+        severity: ConstraintSeverity,
+    ) -> Self {
         self.constraints.push(GoalConstraint {
             field: field.to_string(),
             description: desc.to_string(),

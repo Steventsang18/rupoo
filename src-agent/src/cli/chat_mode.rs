@@ -87,7 +87,10 @@ impl AgentUiBridge {
                                     &v.to_string()
                                 };
                                 // Safe truncation at character boundary
-                                let truncated = v_str.chars().take(TOOL_ARGS_DISPLAY_MAX).collect::<String>();
+                                let truncated = v_str
+                                    .chars()
+                                    .take(TOOL_ARGS_DISPLAY_MAX)
+                                    .collect::<String>();
                                 let display = if v_str.chars().count() > TOOL_ARGS_DISPLAY_MAX {
                                     format!("{}...", truncated)
                                 } else {
@@ -99,7 +102,9 @@ impl AgentUiBridge {
                         parts.join(", ")
                     } else {
                         // Fallback to raw args with Unicode-safe truncation
-                        args.chars().take(ARGS_FALLBACK_DISPLAY_MAX).collect::<String>()
+                        args.chars()
+                            .take(ARGS_FALLBACK_DISPLAY_MAX)
+                            .collect::<String>()
                     };
 
                     // Show animated thinking indicator
@@ -119,7 +124,13 @@ impl AgentUiBridge {
                     });
                     // Show compact tool result — Unicode-safe truncation
                     let display_result = if result.len() > TOOL_RESULT_DISPLAY_MAX {
-                        format!("{}…", result.chars().take(TOOL_RESULT_DISPLAY_MAX - 3).collect::<String>())
+                        format!(
+                            "{}…",
+                            result
+                                .chars()
+                                .take(TOOL_RESULT_DISPLAY_MAX - 3)
+                                .collect::<String>()
+                        )
                     } else {
                         result.clone()
                     };

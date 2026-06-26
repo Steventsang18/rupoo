@@ -8,9 +8,9 @@ pub fn run() {
     let db_path = dirs::data_dir()
         .map(|p| p.join("rupoo").join("agent.db"))
         .expect("Failed to get data directory");
-    
+
     std::fs::create_dir_all(db_path.parent().unwrap()).ok();
-    
+
     let db_path_str = db_path.to_string_lossy();
     let agent_state = match rupoo::db::TaskRepo::new(&db_path_str) {
         Ok(repo) => Some(commands::AgentState::new(Arc::new(repo))),
@@ -30,23 +30,33 @@ pub fn run() {
 
     let app = app.setup(move |app| {
         let handle = app.handle().clone();
-        
+
         if agent_state.is_some() {
             commands::emit_agent_log(&handle, "info", "Agent engine initialized successfully");
-            let _ = handle.emit("agent-event", serde_json::json!({
-                "event": "agent_initialized",
-                "status": "ready"
-            }));
-            
+            let _ = handle.emit(
+                "agent-event",
+                serde_json::json!({
+                    "event": "agent_initialized",
+                    "status": "ready"
+                }),
+            );
+
             if let Ok(mut initialized) = app.state::<ipc::AppState>().initialized.lock() {
                 *initialized = true;
             }
         } else {
-            commands::emit_agent_log(&handle, "error", "Agent init failed: database connection error");
-            let _ = handle.emit("agent-event", serde_json::json!({
-                "event": "agent_init_failed",
-                "error": "Failed to initialize database"
-            }));
+            commands::emit_agent_log(
+                &handle,
+                "error",
+                "Agent init failed: database connection error",
+            );
+            let _ = handle.emit(
+                "agent-event",
+                serde_json::json!({
+                    "event": "agent_init_failed",
+                    "error": "Failed to initialize database"
+                }),
+            );
         }
 
         Ok(())

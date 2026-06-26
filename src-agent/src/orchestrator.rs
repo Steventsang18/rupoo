@@ -3,11 +3,11 @@ use tracing::{info, warn};
 
 use crate::cognitive::goal::{AgentGoal, AuthLevel};
 use crate::cognitive::CognitiveEngine;
-use crate::planning::{ExecutionPlan, Planner};
+use crate::error::{AgentError, AgentResult};
 use crate::execution::ExecutionEngine;
 use crate::memory::MemorySystem;
+use crate::planning::{ExecutionPlan, Planner};
 use crate::supervisor::{Action, ExecutionMeta, Supervisor};
-use crate::error::{AgentError, AgentResult};
 
 /// 五层编排器——认知→规划→执行→记忆→监督
 pub struct Orchestrator {
@@ -26,14 +26,22 @@ impl Orchestrator {
         memory: Arc<dyn MemorySystem>,
         supervisor: Box<dyn Supervisor>,
     ) -> Self {
-        Self { cognitive, planner, execution, memory, supervisor }
+        Self {
+            cognitive,
+            planner,
+            execution,
+            memory,
+            supervisor,
+        }
     }
 
     /// 五层闭环执行管线
     pub async fn execute(&self, raw_instruction: &str) -> AgentResult<()> {
         // ======== 第0层：监督拦截（前置） ========
         let init_action = Action::new("execute_task", raw_instruction);
-        self.supervisor.intercept(&init_action, &ExecutionMeta::default()).await?;
+        self.supervisor
+            .intercept(&init_action, &ExecutionMeta::default())
+            .await?;
 
         // ======== 第1层：认知层——目标还原 ========
         info!("[认知层] 解析用户指令: {}", raw_instruction);
@@ -69,21 +77,35 @@ impl Orchestrator {
         info!(
             "[规划层] 选择方案: {} (成功率={:.2}, 风险={:.2})",
             best_plan.name,
-            best_plan.score.as_ref().map(|s| s.success_probability).unwrap_or(0.0),
-            best_plan.score.as_ref().map(|s| s.risk_level).unwrap_or(0.0),
+            best_plan
+                .score
+                .as_ref()
+                .map(|s| s.success_probability)
+                .unwrap_or(0.0),
+            best_plan
+                .score
+                .as_ref()
+                .map(|s| s.risk_level)
+                .unwrap_or(0.0),
         );
         info!("[规划层] {} 个备选方案", fallbacks.len());
 
         // ======== 第3层：执行层——带监督的逐步执行 ========
         for (i, step) in best_plan.steps.iter().enumerate() {
-            let step_action = Action::new("execute_step", &format!("step {}/{}", i + 1, best_plan.steps.len()));
+            let step_action = Action::new(
+                "execute_step",
+                &format!("step {}/{}", i + 1, best_plan.steps.len()),
+            );
             let meta = ExecutionMeta::with_tool(&format!("{:?}", std::mem::discriminant(step)));
 
             // 每步执行前监督拦截
             self.supervisor.intercept(&step_action, &meta).await?;
 
             // 入参校验
-            let validation = self.execution.validate_input("step", &serde_json::json!({})).await?;
+            let validation = self
+                .execution
+                .validate_input("step", &serde_json::json!({}))
+                .await?;
             if validation.trigger_replan {
                 warn!("[执行层] 步骤 {} 入参校验失败，触发重规划", i);
                 // 触发重规划（Phase 3 完整实现）
@@ -113,7 +135,11 @@ impl Orchestrator {
         let tags = vec![
             "execution".to_string(),
             "case".to_string(),
-            goal.primary_objective.split_whitespace().next().unwrap_or("unknown").to_string(),
+            goal.primary_objective
+                .split_whitespace()
+                .next()
+                .unwrap_or("unknown")
+                .to_string(),
         ];
 
         let summary = format!(
@@ -138,16 +164,20 @@ impl Orchestrator {
 
 #[cfg(test)]
 mod tests {
-    use async_trait::async_trait;
     use super::*;
     use crate::cognitive::goal::AgentGoal;
     use crate::memory::traits::MemoryStorage;
+    use async_trait::async_trait;
 
     /// 模拟认知层——用于测试
     struct MockCognitive;
     #[async_trait]
     impl CognitiveEngine for MockCognitive {
-        async fn parse(&self, raw: &str, _ctx: &crate::context::ConversationContext) -> AgentResult<AgentGoal> {
+        async fn parse(
+            &self,
+            raw: &str,
+            _ctx: &crate::context::ConversationContext,
+        ) -> AgentResult<AgentGoal> {
             Ok(AgentGoal::new(raw, "模拟目标"))
         }
         async fn decompose(&self, _goal: &AgentGoal) -> AgentResult<Vec<AgentGoal>> {
@@ -194,7 +224,11 @@ mod tests {
         fn episodic(&self) -> &dyn MemoryStorage {
             &MockStorage
         }
-        async fn hybrid_recall(&self, _query: &str, _limit: usize) -> AgentResult<Vec<crate::task::MemoryEntry>> {
+        async fn hybrid_recall(
+            &self,
+            _query: &str,
+            _limit: usize,
+        ) -> AgentResult<Vec<crate::task::MemoryEntry>> {
             Ok(vec![])
         }
     }
@@ -202,9 +236,21 @@ mod tests {
     struct MockStorage;
     #[async_trait]
     impl MemoryStorage for MockStorage {
-        async fn store(&self, _entry: crate::task::MemoryEntry) -> AgentResult<()> { Ok(()) }
-        async fn retrieve(&self, _query: &str, _limit: usize) -> AgentResult<Vec<crate::task::MemoryEntry>> { Ok(vec![]) }
-        async fn delete(&self, _id: &str) -> AgentResult<()> { Ok(()) }
-        async fn count(&self) -> AgentResult<usize> { Ok(0) }
+        async fn store(&self, _entry: crate::task::MemoryEntry) -> AgentResult<()> {
+            Ok(())
+        }
+        async fn retrieve(
+            &self,
+            _query: &str,
+            _limit: usize,
+        ) -> AgentResult<Vec<crate::task::MemoryEntry>> {
+            Ok(vec![])
+        }
+        async fn delete(&self, _id: &str) -> AgentResult<()> {
+            Ok(())
+        }
+        async fn count(&self) -> AgentResult<usize> {
+            Ok(0)
+        }
     }
 }

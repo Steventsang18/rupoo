@@ -1,9 +1,9 @@
+use crate::error::AgentResult;
+use crate::memory::traits::MemoryStorage;
+use crate::task::MemoryEntry;
+use async_trait::async_trait;
 use std::collections::VecDeque;
 use std::sync::Mutex;
-use async_trait::async_trait;
-use crate::error::AgentResult;
-use crate::task::MemoryEntry;
-use crate::memory::traits::MemoryStorage;
 
 /// 短期记忆——会话内高速缓存
 pub struct ShortTermMemory {
@@ -36,8 +36,12 @@ impl MemoryStorage for ShortTermMemory {
         let query_lower = query.to_lowercase();
         let mut results: Vec<MemoryEntry> = entries
             .iter()
-            .filter(|e| e.content.to_lowercase().contains(&query_lower)
-                || e.tags.iter().any(|t| t.to_lowercase().contains(&query_lower)))
+            .filter(|e| {
+                e.content.to_lowercase().contains(&query_lower)
+                    || e.tags
+                        .iter()
+                        .any(|t| t.to_lowercase().contains(&query_lower))
+            })
             .take(limit)
             .cloned()
             .collect();

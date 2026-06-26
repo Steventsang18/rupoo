@@ -1,9 +1,9 @@
-pub mod validator;
 pub mod replanner;
+pub mod validator;
 
+use crate::error::AgentResult;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
-use crate::error::AgentResult;
 
 /// 数据差异严重程度
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
