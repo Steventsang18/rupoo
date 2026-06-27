@@ -6,7 +6,7 @@ Rupoo is a terminal-based AI assistant with a native REPL interface, featuring s
 
 ```
 Version:   0.5.0          Language: Rust 2021
-Lines:     ~46,000        Tests:    231 ✅
+Lines:     ~48,000        Tests:    275 ✅
 Interface: Native REPL    LLM:      Anthropic / OpenAI / DeepSeek / Ollama
 DB:        SQLite (FTS5)  Memory:   Hybrid Search (FTS5 + Vector)
 Safety:    path_jail sandbox + SSRF protection
@@ -36,6 +36,11 @@ Safety:    path_jail sandbox + SSRF protection
 | **Deep Search Toggle** | Enable/disable hybrid search with `/deep on/off` |
 | **Skill System** | JSON-based skills with auto-learning capability |
 | **Crash Recovery** | Heartbeat checkpoints with transactional atomicity |
+| **Five-Layer Pipeline** | Orchestrator with Cognitive → Planner → Supervisor → Execution → Memory layers |
+| **Trait-Based Architecture** | All core layers defined by traits for mock testing and provider swaps |
+| **Cognitive Engine** | LLM-powered goal parsing with safety boundary detection and task decomposition |
+| **Supervisor 3-Gate** | Compliance checker → Confidence checker → Circuit breaker serial intercept |
+| **Memory System Bridge** | Unified `MemorySystem` trait bridging legacy store with new architecture |
 
 ---
 
@@ -77,61 +82,53 @@ rupoo
 
 ---
 
-## 🎯 New in v0.5.0 — Loop Engineering
+## 🎯 New in v0.5.0 — Five-Layer Pipeline Architecture
 
-Loop Engineering introduces adaptive iterative execution: the Agent autonomously plans, executes, evaluates, and corrects until the goal is met.
+v0.5.0 introduces a major architecture overhaul: a formal five-layer pipeline that replaces
+the monolithic agent core with well-defined, independently-testable layers.
 
-### Adaptive Loop
-
-```
-User Goal → Plan → Execute → LLM Evaluate → met ✓? → Done
-                ↑                          ↓ unmet ✗
-                └── Correction Plan ←──────┘
-```
-
-```bash
-# Start an adaptive loop
-/loop "Optimize project performance"
-
-# Check loop status
-/loop status <id>
-
-# List all loops
-/loop list
-
-# Pause / resume / cancel
-/loop pause <id>
-/loop resume <id>
-/loop cancel <id>
-```
-
-### Recursive Decomposition
-
-When a goal is too complex, the evaluator decomposes it into independent sub-goals and merges results.
+### Five-Layer Orchestrator
 
 ```
-Complex Goal → Decompose → [Sub-Loop 1, Sub-Loop 2, ...] → Aggregate → Evaluate
+User Input
+    │
+    ├─ Layer 1: Cognitive Engine  ── parse goal, safety check, decompose
+    ├─ Layer 2: Planner           ── generate alternatives, score, select best
+    ├─ Layer 3: Supervisor        ── 3-gate intercept (compliance → confidence → circuit-breaker)
+    ├─ Layer 4: Execution Engine  ── validate input, run steps, detect replan
+    └─ Layer 5: Memory System     ── short-term / long-term / episodic recall
 ```
 
-### CLI Loop Commands
+### Trait-Based Architecture
 
-```bash
-rupoo loops start "Fix all failing tests" --max-iterations 20
-rupoo loops status <id>
-rupoo loops list
-rupoo loops pause <id>
-rupoo loops resume <id>
-rupoo loops cancel <id>
+Each layer is defined by a trait, enabling mock testing and future provider swaps:
+
+- **`CognitiveEngine`** — parse raw instructions into `AgentGoal`, detect safety boundary violations, decompose complex goals
+- **`Planner`** — generate alternative execution plans, score by success probability / cost / risk
+- **`Supervisor`** — three-gate serial intercept: ComplianceChecker → ConfidenceChecker → CircuitBreaker
+- **`ExecutionEngine`** — step validation with type-aware parameter checking and replan triggers
+- **`MemorySystem`** — unified trait over short-term, long-term, and episodic stores with hybrid recall
+
+### Supervisor 3-Gate Protection
+
+```
+Action → Gate 1: Compliance (forbidden-command filter)
+       → Gate 2: Confidence (semantic confidence threshold)
+       → Gate 3: Circuit Breaker (failure-rate threshold)
+       → Approved / Blocked
 ```
 
-### Convergence Guarantees
+### Memory System Bridge
 
-| Mechanism | Description |
-|-----------|-------------|
-| Consistency Check | Vanished unmet items force re-evaluation |
-| Oscillation Detection | [Done, Continue, Done] pattern triggers pause |
-| Hard Limits | max_iterations + stall detection prevent infinite loops |
-| Budget Guard | Token + time budgets with graceful pause |
+The `MemorySystemBridge` wraps the legacy `MemoryStore` behind the new `MemorySystem`
+trait, providing backward compatibility while enabling the unified recall path.
+
+### Quality & Safety
+
+- **239 unit tests** + **4 integration tests** + **9 doc tests** = **275 total**
+- **Clippy clean** — zero warnings across all targets
+- **Hygiene fixes**: memory leak patched (vector store `remove()`), placeholder implementations emit runtime warnings, `clippy --fix` applied project-wide
+- **Safety alignment**: `SafetyContext` now reads config file defaults and merges with runtime rules
 
 ---
 
@@ -294,23 +291,29 @@ cargo bench
 ## 📊 Architecture
 
 ```
-┌──────────────────────────────────────────────────────────────────────┐
-│                        User Layer (CLI/TUI)                          │
-│  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌───────┐ │
-│  │  Chat    │  │  Plan    │  │  Loop    │  │ Commands │  │Memory │ │
-│  │  Mode    │  │  Mode    │  │  Mode    │  │  System  │  │System │ │
-│  └────┬─────┘  └────┬─────┘  └────┬─────┘  └────┬─────┘  └───┬───┘ │
-└───────┼─────────────┼─────────────┼─────────────┼─────────────┼──────┘
-        │             │             │             │             │
-┌───────▼─────────────▼─────────────▼─────────────▼─────────────▼──────┐
-│                         Agent Core Layer                             │
-│  ┌──────────────────────────────────────────────────────────────┐   │
-│  │  Agent + LoopEngine + Memory System + LLM Gateway            │   │
-│  │  ┌──────────┐ ┌──────────────┐ ┌─────────────┐ ┌──────────┐ │   │
-│  │  │ TaskRepo │ │ LoopEngine   │ │ MemoryStore │ │ PlanCache│ │   │
-│  │  └──────────┘ └──────────────┘ └─────────────┘ └──────────┘ │   │
-│  └──────────────────────────────────────────────────────────────┘   │
-└──────────────────────────────────────────────────────────────────────┘
+User Layer:  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌──────────┐
+             │  Chat    │  │  Plan    │  │  Loop    │  │ Commands │  │  Skills  │
+             │  Mode    │  │  Mode    │  │  Mode    │  │  System  │  │  System  │
+             └────┬─────┘  └────┬─────┘  └────┬─────┘  └────┬─────┘  └────┬─────┘
+                  │             │             │             │             │
+         ┌────────┴─────────────┴─────────────┴─────────────┴─────────────┴────────┐
+         │                           Orchestrator                                  │
+         │  ┌──────────────────────────────────────────────────────────────────┐   │
+         │  │ Layer 1: CognitiveEngine  (parse → safety-scan → decompose)     │   │
+         │  │ Layer 2: Planner          (generate → score → select)           │   │
+         │  │ Layer 3: Supervisor       (compliance → confidence → breaker)   │   │
+         │  │ Layer 4: ExecutionEngine  (validate → execute → replan)         │   │
+         │  │ Layer 5: MemorySystem     (short-term / long-term / episodic)   │   │
+         │  └──────────────────────────────────────────────────────────────────┘   │
+         └───────────────────────────────┬──────────────────────────────────────────┘
+                                         │
+         ┌───────────────────────────────▼──────────────────────────────────────────┐
+         │                         Agent Core Layer                                │
+         │  ┌──────────┐ ┌──────────────┐ ┌────────────────┐ ┌──────────────────┐ │
+         │  │ Agent    │ │ LoopEngine   │ │ MemorySystem   │ │ LLM Gateway      │ │
+         │  │ (bridge) │ │ (chat+plan)  │ │ Bridge + Store  │ │ (multi-provider) │ │
+         │  └──────────┘ └──────────────┘ └────────────────┘ └──────────────────┘ │
+         └──────────────────────────────────────────────────────────────────────────┘
 ```
 
 ---

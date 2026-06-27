@@ -5,16 +5,128 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.0] - 2026-06-27
+
+### 🏗️ Architecture Overhaul — Five-Layer Pipeline
+
+#### Trait-Based Core Architecture
+
+Introduced formal trait definitions for all core layers, enabling mock testing and future provider swaps:
+
+- **`CognitiveEngine`** trait — `parse()` → `decompose()` → `check_boundary()` with `AgentGoal`, `AuthLevel`, `GoalConstraint` types
+- **`Planner`** trait — `generate_alternatives()` → `score()` → `select_best()` with `ExecutionPlan`, `PlanScore` types
+- **`ExecutionEngine`** trait — step validation with `ExecutionMeta`, type-aware input checking, replan trigger detection
+- **`MemorySystem`** / **`MemoryStorage`** traits — unified interface over short-term, long-term, episodic stores
+
+#### CognitiveEngine Implementation
+
+- **`CognitiveEngineImpl`**: LLM-powered goal parsing with structured JSON output extraction
+- **Safety boundary detection**: Interactive safety assessment merging goal constraints with `SafetyContext` rules
+- **Task decomposition**: LLM-driven goal decomposition into up to 5 sub-goals with rationale tracking
+- **Forbidden-command / high-risk-keyword detection** integrated into pipeline layer 1
+
+#### Three-Gate Supervisor (Pipeline Layer 3)
+
+- **Gate 1 — ComplianceChecker**: Forbidden-command filtering, approval-required detection
+- **Gate 2 — ConfidenceChecker**: Semantic confidence threshold evaluation
+- **Gate 3 — CircuitBreaker**: Configurable failure threshold with Half-Open → Open probe recovery
+- **`SupervisorImpl`** : Serial 3-gate intercept with rate limiting
+- **`SqliteAuditLogger`**: Persistent audit event logging with `tempfile`-based test isolation
+- **Integration tests**: 4 full-path supervisor integration tests
+
+#### Memory System Bridge
+
+- **`MemorySystemBridge`**: Wraps legacy `MemoryStore` behind new `MemorySystem` trait
+- **Hybrid recall**: Merges short-term + long-term + episodic results with dedup
+- **`ShortTermMemory`**: In-memory cache with capacity-based LRU eviction
+- **Long-term / Episodic adapters**: Delegate to `MemoryStore`'s FTS5 backend via `LegacyStorageAdapter`
+- **Send+Sync safety**: Verified thread-safe bridge architecture
+
+#### Five-Layer Orchestrator
+
+- **`Orchestrator`**: Assembles CognitiveEngine → Planner → ExecutionEngine → Supervisor → MemorySystem into a single pipeline
+- **Step-type-aware validation**: Replaces empty-JSON validation with type-specific parameter extraction
+- **Real replanning**: `Replanner` marks failure point, inserts `Think` step for re-assessment, preserves remaining steps with context
+- **Full mock integration test**: End-to-end pipeline test with mock implementations for all 5 layers
+
+### 🐛 Bug Fixes
+
+#### Vector Store
+
+- **`remove()` memory leak**: Fixed — embeddings now drained from flat array on doc removal (`65cab86`)
+- **IndexMap migration**: Switched from `HashMap` to `IndexMap` for stable iteration order, ensuring embedding array stays in sync with document indices
+- **Honest labeling**: Module docs updated to reflect O(n) brute-force status; `hnswx` dependency reserved but not yet wired
+
+#### Supervisor
+
+- **`SqliteAuditLogger::new()` unwrap removal**: Replaced bare `unwrap()` with proper `?` propagation (`3853de1`)
+- **Dead code cleanup**: Removed stale fields, fixed test naming consistency (`0e5d892`, `18a65ed`)
+- **`#[must_use]` annotations**: Added to `ComplianceResult`, moved to dedicated `compliance.rs` module (`749ef22`)
+
+#### Loop Engine
+
+- **`execute_plan_inner` declared as placeholder**: Added runtime warning `warn!()` logging on each invocation
+- **Daemon mode fallback**: Added not-implemented warning with graceful fallback to standard loop
+
+#### Orchestrator
+
+- **Step-type-aware validation**: Replaces empty `{}` JSON validation with per-type parameter extraction (ToolCall, Exec, HttpRequest, BrowserAction)
+- **Real replanning implementation**: Replaces `continue` placeholder with `Replanner` that inserts `Think` steps and preserves context
+- **Mock full-stack integration tests**: 4 tests covering pipeline success, empty-plans error, supervisor blocking, and memory bridge integration
+
+### ♻️ Code Quality
+
+- **clippy zero-warnings**: `cargo clippy --fix` automated + 6 manual fixes across the codebase (`0c58d68`)
+- **Safety context alignment**: `SafetyContext::from_config()` merges config-file forbidden_commands with runtime defaults (`178d18a`)
+- **Dependency cleanup**: Removed unused/redundant dependencies; documented `hnswx` as reserved-but-unwired (`178d18a`)
+- **`cargo fmt`** applied project-wide
+
+### 🧪 Testing
+
+- **Total: 275 tests** (239 unit + 23 binary + 4 integration + 9 doc) — all passing
+- **4 new orchestrator integration tests**: Full pipeline, supervisor blocking, empty plans, memory bridge
+- **Memory system tests**: Bridge short-term/long-term/episodic store/retrieve, hybrid recall with dedup, Send+Sync compile check
+- **Supervisor integration tests**: 4 full-path tests with `tempfile`-backed audit logger
+- **Cognitive engine tests**: Goal parsing, safety assessment, boundary checking
+
+### 🔧 Technical Changes
+
+| Commit | Change |
+|--------|--------|
+| `cd515fe` | Define `CognitiveEngine` trait, `AgentGoal`, `AuthLevel` types |
+| `167dbb9` | Define `Planner` trait, `PlanScore`, `ExecutionPlan` types |
+| `a43cd38` | Define `ExecutionEngine` trait, validation types |
+| `ac9484f` | Define `MemoryStorage` / `MemorySystem` traits, `ShortTermMemory` |
+| `4a74d35` | Define `Supervisor` trait, `AuditEvent` types |
+| `749ef22` | Add `#[must_use]`, move `ComplianceResult` to `compliance.rs` |
+| `b4562b6` | Implement `ComplianceChecker` as gate 1 |
+| `0faa7f7` | Implement `ConfidenceChecker` as gate 2 |
+| `432bdc5` | Implement `CircuitBreaker` as gate 3 |
+| `31472a1` | `SupervisorImpl` with 3-gate intercept + integration tests |
+| `3853de1` | Fix `SqliteAuditLogger::new()` unwrap |
+| `7da3c03` | Five-layer `Orchestrator` pipeline |
+| `0211593` | `MemorySystemBridge` wrapping legacy `MemoryStore` |
+| `47e829f` | Agent `memory_system` field for trait-based access |
+| `da743c1` | Step-type-aware validation + real replanning |
+| `e2bd171` | Mock full-stack orchestrator integration tests |
+| `65cab86` | Fix `remove()` memory leak, IndexMap migration |
+| `0c58d68` | Clippy zero-warnings (auto + manual) |
+| `32699e2` | Loop engine placeholder warnings + daemon fallback |
+| `178d18a` | Phase 6: safety alignment + dependency cleanup |
+
+### 📈 Statistics
+
+| Metric | Value |
+|--------|-------|
+| Commits | 20 |
+| Files Changed | ~40 |
+| Tests Added | ~44 |
+| Tests Total | **275** (all passing) |
+| Clippy | ✅ Zero warnings across all targets |
+
+---
+
 ## [0.4.1] - 2026-06-10
-
-### ⚡ Performance Optimizations
-
-#### Vector Search Enhancement
-
-- **HNSW Index Integration**: Implemented Hierarchical Navigable Small World graph index for vector search
-- **Search Complexity**: Reduced from O(n) linear search to O(log n) approximate nearest neighbor search
-- **Performance Improvement**: Search response time improved **87-1000x** depending on dataset size
-- **Concurrency Support**: Enhanced thread-safe concurrent access with RwLock
 
 ### 🧠 Agent Core Intelligence
 
@@ -42,10 +154,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### ✨ Improvements
 
-- **Memory System**: Optimized vector storage operations
-- **Deep Search**: Faster semantic search responses
+- **Memory System**: Optimized vector storage operations (IndexMap migration for stable iteration)
+- **Deep Search**: Faster semantic search responses with improved embedding alignment
 - **User Experience**: Significantly improved search responsiveness
 - **Environment Signals**: Enhanced system context awareness
+- **Vector Store**: Brute-force O(n) search optimized with IndexMap for stable document-embedding alignment
 
 ### 📚 Documentation
 
@@ -55,22 +168,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### 🔧 Technical Changes
 
-- Added `hnswx` dependency for HNSW index implementation
-- Refactored `VectorStore` for better performance
-- Updated vector search algorithm from brute-force to HNSW
-- New module: `src/context.rs` - Conversation context management
-- New module: `src/tool_selector.rs` - Intelligent tool selection engine
-- Enhanced: `src/security_policy.rs` - Advanced risk assessment
-- Enhanced: `src/signal.rs` - System resource monitoring
-- Enhanced: `src/agent.rs` - Integrated tool intelligence
-
-### 📊 Performance Benchmarks
-
-| Operation | Data Size | Before | After | Improvement |
-|-----------|-----------|--------|-------|-------------|
-| Search | 100 docs | ~5ms | 31µs | **161x** |
-| Search | 1000 docs | ~50ms | 114µs | **438x** |
-| Insert | 1000 docs | - | 34ms | - |
+- Refactored `VectorStore` with IndexMap for stable iteration order
+- New module: `src/context.rs` — Conversation context management
+- New module: `src/tool_selector.rs` — Intelligent tool selection engine
+- Enhanced: `src/security_policy.rs` — Advanced risk assessment
+- Enhanced: `src/signal.rs` — System resource monitoring
+- Enhanced: `src/agent.rs` — Integrated tool intelligence
+- `hnswx` dependency reserved but not yet integrated (planned for future ANN index support)
 
 ### 📈 Statistics
 
@@ -227,6 +331,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Migration Guides
 
+### Upgrading from v0.4.x to v0.5.0
+
+No breaking changes. The new five-layer pipeline traits (`CognitiveEngine`, `Planner`,
+`ExecutionEngine`, `Supervisor`, `MemorySystem`) are additive — existing `Agent` and
+`MemoryStore` usage remains unchanged. The `MemorySystemBridge` provides backward
+compatibility between new and legacy memory paths.
+
 ### Upgrading from v0.3.x to v0.4.0
 
 #### New Commands
@@ -273,13 +384,13 @@ None at this time.
 
 ## Coming Soon
 
-### Planned for v0.5.0
+### Planned for v0.6.0
 
+- [ ] HNSW ANN Index — upgrade vector search from O(n) brute-force to O(log n)
+- [ ] Orchestrator-Agent Integration — wire five-layer pipeline into Agent main loop
 - [ ] Web UI Dashboard
 - [ ] Cloud Sync
 - [ ] Team Collaboration
-- [ ] Plugin Marketplace
-- [ ] Enhanced Analytics
 
 ---
 
