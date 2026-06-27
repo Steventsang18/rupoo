@@ -29,8 +29,9 @@ jobs:
             os: macos-latest
             ext: ""
           - target: x86_64-apple-darwin
-            # macos-13 is Intel-native; avoids cross-compile OpenSSL issues
-            os: macos-13
+            # Compiles on macos-latest (ARM64) via cross-compile;
+            # OPENSSL_DIR + PKG_CONFIG_ALLOW_CROSS handles OpenSSL.
+            os: macos-latest
             ext: ""
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-latest
@@ -64,7 +65,10 @@ jobs:
         run: cargo build --release --package rupoo --target ${{ matrix.target }}
         env:
           RUSTFLAGS: "-C link-arg=-s"
-          OPENSSL_NO_VENDOR: 1
+          # Cross-compile from ARM64 → x86_64: allow pkg-config to find
+          # brew-installed OpenSSL which has arch-independent headers.
+          PKG_CONFIG_ALLOW_CROSS: ${{ matrix.target == 'x86_64-apple-darwin' && '1' || '0' }}
+          OPENSSL_DIR: ${{ matrix.target == 'x86_64-apple-darwin' && '/opt/homebrew/opt/openssl@3' || '' }}
 
       - name: Prepare archive
         shell: bash
