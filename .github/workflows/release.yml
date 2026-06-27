@@ -49,18 +49,21 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
-      - name: Install Linux system deps (GTK for Tauri's indirect deps)
-        if: runner.os == 'Linux'
+      - name: Install system dependencies
+        shell: bash
         run: |
-          sudo apt-get update -y
-          sudo apt-get install -y \
-            libgtk-3-dev libwebkit2gtk-4.1-dev libayatana-appindicator3-dev \
-            librsvg2-dev libjavascriptcoregtk-4.1-dev libsoup-3.0-dev
+          if [ "$RUNNER_OS" = "macOS" ]; then
+            brew install openssl
+          elif [ "$RUNNER_OS" = "Linux" ]; then
+            sudo apt-get update -y
+            sudo apt-get install -y pkg-config libssl-dev
+          fi
 
       - name: Build release binary (rupoo only)
         run: cargo build --release --package rupoo --target ${{ matrix.target }}
         env:
           RUSTFLAGS: "-C link-arg=-s"
+          OPENSSL_NO_VENDOR: 1
 
       - name: Prepare archive
         shell: bash
