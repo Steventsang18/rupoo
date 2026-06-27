@@ -69,7 +69,6 @@ rupoo/
 │   ├── safety.rs         # 安全机制
 │   ├── build_engine.rs   # 引擎构建
 │   └── main.rs           # 入口
-├── web-ui/               # Web 界面
 ├── docs/                 # 文档
 └── tests/                # 测试
 ```
