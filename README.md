@@ -46,10 +46,56 @@ Safety:    path_jail sandbox + SSRF protection
 
 ## 🚀 Quick Start
 
-### Installation
+### Download Pre-built Binary
+
+Download the archive for your platform from the [latest release](https://github.com/Steventsang18/rupoo/releases/latest):
+
+| Platform | Download |
+|----------|----------|
+| 🍎 **macOS Apple Silicon** (M1/M2/M3/M4) | `rupoo-v0.5.0-aarch64-apple-darwin.tar.gz` |
+| 🍎 **macOS Intel** | `rupoo-v0.5.0-x86_64-apple-darwin.tar.gz` |
+| 🐧 **Linux x86_64** | `rupoo-v0.5.0-x86_64-unknown-linux-gnu.tar.gz` |
+| 🐧 **Linux ARM64** (Raspberry Pi, AWS Graviton) | `rupoo-v0.5.0-aarch64-unknown-linux-gnu.tar.gz` |
+| 🪟 **Windows x86_64** | `rupoo-v0.5.0-x86_64-pc-windows-msvc.zip` |
+
+#### macOS
 
 ```bash
-# Install from source
+# Replace <file> with your platform's archive
+tar xzf rupoo-v0.5.0-aarch64-apple-darwin.tar.gz
+mv rupoo /usr/local/bin/
+# Verify
+rupoo --help
+```
+
+> ⚠️ If you see "rupoo cannot be opened because the developer cannot be verified", run:
+> `xattr -d com.apple.quarantine /usr/local/bin/rupoo`
+
+#### Linux
+
+```bash
+# x86_64
+tar xzf rupoo-v0.5.0-x86_64-unknown-linux-gnu.tar.gz
+sudo mv rupoo /usr/local/bin/
+
+# ARM64 (e.g. Raspberry Pi)
+tar xzf rupoo-v0.5.0-aarch64-unknown-linux-gnu.tar.gz
+sudo mv rupoo /usr/local/bin/
+```
+
+#### Windows
+
+1. Download `rupoo-v0.5.0-x86_64-pc-windows-msvc.zip`
+2. Extract the archive
+3. Move `rupoo.exe` to a directory in your `PATH` (e.g., `C:\Windows\System32\` or create a custom path)
+4. Open a new terminal and run `rupoo --help`
+
+> 💡 Or use PowerShell: `Expand-Archive rupoo-v0.5.0-x86_64-pc-windows-msvc.zip -DestinationPath C:\Users\YourName\bin`
+
+### Install from Source
+
+```bash
+# Prerequisites: Rust toolchain (https://rustup.rs)
 cargo install --path src-agent
 
 # Or run directly

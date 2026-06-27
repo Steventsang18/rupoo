@@ -44,10 +44,56 @@ Rupoo 是一个基于终端的 AI 助手，采用原生 REPL 界面，支持语�
 
 ## 🚀 快速开始
 
-### 安装
+### 下载预编译二进制
+
+从 [最新 Release 页面](https://github.com/Steventsang18/rupoo/releases/latest) 下载对应平台的压缩包：
+
+| 平台 | 下载文件 |
+|------|----------|
+| 🍎 **macOS Apple Silicon** (M1/M2/M3/M4) | `rupoo-v0.5.0-aarch64-apple-darwin.tar.gz` |
+| 🍎 **macOS Intel** | `rupoo-v0.5.0-x86_64-apple-darwin.tar.gz` |
+| 🐧 **Linux x86_64** | `rupoo-v0.5.0-x86_64-unknown-linux-gnu.tar.gz` |
+| 🐧 **Linux ARM64** (树莓派、AWS Graviton) | `rupoo-v0.5.0-aarch64-unknown-linux-gnu.tar.gz` |
+| 🪟 **Windows x86_64** | `rupoo-v0.5.0-x86_64-pc-windows-msvc.zip` |
+
+#### macOS
 
 ```bash
-# 从源码安装
+# 将 <文件> 替换为你平台的压缩包
+tar xzf rupoo-v0.5.0-aarch64-apple-darwin.tar.gz
+mv rupoo /usr/local/bin/
+# 验证
+rupoo --help
+```
+
+> ⚠️ 如果提示"无法验证开发者"，执行：
+> `xattr -d com.apple.quarantine /usr/local/bin/rupoo`
+
+#### Linux
+
+```bash
+# x86_64
+tar xzf rupoo-v0.5.0-x86_64-unknown-linux-gnu.tar.gz
+sudo mv rupoo /usr/local/bin/
+
+# ARM64（如树莓派）
+tar xzf rupoo-v0.5.0-aarch64-unknown-linux-gnu.tar.gz
+sudo mv rupoo /usr/local/bin/
+```
+
+#### Windows
+
+1. 下载 `rupoo-v0.5.0-x86_64-pc-windows-msvc.zip`
+2. 解压压缩包
+3. 将 `rupoo.exe` 移动到 `PATH` 环境变量中的目录（如 `C:\Windows\System32\` 或自定义路径）
+4. 打开新终端，运行 `rupoo --help`
+
+> 💡 或用 PowerShell：`Expand-Archive rupoo-v0.5.0-x86_64-pc-windows-msvc.zip -DestinationPath C:\Users\你的用户名\bin`
+
+### 从源码安装
+
+```bash
+# 先安装 Rust 工具链 (https://rustup.rs)
 cargo install --path src-agent
 
 # 或直接运行
