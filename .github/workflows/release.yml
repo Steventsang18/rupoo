@@ -29,13 +29,14 @@ jobs:
             os: macos-latest
             ext: ""
           - target: x86_64-apple-darwin
-            os: macos-latest
+            # macos-13 is Intel-native; avoids cross-compile OpenSSL issues
+            os: macos-13
             ext: ""
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-latest
             ext: ""
           - target: aarch64-unknown-linux-gnu
-            os: ubuntu-latest
+            os: ubuntu-24.04-arm
             ext: ""
           - target: x86_64-pc-windows-msvc
             os: windows-latest
