@@ -1,5 +1,7 @@
 [workspace]
-members = ["cargo:."]
+# Only distribute the CLI rupoo binary — not rupoo-tauri (GUI).
+# rupoo-tauri requires platform-specific system deps and icons.
+members = ["cargo:src-agent"]
 
 # Config for 'dist'
 [dist]
