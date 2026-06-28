@@ -34,7 +34,7 @@ rustyline = "15"
 owo-colors = "4"
 syntect = "5"
 indicatif = "0.17"
-git2 = { version = "0.19", features = ["vendored-libgit2"] }
+git2 = { version = "0.19", features = ["vendored-libgit2", "vendored-openssl"] }
 console = "0.15"
 which = "8.0.2"
 reqwest = { version = "0.12", features = ["json", "rustls-tls"] }
