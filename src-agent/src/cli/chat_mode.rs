@@ -2,19 +2,12 @@
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::Instant;
 use tracing::warn;
 
 use super::bridge::AgentUiBridge;
 use super::{AgentToTui, ChatMessage, ToolPhase};
 
 // Magic number constants
-/// Max chars to display for a single tool argument value.
-const TOOL_ARGS_DISPLAY_MAX: usize = 25;
-/// Max chars for fallback raw-args display.
-const ARGS_FALLBACK_DISPLAY_MAX: usize = 50;
-/// Max chars to display for a tool result summary.
-const TOOL_RESULT_DISPLAY_MAX: usize = 120;
 /// Default max turns per chat request.
 const DEFAULT_MAX_TURNS: usize = 50;
 
@@ -45,15 +38,13 @@ impl AgentUiBridge {
         let _ = self.ui_tx.send(AgentToTui::Thinking);
 
         // Create execution tracker for progress display
-        let _execution_start = Instant::now();
+        let _execution_start = std::time::Instant::now();
         let tool_call_count = Arc::new(AtomicBool::new(false));
 
         // Create a callback closure to send events to TUI
         let ui_tx = self.ui_tx.clone();
         let cancelled = self.cancelled.clone();
         let mut full_response = String::new();
-        let step_indicators = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧'];
-        let mut indicator_idx = 0usize;
 
         let on_event = |event: rupoo::llm::AgentEvent| {
             // If cancelled, stop processing events
@@ -65,7 +56,7 @@ impl AgentUiBridge {
                     full_response.push_str(&text);
                     let _ = ui_tx.send(AgentToTui::StreamChunk { text });
                 }
-                rupoo::llm::AgentEvent::ToolCall { tool_name, args } => {
+                rupoo::llm::AgentEvent::ToolCall { tool_name, args: _ } => {
                     // Mark that we're in a tool call
                     tool_call_count.store(true, Ordering::Relaxed);
 
@@ -74,70 +65,21 @@ impl AgentUiBridge {
                         phase: ToolPhase::Calling,
                     });
 
-                    // Parse args JSON for better display
-                    let parsed = serde_json::from_str::<serde_json::Value>(&args);
-                    let args_display = if let Ok(serde_json::Value::Object(obj)) = parsed {
-                        // Format as key-value pairs with proper Unicode handling
-                        let parts: Vec<String> = obj
-                            .iter()
-                            .map(|(k, v): (&String, &serde_json::Value)| {
-                                let v_str = if v.is_string() {
-                                    v.as_str().unwrap_or("")
-                                } else {
-                                    &v.to_string()
-                                };
-                                // Safe truncation at character boundary
-                                let truncated = v_str
-                                    .chars()
-                                    .take(TOOL_ARGS_DISPLAY_MAX)
-                                    .collect::<String>();
-                                let display = if v_str.chars().count() > TOOL_ARGS_DISPLAY_MAX {
-                                    format!("{}...", truncated)
-                                } else {
-                                    truncated
-                                };
-                                format!("{}: {}", k, display)
-                            })
-                            .collect();
-                        parts.join(", ")
-                    } else {
-                        // Fallback to raw args with Unicode-safe truncation
-                        args.chars()
-                            .take(ARGS_FALLBACK_DISPLAY_MAX)
-                            .collect::<String>()
-                    };
-
-                    // Show animated thinking indicator
-                    indicator_idx = (indicator_idx + 1) % step_indicators.len();
-                    let indicator = step_indicators[indicator_idx];
-
-                    // Show detailed tool call information
-                    let _ = ui_tx.send(AgentToTui::Message(ChatMessage::system(format!(
-                        "{} 执行工具: {} (参数: {})",
-                        indicator, tool_name, args_display
-                    ))));
+                    // Only show progress for meaningful tools — skip read-only noise
+                    let is_readonly = matches!(
+                        tool_name.as_str(),
+                        "file_read" | "list_directory" | "list_dir" | "FileRead"
+                    );
+                    if !is_readonly {
+                        let summary = format!("{} 中...", tool_name);
+                        let _ = ui_tx.send(AgentToTui::ThinkingSummary { text: summary });
+                    }
                 }
-                rupoo::llm::AgentEvent::ToolResult { tool_name, result } => {
+                rupoo::llm::AgentEvent::ToolResult { tool_name, .. } => {
                     let _ = ui_tx.send(AgentToTui::ToolStatus {
                         tool_name: tool_name.clone(),
                         phase: ToolPhase::Completed,
                     });
-                    // Show compact tool result — Unicode-safe truncation
-                    let display_result = if result.len() > TOOL_RESULT_DISPLAY_MAX {
-                        format!(
-                            "{}…",
-                            result
-                                .chars()
-                                .take(TOOL_RESULT_DISPLAY_MAX - 3)
-                                .collect::<String>()
-                        )
-                    } else {
-                        result.clone()
-                    };
-                    let _ = ui_tx.send(AgentToTui::Message(ChatMessage::system(format!(
-                        "✅ {} → {}",
-                        tool_name, display_result
-                    ))));
                 }
             }
         };
@@ -164,6 +106,7 @@ impl AgentUiBridge {
                 safe_mode,
                 on_event,
                 Some(&self.intent_state),
+                None,
             )
             .await
         {
@@ -192,7 +135,7 @@ impl AgentUiBridge {
                     out_count: usage.completion_tokens as u64,
                 });
 
-                // Flush any remaining stream content as a final message
+                // Send the complete assistant response as a message (for history + rendering)
                 if !full_response.is_empty() {
                     let _ = self
                         .ui_tx

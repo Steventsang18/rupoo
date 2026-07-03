@@ -148,6 +148,22 @@ impl TaskRepo {
             CREATE INDEX IF NOT EXISTS idx_loops_status
                 ON loops(status);
 
+            -- Cron scheduling table
+            CREATE TABLE IF NOT EXISTS cron_jobs (
+                id              TEXT PRIMARY KEY,
+                name            TEXT NOT NULL,
+                schedule        TEXT NOT NULL,
+                task_message    TEXT NOT NULL,
+                enabled         INTEGER NOT NULL DEFAULT 1,
+                last_run_at     INTEGER,
+                next_run_at     INTEGER,
+                created_at      INTEGER NOT NULL,
+                updated_at      INTEGER NOT NULL
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_cron_jobs_next_run
+                ON cron_jobs(enabled, next_run_at);
+
             -- Key-value settings store (API keys, preferences)
             CREATE TABLE IF NOT EXISTS settings (
                 key   TEXT PRIMARY KEY,

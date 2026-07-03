@@ -40,7 +40,46 @@ Rupoo 是一个基于终端的 AI 助手，采用原生 REPL 界面，支持语�
 | **监督器三道闸门** | 合规检查 → 置信度检查 → 熔断器串行拦截 |
 | **记忆系统桥接** | 统一 `MemorySystem` trait 桥接遗留存储与新架构 |
 
+---| **IM 渠道接入** | 飞书 / 钉钉通道支持，WebSocket 长连接，一键配置 |
+
 ---
+
+## 🔌 渠道接入
+
+Rupoo 可以以 IM 机器人身份运行，同时支持飞书和钉钉。
+
+```bash
+# 一键配置（自动验证 + 写入配置）
+rupoo feishu          # 接入飞书
+rupoo dingtalk        # 接入钉钉
+rupoo channels        # 查看已配置通道
+
+# 启动服务
+rupoo serve           # 前台运行
+rupoo serve -d        # 后台运行（自动 daemon）
+rupoo serve-stop      # 停止后台服务
+rupoo serve-status    # 查看运行状态
+```
+
+### 渠道功能
+
+| 功能 | 说明 |
+|------|------|
+| **WebSocket 长连接** | 通过飞书/钉钉事件订阅实时接收消息 |
+| **自动重连** | 指数退避（2s → 最大 60s） |
+| **会话持久化** | LRU 缓存，每个发送者独立上下文 |
+| **身份隔离** | `[agents.feishu]` / `[agents.dingtalk]` 独立系统提示词 |
+| **快捷指令** | `/new` 重置对话、`/help` 帮助、`/status` 状态、`/search` 搜记忆 |
+| **记忆标签化** | CLI 记忆（`source=agent`）与渠道记忆（`source=channel`）隔离 |
+| **跨源记忆查询** | `/search <关键词>` 搜索所有来源的记忆 |
+| **群聊 @ 机器人** | 群聊中 @机器人自动识别并回复 |
+| **丰富反馈** | 🔨 代码任务、👀 普通对话、✅ 完成、⚠️ 出错 |
+| **优雅退出** | SIGTERM/SIGINT 信号处理 |
+| **Daemon 模式** | `serve -d` 后台运行，PID 文件管理 |
+
+---
+
+
 
 ## 🚀 快速开始
 

@@ -85,6 +85,7 @@ pub fn header_bar(version: &str, _model: Option<&str>, memory_mb: Option<f64>, s
 /// Print footer status bar with token usage and settings
 /// Example:
 /// Tokens: 2,340 │ 输入: 1.2k │ 输出: 2.5k │ 缓存: ♻️ 890 │ 模型: deepseek-chat
+#[allow(dead_code)]
 pub fn footer_bar(
     token_in: u64,
     token_out: u64,
@@ -159,11 +160,13 @@ fn format_tokens(tokens: u64) -> String {
 /// │ Compiling rupoo v0.3.1                           │
 /// │ ████████████████░░░░░░░░░░░░  45%               │
 /// └───────────────────────────────────────────────────┘
+#[allow(dead_code)]
 pub struct ToolFrame {
     tool_name: String,
     width: usize,
 }
 
+#[allow(dead_code)]
 impl ToolFrame {
     pub fn new(tool_name: &str) -> Self {
         let width = terminal_width().max(40);

@@ -5,11 +5,12 @@
 
 use console::Term;
 use owo_colors::OwoColorize;
-use std::io::Write;
+use std::io::{self, Write};
 use unicode_width::UnicodeWidthStr;
 
 use super::enhanced_ui;
 use super::theme;
+use rupoo::{FileAction, FileChangeInfo, LayoutMode};
 
 // Thread-local storage for the active tool frame
 thread_local! {
@@ -51,11 +52,13 @@ pub fn reset_cursor_style() {
 // Primitives
 // ═══════════════════════════════════════════════════════════════════════════
 
+#[allow(dead_code)]
 pub fn separator() {
     let t = theme::current();
     println!("{}", "─".repeat(60).color(t.border));
 }
 
+#[allow(dead_code)]
 pub fn thick_separator() {
     let t = theme::current();
     println!("{}", "━".repeat(60).color(t.border));
@@ -102,18 +105,18 @@ fn print_right_separator(text: &str, width: usize) {
     );
 }
 
-/// Erase the rustyline input line(s) and replace with a right-aligned user message.
+/// Erase the input prompt line and replace with a right-aligned user message.
 pub fn replace_readline_with_user_message(text: &str) {
     let width = terminal_width().max(40);
 
-    // Calculate how many terminal lines the readline input occupied
-    let prompt_w = 3; // "❯ " (2 chars + space, but unicode width of ❯ is 2)
+    // Calculate how many lines the user's input wraps across
+    let prompt_w = 2; // "> " width
     let input_w = text.width();
     let total_w = prompt_w + input_w;
-    let lines_taken = total_w.max(1).div_ceil(width);
+    let input_lines = total_w.max(1).div_ceil(width);
 
-    // Erase readline lines: move up and clear each
-    for _ in 0..lines_taken {
+    // Erase just the input line(s) — "> " line
+    for _ in 0..input_lines {
         print!("\x1b[1A\x1b[2K");
     }
     let _ = std::io::stdout().flush();
@@ -140,6 +143,7 @@ pub fn user_message(text: &str) {
     println!();
 }
 
+#[allow(dead_code)]
 pub fn assistant_footer(
     duration_s: f64,
     token_in: u64,
@@ -172,9 +176,10 @@ pub fn assistant_footer(
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// Tool cards (Claude Code style)
+// Tool cards — reserved for future plan-mode tool panels
 // ═══════════════════════════════════════════════════════════════════════════
 
+#[allow(dead_code)]
 pub fn tool_call_start(tool_name: &str, args: &str) {
     let frame = enhanced_ui::ToolFrame::new(tool_name);
     frame.start(args);
@@ -185,6 +190,7 @@ pub fn tool_call_start(tool_name: &str, args: &str) {
     });
 }
 
+#[allow(dead_code)]
 pub fn tool_result(result: &str, truncated: bool) {
     TOOL_FRAME.with(|f| {
         if let Some(frame) = &mut *f.borrow_mut() {
@@ -208,6 +214,7 @@ pub fn tool_result(result: &str, truncated: bool) {
     });
 }
 
+#[allow(dead_code)]
 pub fn tool_call_end(done: bool, duration_s: Option<f64>) {
     TOOL_FRAME.with(|f| {
         if let Some(frame) = f.borrow_mut().take() {
@@ -281,6 +288,202 @@ pub fn system(msg: &str) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
+// 方案 C — 混合自适应布局渲染函数
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Display LLM reasoning summary (Work mode).
+/// Single line: "⟳ 正在分析 src/error.rs..."
+pub fn thinking_summary(text: &str) {
+    let t = theme::current();
+    eprint!(
+        "\r{} {}          ",
+        "⟳".color(t.think),
+        text.color(t.think).italic()
+    );
+    let _ = std::io::stderr().flush();
+}
+
+/// Clear the current thinking summary line.
+pub fn clear_thinking_summary() {
+    eprint!("\r{}\r", " ".repeat(80));
+    let _ = std::io::stderr().flush();
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Bottom bar — drawn below the input "> " line
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Draw bottom bar below the input line: separator + mode indicator + usage hints.
+/// Saves cursor, draws 3 lines below, restores cursor to input line.
+pub fn draw_bottom_bar(mode: LayoutMode, model: &str, history_hint: Option<&str>) {
+    let t = theme::current();
+    let width = terminal_width().max(40);
+
+    let model_short = if model.len() > 28 {
+        format!("{}…", &model[..26])
+    } else {
+        model.to_string()
+    };
+
+    let (mode_text, mut hint_text) = match mode {
+        LayoutMode::Chat => ("auto mode", "tab:切换模式 · /help:查看命令"),
+        LayoutMode::Work => ("working", "esc:回到对话 · tab:切换模式"),
+        LayoutMode::Summary => ("auto mode", "tab:切换模式 · /help:查看命令"),
+    };
+
+    // Append history hint if provided
+    if let Some(hh) = history_hint {
+        hint_text = hh;
+    }
+
+    // Separator, mode, hint — 3 lines below the prompt.
+    // \r\n required: raw mode disables ONLCR.
+    let sep = "─".repeat(width.min(60));
+    let _ = write!(
+        io::stdout(),
+        "{}\r\n  {} {} · {}\r\n  {} {}",
+        sep.color(t.border),
+        "⏵".color(t.think),
+        mode_text.color(t.ai_header),
+        model_short.color(t.dim),
+        "⏵".color(t.think),
+        hint_text.color(t.dim),
+    );
+    let _ = io::stdout().flush();
+}
+
+/// Display phase progress bar (Work mode).
+/// Example: "████░░░░░░ 重构错误处理  40%"
+pub fn phase_progress(phase_name: &str, percentage: u8) {
+    let t = theme::current();
+    if percentage == 0 {
+        // 0% = indeterminate progress (no plan structure, just showing current step)
+        println!("  {} {}", "⟳".color(t.think), phase_name.color(t.ai_header),);
+    } else {
+        let bar_width = 20;
+        let filled = ((percentage as usize) * bar_width) / 100;
+        let bar = format!(
+            "{}{}",
+            "█".repeat(filled.clamp(0, bar_width)),
+            "░".repeat(bar_width.saturating_sub(filled))
+        );
+        println!(
+            "  {}  {}  {}%",
+            bar.color(t.think),
+            phase_name.color(t.ai_header),
+            percentage
+        );
+    }
+}
+
+/// Display a single file change (Work mode).
+/// Example: "~ src/error.rs  ++--"
+pub fn file_change(info: &FileChangeInfo) {
+    let t = theme::current();
+    let (icon, color) = match info.action {
+        FileAction::Modified => ("~", t.think),
+        FileAction::Created => ("+", t.user_med),
+        FileAction::Deleted => ("-", t.error),
+    };
+    let line_info = format!(" +{}/-{}", info.lines_added, info.lines_removed);
+    println!(
+        "  {} {} {}",
+        icon.color(color).bold(),
+        info.path.color(t.ai_accent),
+        line_info.color(t.dim),
+    );
+}
+
+/// Display a chat bubble (Chat mode).
+/// Role=User: right-aligned with ▸ marker
+/// Role=Assistant: left-aligned with subtle border
+pub fn chat_bubble(text: &str, role: rupoo::MessageRole) {
+    let t = theme::current();
+    let width = terminal_width().max(40);
+    match role {
+        rupoo::MessageRole::User => {
+            for line in text.lines() {
+                print_right_aligned(line, width);
+            }
+            print_right_separator(text, width);
+            println!();
+        }
+        rupoo::MessageRole::Assistant => {
+            // Print with subtle border — just a thin left bar
+            for line in text.lines() {
+                println!("{} {}", "╎".color(t.ai_header).dimmed(), line);
+            }
+        }
+        _ => {
+            println!("{} {}", "│".color(t.dim), text.color(t.dim));
+        }
+    }
+}
+
+/// Show layout mode banner when switching modes.
+pub fn layout_mode_banner(mode: LayoutMode) {
+    let t = theme::current();
+    match mode {
+        LayoutMode::Chat => {
+            println!();
+            println!("  {}", "─ ◇ 对话模式 ─".color(t.dim).dimmed());
+            println!();
+        }
+        LayoutMode::Work => {
+            println!();
+            println!(
+                "  {} {}",
+                "▣".color(t.think).bold(),
+                "开始工作".color(t.think).bold()
+            );
+            println!(
+                "  {} 自动检测到开发需求，进入工作计划模式",
+                "⟳".color(t.dim)
+            );
+            println!();
+        }
+        LayoutMode::Summary => {
+            // No banner for summary — it transitions silently
+        }
+    }
+}
+
+/// Display a compact task completion summary.
+#[allow(dead_code)]
+pub fn summary_block(
+    summary: &str,
+    files_changed: u32,
+    lines_added: u32,
+    lines_removed: u32,
+    duration_s: f64,
+    token_in: u64,
+    token_out: u64,
+    passed: bool,
+) {
+    let t = theme::current();
+    let status_icon = if passed { "✅" } else { "⚠️" };
+    println!();
+    println!("  {} {}", status_icon, summary.color(t.ai_header));
+    if files_changed > 0 {
+        println!(
+            "  {} {} files changed, +{}/-{} lines",
+            "│".color(t.dim),
+            files_changed,
+            lines_added,
+            lines_removed,
+        );
+    }
+    println!(
+        "  {} {:.1}s · {} in · {} out",
+        "│".color(t.dim),
+        duration_s,
+        token_in,
+        token_out,
+    );
+    println!();
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
 // Welcome
 // ═══════════════════════════════════════════════════════════════════════════
 
@@ -317,10 +520,10 @@ pub fn welcome(version: &str, model: &str) {
         "›".color(t.dim)
     );
     println!();
-    separator();
 }
 
 /// Print footer status bar with token usage
+#[allow(dead_code)]
 pub fn footer(
     token_in: u64,
     token_out: u64,

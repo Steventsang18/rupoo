@@ -51,6 +51,80 @@ pub struct RupooConfig {
     pub mcp: McpSection,
     #[serde(default)]
     pub confidence: ConfidenceConfig,
+    /// Channel integrations (Feishu, DingTalk, WeCom, etc.)
+    #[serde(default)]
+    pub channel: ChannelSection,
+    /// Agent identity profiles keyed by role name.
+    /// e.g. `[agents.feishu]` / `[agents.cli]`
+    #[serde(default)]
+    pub agents: HashMap<String, AgentProfile>,
+}
+
+/// Agent identity profile — defines system prompt + tool scope per role.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentProfile {
+    /// System prompt that defines this agent's identity.
+    /// When empty, the default compiled-in prompt is used.
+    #[serde(default)]
+    pub system_prompt: Option<String>,
+    /// Human-readable label (e.g. "终端助手", "飞书助手").
+    #[serde(default)]
+    pub label: Option<String>,
+}
+
+// ---------------------------------------------------------------------------
+// Channel section
+// ---------------------------------------------------------------------------
+
+/// Channel (IM bot) integration configuration.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ChannelSection {
+    /// Feishu / Lark bot configuration.
+    #[serde(default)]
+    pub feishu: Option<FeishuConfig>,
+    /// DingTalk (钉钉) bot configuration.
+    #[serde(default)]
+    pub dingtalk: Option<DingTalkConfig>,
+    /// Database path for the agent (default: $RUPOO_HOME/agent.db).
+    #[serde(default)]
+    pub db_path: Option<String>,
+}
+
+
+
+/// DingTalk (钉钉) application configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DingTalkConfig {
+    /// DingTalk app Client ID (AppKey).
+    pub client_id: String,
+    /// DingTalk app Client Secret (AppSecret).
+    pub client_secret: String,
+}
+
+/// Feishu (飞书) application configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FeishuConfig {
+    /// Feishu app ID (from Feishu Developer Console).
+    pub app_id: String,
+    /// Feishu app secret.
+    pub app_secret: String,
+    /// Whether to only reply when the bot is @mentioned.
+    /// In group chats, set to `true` to avoid replying to every message.
+    #[serde(default = "default_feishu_mention_only")]
+    pub mention_only: bool,
+    /// Seconds to wait for user approval via card button before auto-denying.
+    #[serde(default = "default_feishu_approval_timeout")]
+    pub approval_timeout_secs: u64,
+    /// Whether to use the international Lark API (vs Feishu CN).
+    #[serde(default)]
+    pub lark_mode: bool,
+}
+
+fn default_feishu_mention_only() -> bool {
+    true
+}
+fn default_feishu_approval_timeout() -> u64 {
+    120
 }
 
 // ---------------------------------------------------------------------------
@@ -90,6 +164,30 @@ impl Default for LlmSection {
             ProviderConfig {
                 base_url: Some("https://api.deepseek.com".into()),
                 model: Some("deepseek-chat".into()),
+                ..ProviderConfig::default()
+            },
+        );
+        providers.insert(
+            "qwen".into(),
+            ProviderConfig {
+                base_url: Some("https://dashscope.aliyuncs.com/compatible-mode/v1".into()),
+                model: Some("qwen-max".into()),
+                ..ProviderConfig::default()
+            },
+        );
+        providers.insert(
+            "glm".into(),
+            ProviderConfig {
+                base_url: Some("https://open.bigmodel.cn/api/paas/v4".into()),
+                model: Some("glm-4".into()),
+                ..ProviderConfig::default()
+            },
+        );
+        providers.insert(
+            "moonshot".into(),
+            ProviderConfig {
+                base_url: Some("https://api.moonshot.cn/v1".into()),
+                model: Some("moonshot-v1-auto".into()),
                 ..ProviderConfig::default()
             },
         );
@@ -526,7 +624,22 @@ pub async fn migrate_from_db(repo: &crate::db::TaskRepo) -> AgentResult<()> {
     }
 
     // API keys → credentials.toml
-    for provider in &["anthropic", "openai", "deepseek", "ollama"] {
+    const KNOWN_PROVIDERS: &[&str] = &[
+        "anthropic",
+        "openai",
+        "deepseek",
+        "qwen",
+        "glm",
+        "moonshot",
+        "yi",
+        "baichuan",
+        "minimax",
+        "spark",
+        "ollama",
+    ];
+
+    // API keys → credentials.toml
+    for provider in KNOWN_PROVIDERS {
         let key_name = format!("api_key.{}", provider);
         if let Ok(Some(key)) = repo.get_setting(&key_name).await {
             if !key.is_empty() && creds.get_key(provider).is_none() {
@@ -537,7 +650,7 @@ pub async fn migrate_from_db(repo: &crate::db::TaskRepo) -> AgentResult<()> {
     }
 
     // Model per provider
-    for provider in &["anthropic", "openai", "deepseek", "ollama"] {
+    for provider in KNOWN_PROVIDERS {
         let key_name = format!("model.{}", provider);
         if let Ok(Some(model)) = repo.get_setting(&key_name).await {
             let pc = config
@@ -551,7 +664,7 @@ pub async fn migrate_from_db(repo: &crate::db::TaskRepo) -> AgentResult<()> {
     }
 
     // Base URL per provider
-    for provider in &["anthropic", "openai", "deepseek", "ollama"] {
+    for provider in KNOWN_PROVIDERS {
         let key_name = format!("base_url.{}", provider);
         if let Ok(Some(base_url)) = repo.get_setting(&key_name).await {
             let pc = config

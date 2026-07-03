@@ -4,7 +4,7 @@ use crossbeam_channel::Sender;
 use rupoo::db::TaskRepo;
 use rupoo::llm::ConversationHistory;
 use rupoo::task::Plan;
-use rupoo::{AgentToTui, ChatMessage, PendingTool, TuiToAgent};
+use rupoo::{AgentToTui, ChatMessage, LayoutMode, PendingTool, TuiToAgent};
 use std::sync::Arc;
 
 // ---------------------------------------------------------------------------
@@ -110,6 +110,8 @@ pub struct RupooApp {
     pub current_tool_status: Option<(String, String)>,
     pub cancel_flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
     pub approve_all: bool,
+    /// Current CLI layout mode — controls rendering style.
+    pub layout_mode: LayoutMode,
 }
 
 #[allow(dead_code)]
@@ -195,6 +197,7 @@ impl RupooApp {
             current_tool_status: None,
             cancel_flag: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             approve_all: false,
+            layout_mode: LayoutMode::Chat,
         }
     }
 
@@ -335,6 +338,11 @@ impl RupooApp {
             AgentToTui::HybridSearchUpdate { enabled } => {
                 self.hybrid_search = enabled;
             }
+            // 方案 C 新增事件 — 渲染层处理，不需要 app 状态变更
+            AgentToTui::ThinkingSummary { .. }
+            | AgentToTui::PhaseProgress { .. }
+            | AgentToTui::LayoutModeHint(..)
+            | AgentToTui::FileChanges { .. } => {}
         }
     }
 

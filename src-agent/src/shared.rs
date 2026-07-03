@@ -8,6 +8,43 @@ use serde::{Deserialize, Serialize};
 use crate::task::StepStatus;
 
 // ---------------------------------------------------------------------------
+// Layout Mode — controls CLI rendering style
+// ---------------------------------------------------------------------------
+
+/// The current layout mode determines how the CLI renders events.
+/// Auto-detected based on user intent, can be overridden.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum LayoutMode {
+    /// Bubbles-only, like a casual chat. No tool panels.
+    /// Used for: info queries, casual conversation, non-development asks.
+    #[default]
+    Chat,
+    /// Left panel: progress + reasoning, Right panel: results.
+    /// Used for: code generation, refactoring, multi-step development tasks.
+    Work,
+    /// Compact one-liner summary when a task completes.
+    /// Auto-transitions to Chat after display.
+    Summary,
+}
+
+/// What happened to a file during a tool execution.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum FileAction {
+    Modified,
+    Created,
+    Deleted,
+}
+
+/// Describes one file change for the user.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FileChangeInfo {
+    pub path: String,
+    pub action: FileAction,
+    pub lines_added: u32,
+    pub lines_removed: u32,
+}
+
+// ---------------------------------------------------------------------------
 // Message types (mirrors what was previously in cli/app.rs)
 // ---------------------------------------------------------------------------
 
@@ -137,6 +174,24 @@ pub enum AgentToTui {
     PlanTaskList { tasks: Vec<(String, StepStatus)> },
     /// Hybrid search (deep search) status update.
     HybridSearchUpdate { enabled: bool },
+    // ═══════════════════════════════════════════════════════════════════
+    // 方案 C 新增事件类型 — 混合自适应布局
+    // ═══════════════════════════════════════════════════════════════════
+    /// LLM 推理摘要。轻量级说明当前在做什么思考。
+    /// 例如："正在分析 src/error.rs 中的错误处理..."
+    /// 渲染为左侧绿色斜体，不占用对话流空间。
+    ThinkingSummary { text: String },
+
+    /// 阶段级进度更新（Work 模式使用）。
+    /// phase_name: "重构错误处理", percentage: 0-100
+    PhaseProgress { phase_name: String, percentage: u8 },
+
+    /// 布局模式自动切换提示。
+    /// 由 bridge 层根据 IntentState 检测后发送。
+    LayoutModeHint(LayoutMode),
+
+    /// 文件变更事件。工具执行完成后发送一次。
+    FileChanges { files: Vec<FileChangeInfo> },
 }
 
 /// Phase of a tool call for status display.
@@ -160,6 +215,10 @@ impl AgentToTui {
                 | Self::RequestApproval(_)
                 | Self::StepProgress { .. }
                 | Self::ToolStatus { .. }
+                | Self::ThinkingSummary { .. }
+                | Self::PhaseProgress { .. }
+                | Self::LayoutModeHint(_)
+                | Self::FileChanges { .. }
         )
     }
 

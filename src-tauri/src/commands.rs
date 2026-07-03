@@ -232,6 +232,7 @@ pub async fn run_agent_chat(
                 safe_mode,
                 on_event,
                 None,
+                None,
             )
             .await
         {

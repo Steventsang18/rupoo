@@ -42,6 +42,44 @@ Safety:    path_jail sandbox + SSRF protection
 | **Supervisor 3-Gate** | Compliance checker → Confidence checker → Circuit breaker serial intercept |
 | **Memory System Bridge** | Unified `MemorySystem` trait bridging legacy store with new architecture |
 
+| **IM Channel Integration** | Feishu (飞书) / DingTalk (钉钉) channel support with WebSocket persistent connection |
+
+---
+
+## 🔌 Channel Integration
+
+Rupoo can run as an IM bot alongside the terminal CLI, supporting Feishu and DingTalk.
+
+```bash
+# One-click configuration (auto-validate + write config)
+rupoo feishu          # Setup Feishu channel
+rupoo dingtalk        # Setup DingTalk channel  
+rupoo channels        # List configured channels
+
+# Start service
+rupoo serve           # Foreground
+rupoo serve -d        # Background daemon
+rupoo serve-stop      # Stop daemon
+rupoo serve-status    # Check daemon status
+```
+
+### Channel Features
+
+| Feature | Description |
+|---------|-------------|
+| **WebSocket Persist Connection** | Real-time event subscription via long connection |
+| **Auto Reconnect** | Exponential backoff (2s → 60s max) |
+| **Session Persistence** | LRU-cached conversation history per sender |
+| **System Prompt Isolation** | `[agents.feishu]` / `[agents.dingtalk]` profile in config.toml |
+| **Slash Commands** | `/new`, `/help`, `/status`, `/search <keyword>` |
+| **Memory Source Tagging** | CLI memories (`source=agent`) isolated from channel memories (`source=channel`) |
+| **Cross-Source Memory Query** | `/search` searches across all memory sources |
+| **Rich Reactions** | 🔨 for code tasks, 👀 for chat, ✅ on completion |
+| **Graceful Shutdown** | SIGTERM/SIGINT handles ongoing tasks |
+| **Daemon Mode** | Background process with PID management |
+
+---
+
 ---
 
 ## 🚀 Quick Start

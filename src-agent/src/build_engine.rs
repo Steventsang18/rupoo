@@ -3,18 +3,18 @@
 use std::sync::Arc;
 use tracing::info;
 
-use rupoo::agent::Agent;
-use rupoo::db::TaskRepo;
-use rupoo::embedding::EmbeddingService;
-use rupoo::mcp::McpToolExecutor;
-use rupoo::safety::SafetyContext;
+use crate::agent::Agent;
+use crate::db::TaskRepo;
+use crate::embedding::EmbeddingService;
+use crate::mcp::McpToolExecutor;
+use crate::safety::SafetyContext;
 
 pub async fn build_engine(
     db_path: &str,
 ) -> anyhow::Result<(
     Arc<TaskRepo>,
     Agent,
-    std::sync::Arc<dyn rupoo::agent::ToolExecutor>,
+    std::sync::Arc<dyn crate::agent::ToolExecutor>,
 )> {
     let repo = Arc::new(TaskRepo::new(db_path)?);
 
@@ -25,7 +25,7 @@ pub async fn build_engine(
     // McpToolExecutor instance (Clone shares the Arc<RwLock<registry>>).
     // The Arc copy is used by AgentUiBridge for direct approval-time tool execution.
     let mcp_executor = McpToolExecutor::with_safety(safety_ctx.clone());
-    let tool_executor: std::sync::Arc<dyn rupoo::agent::ToolExecutor> =
+    let tool_executor: std::sync::Arc<dyn crate::agent::ToolExecutor> =
         std::sync::Arc::new(mcp_executor.clone());
     let tool_executor_arc = std::sync::Arc::clone(&tool_executor);
 
@@ -50,17 +50,17 @@ pub async fn build_engine(
     };
 
     let mut llm_configured = false;
-    let mut embedding_config: Option<(rupoo::llm::LlmProvider, String)> = None;
+    let mut embedding_config: Option<(crate::llm::LlmProvider, String)> = None;
 
     for provider in &provider_list {
         if let Some(api_key) = repo.get_setting(&format!("api_key.{}", provider)).await? {
             let llm_provider = match *provider {
-                "anthropic" => rupoo::llm::LlmProvider::Anthropic,
-                "openai" | "deepseek" => rupoo::llm::LlmProvider::OpenAI,
-                "ollama" => rupoo::llm::LlmProvider::Ollama,
+                "anthropic" => crate::llm::LlmProvider::Anthropic,
+                "openai" | "deepseek" => crate::llm::LlmProvider::OpenAI,
+                "ollama" => crate::llm::LlmProvider::Ollama,
                 _ => continue,
             };
-            let mut cfg = rupoo::llm::LlmConfig::new(llm_provider.clone(), Some(api_key.clone()));
+            let mut cfg = crate::llm::LlmConfig::new(llm_provider.clone(), Some(api_key.clone()));
             if let Some(model) = repo.get_setting(&format!("model.{}", provider)).await? {
                 cfg.model = model;
             }
@@ -73,7 +73,7 @@ pub async fn build_engine(
             }
             // Save embedding config before passing cfg to gateway
             embedding_config = Some((llm_provider, api_key));
-            let gateway = rupoo::llm::LlmGateway::with_http_client(
+            let gateway = crate::llm::LlmGateway::with_http_client(
                 cfg,
                 jail_root.clone(),
                 agent.http_client.clone(),
@@ -90,7 +90,7 @@ pub async fn build_engine(
 
     // Initialize embedding service for vector/hybrid search
     if let Some((llm_provider, api_key)) = embedding_config {
-        let embedding_cfg = rupoo::llm::LlmConfig::new(llm_provider, Some(api_key));
+        let embedding_cfg = crate::llm::LlmConfig::new(llm_provider, Some(api_key));
         match EmbeddingService::new(&embedding_cfg, &agent.http_client) {
             Ok(svc) => {
                 info!(

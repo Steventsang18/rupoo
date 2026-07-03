@@ -1,5 +1,6 @@
 //! CLI subcommand dispatch — extracted from main.rs for maintainability.
 
+use anyhow::{Context, Result};
 use rupoo::db::TaskRepo;
 use rupoo::loop_engine::LoopConfig;
 use rupoo::skill::SkillManager;
@@ -22,6 +23,53 @@ pub enum ToolsAction {
     },
     /// List installed tools and their status
     Status,
+}
+
+/// Manage IM channel integrations (Feishu, DingTalk, etc.)
+#[derive(clap::Subcommand)]
+pub enum ChannelAction {
+    /// Add and configure a new channel
+    Add {
+        /// Channel type: feishu
+        channel_type: String,
+    },
+    /// List all configured channels
+    List,
+    /// Remove a channel configuration
+    Remove {
+        /// Channel type: feishu
+        channel_type: String,
+    },
+}
+
+#[derive(clap::Subcommand)]
+pub enum CronAction {
+    /// Add a new cron job
+    Add {
+        /// Human-readable name for this job
+        name: String,
+        /// Cron schedule (5-field format, e.g. "0 9 * * 1-5" for weekdays at 9am)
+        schedule: String,
+        /// Task message to execute when the job fires
+        task: String,
+    },
+    /// List all cron jobs with their next run time
+    List,
+    /// Remove a cron job
+    Remove {
+        /// Job ID (or "name:<name>" to match by name)
+        id: String,
+    },
+    /// Pause a cron job (temporarily disable)
+    Pause {
+        /// Job ID
+        id: String,
+    },
+    /// Resume a paused cron job
+    Resume {
+        /// Job ID
+        id: String,
+    },
 }
 
 #[derive(clap::Subcommand)]
@@ -226,7 +274,7 @@ pub async fn run_cmd(cmd: super::Commands) -> anyhow::Result<()> {
         }
         super::Commands::Run { task, db, input } => {
             let db = resolve_db(db);
-            let (repo, agent, _tool_executor) = crate::build_engine::build_engine(&db).await?;
+            let (repo, agent, _tool_executor) = rupoo::build_engine::build_engine(&db).await?;
             crate::executor::execute_plan(&repo, &agent, &task, input.as_deref()).await?;
         }
         super::Commands::Git { action } => match action {
@@ -257,7 +305,7 @@ pub async fn run_cmd(cmd: super::Commands) -> anyhow::Result<()> {
         super::Commands::Config { action } => match action {
             ConfigAction::Set { key, value, db } => {
                 let db = resolve_db(db);
-                let (repo, _agent, _tool_executor) = crate::build_engine::build_engine(&db).await?;
+                let (repo, _agent, _tool_executor) = rupoo::build_engine::build_engine(&db).await?;
                 repo.set_setting(&key, &value).await?;
                 info!(key = %key, "configuration saved");
                 if key.starts_with("api_key") {
@@ -269,7 +317,7 @@ pub async fn run_cmd(cmd: super::Commands) -> anyhow::Result<()> {
             }
             ConfigAction::Get { key, db } => {
                 let db = resolve_db(db);
-                let (repo, _agent, _tool_executor) = crate::build_engine::build_engine(&db).await?;
+                let (repo, _agent, _tool_executor) = rupoo::build_engine::build_engine(&db).await?;
                 match repo.get_setting(&key).await? {
                     Some(value) => println!("{key} = {value}"),
                     None => println!("{key} is not set"),
@@ -277,7 +325,7 @@ pub async fn run_cmd(cmd: super::Commands) -> anyhow::Result<()> {
             }
             ConfigAction::List { db } => {
                 let db = resolve_db(db);
-                let (repo, _agent, _tool_executor) = crate::build_engine::build_engine(&db).await?;
+                let (repo, _agent, _tool_executor) = rupoo::build_engine::build_engine(&db).await?;
                 let settings = repo.list_settings().await?;
                 if settings.is_empty() {
                     println!("No configuration set.");
@@ -321,7 +369,7 @@ pub async fn run_cmd(cmd: super::Commands) -> anyhow::Result<()> {
                 let manager = SkillManager::new(SkillManager::default_dir());
                 let skill = manager.load_skill(&name)?;
                 let plan = manager.skill_to_plan(&skill);
-                let (repo, agent, _tool_executor) = crate::build_engine::build_engine(&db).await?;
+                let (repo, agent, _tool_executor) = rupoo::build_engine::build_engine(&db).await?;
                 repo.save_plan(&plan).await?;
                 info!(plan_id = %plan.id, skill = %name, "skill plan saved");
                 print_plan_summary(&plan);
@@ -353,7 +401,7 @@ pub async fn run_cmd(cmd: super::Commands) -> anyhow::Result<()> {
         },
         super::Commands::Demo { db } => {
             let db = resolve_db(db);
-            let (repo, agent, _tool_executor) = crate::build_engine::build_engine(&db).await?;
+            let (repo, agent, _tool_executor) = rupoo::build_engine::build_engine(&db).await?;
 
             let plan = Plan::new(
                 "Demo Plan",
@@ -381,16 +429,63 @@ pub async fn run_cmd(cmd: super::Commands) -> anyhow::Result<()> {
         super::Commands::McpServer => {
             rupoo::mcp_server::run_mcp_server().await?;
         }
-        super::Commands::Serve { db: _, port } => {
-            println!(
-                "  {} Server mode (port {port}) — development only. Not for production use.",
-                console::style("⚠").yellow()
-            );
-            println!(
-                "  {} Must bind to 127.0.0.1 and add auth before exposing.",
-                console::style("→").dim()
-            );
-            tokio::signal::ctrl_c().await?;
+        super::Commands::Serve { db, config, daemon } => {
+            if daemon {
+                println!("  ⏳ 正在启动后台服务...");
+                let pid = daemonize_process()?;
+                let pid_path = rupoo::config::rupoo_home().join("serve.pid");
+                std::fs::write(&pid_path, pid.to_string())?;
+                println!("  ✅ Daemon 已启动 (PID {pid})");
+                println!(
+                    "  日志: {}/rupoo.log",
+                    rupoo::config::rupoo_home().display()
+                );
+                return Ok(());
+            }
+
+            let mut cfg = rupoo::config::RupooConfig::load()?;
+            if let Some(db_path) = db {
+                cfg.channel.db_path = Some(db_path);
+            }
+            if let Some(config_path) = config {
+                let path = std::path::Path::new(&config_path);
+                cfg = rupoo::config::RupooConfig::load_from(path)?;
+            }
+
+            if cfg.channel.feishu.is_none() && cfg.channel.dingtalk.is_none() {
+                anyhow::bail!(
+                    "还没有配置任何通道。试试：\n\
+                     rupoo feishu    接入飞书\n\
+                     rupoo dingtalk  接入钉钉\n\
+                     然后再运行 rupoo serve"
+                );
+            }
+
+            rupoo::channel::run_channel_daemon(Some(cfg)).await?;
+        }
+        super::Commands::ServeStop => {
+            serve_stop().await?;
+        }
+        super::Commands::ServeStatus => {
+            serve_status().await?;
+        }
+        super::Commands::Feishu => {
+            crate::cli::cmds::channel::run(crate::main_cli::ChannelAction::Add {
+                channel_type: "feishu".into(),
+            })
+            .await?;
+        }
+        super::Commands::Dingtalk => {
+            crate::cli::cmds::channel::run(crate::main_cli::ChannelAction::Add {
+                channel_type: "dingtalk".into(),
+            })
+            .await?;
+        }
+        super::Commands::Channels => {
+            crate::cli::cmds::channel::run(crate::main_cli::ChannelAction::List).await?;
+        }
+        super::Commands::Channel { action } => {
+            crate::cli::cmds::channel::run(action).await?;
         }
         super::Commands::Completions { shell } => {
             use clap::CommandFactory;
@@ -433,6 +528,10 @@ pub async fn run_cmd(cmd: super::Commands) -> anyhow::Result<()> {
         }
         super::Commands::Tools { action } => {
             handle_tools_action(action).await?;
+        }
+        super::Commands::Cron { action, db } => {
+            let db = resolve_db(db);
+            crate::cli::cmds::cron::run(&db, action).await?;
         }
         super::Commands::Doctor { fix } => {
             crate::cli::cmds::doctor::run(fix).await?;
@@ -654,7 +753,7 @@ async fn check_tools_status() -> anyhow::Result<()> {
 }
 
 async fn handle_loop_action(db: String, action: LoopAction) -> anyhow::Result<()> {
-    let (_repo, agent, _) = crate::build_engine::build_engine(&db).await?;
+    let (_repo, agent, _) = rupoo::build_engine::build_engine(&db).await?;
     let agent = Arc::new(agent);
 
     let engine = agent
@@ -736,5 +835,77 @@ async fn handle_loop_action(db: String, action: LoopAction) -> anyhow::Result<()
         }
     }
 
+    Ok(())
+}
+
+// ── Daemon management ──────────────────────────────────────────────
+
+fn daemonize_process() -> Result<i32> {
+    #[cfg(unix)]
+    {
+        use std::process::Command;
+        let args: Vec<String> = std::env::args().collect();
+        let child = Command::new(&args[0])
+            .args(
+                &args[1..]
+                    .iter()
+                    .filter(|a| *a != "--daemon" && *a != "-d")
+                    .collect::<Vec<_>>(),
+            )
+            .env("RUST_LOG", "info")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .context("daemonize failed")?;
+        Ok(child.id() as i32)
+    }
+    #[cfg(not(unix))]
+    {
+        anyhow::bail!("daemon mode is only supported on Unix systems");
+    }
+}
+
+async fn serve_stop() -> Result<()> {
+    let pid_path = rupoo::config::rupoo_home().join("serve.pid");
+    if !pid_path.exists() {
+        println!("  Daemon 未在运行。");
+        return Ok(());
+    }
+    let pid_str = std::fs::read_to_string(&pid_path)?;
+    let pid: i32 = pid_str.trim().parse()?;
+    #[cfg(unix)]
+    let _ = std::process::Command::new("kill")
+        .arg(pid.to_string())
+        .status();
+    std::fs::remove_file(&pid_path)?;
+    println!("  ✅ rupoo serve 已停止 (PID {pid})");
+    Ok(())
+}
+
+async fn serve_status() -> Result<()> {
+    let pid_path = rupoo::config::rupoo_home().join("serve.pid");
+    if !pid_path.exists() {
+        println!("  ❌ rupoo serve 未在运行");
+        return Ok(());
+    }
+    let pid_str = std::fs::read_to_string(&pid_path)?;
+    let pid: i32 = pid_str.trim().parse()?;
+    #[cfg(unix)]
+    {
+        let alive = std::process::Command::new("kill")
+            .arg("-0")
+            .arg(pid.to_string())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        if alive {
+            println!("  ✅ rupoo serve 正在运行 (PID {pid})");
+        } else {
+            println!("  ❌ rupoo serve 未在运行 (PID 文件已过期)");
+            std::fs::remove_file(&pid_path)?;
+        }
+    }
+    #[cfg(not(unix))]
+    println!("  - 状态检查仅支持 Unix 系统");
     Ok(())
 }

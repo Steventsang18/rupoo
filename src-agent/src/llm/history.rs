@@ -79,6 +79,11 @@ impl ConversationHistory {
         self.trim_to_limits();
     }
 
+    pub fn push_system(&mut self, content: &str) {
+        self.messages.push(LlmChatMessage::system(content));
+        self.trim_to_limits();
+    }
+
     pub fn clear(&mut self) {
         self.messages.clear();
     }

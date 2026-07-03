@@ -111,6 +111,34 @@ impl Step {
         }
     }
 
+    /// Human-readable label for this step. Short, max ~40 chars.
+    pub fn label(&self) -> String {
+        match self {
+            Step::Think { instruction, .. } => instruction.chars().take(40).collect(),
+            Step::ToolCall { tool_name, .. } => format!("调用 {}", tool_name),
+            Step::WaitForInput { prompt, .. } => prompt.chars().take(40).collect(),
+            Step::Finish { summary, .. } => summary.chars().take(40).collect(),
+            Step::Exec { command, args, .. } => {
+                if args.is_empty() {
+                    command.chars().take(40).collect()
+                } else {
+                    format!("{} {}", command, args.join(" "))
+                        .chars()
+                        .take(40)
+                        .collect()
+                }
+            }
+            Step::HttpRequest { method, url, .. } => {
+                let m = match method {
+                    HttpMethod::GET => "GET",
+                    HttpMethod::POST => "POST",
+                };
+                format!("{} {}", m, url).chars().take(40).collect()
+            }
+            Step::BrowserAction { action, .. } => format!("{:?}", action),
+        }
+    }
+
     pub fn status(&self) -> &StepStatus {
         match self {
             Step::Think { status, .. }

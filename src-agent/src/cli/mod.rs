@@ -5,7 +5,6 @@
 
 pub mod app;
 pub mod cmds;
-pub mod completion;
 
 pub mod enhanced_ui;
 pub mod markdown;
@@ -18,7 +17,7 @@ mod chat_mode;
 mod plan_mode;
 
 pub use app::RupooApp;
-pub use rupoo::{AgentToTui, ChatMessage, PendingTool, ToolPhase, TuiToAgent};
+pub use rupoo::{AgentToTui, ChatMessage, LayoutMode, PendingTool, ToolPhase, TuiToAgent};
 
 use std::io::{self, Write};
 
@@ -27,9 +26,7 @@ use owo_colors::OwoColorize;
 use rupoo::agent::Agent;
 use rupoo::db::TaskRepo;
 use rupoo::llm::ConversationHistory;
-use rustyline::history::{FileHistory, History};
-use rustyline::Editor;
-use tracing::warn;
+use unicode_width::UnicodeWidthChar;
 
 // Magic number constants
 /// Max input history entries to retain.
@@ -42,9 +39,6 @@ pub(super) const DEFAULT_TOKEN_BUDGET: usize = 60000;
 const SPINNER_POLL_MS: u64 = 50;
 /// ANSI escape sequence to clear screen and home cursor.
 const CLEAR_SCREEN_ESCAPE: &str = "\x1b[2J\x1b[H";
-/// Prompt symbol displayed before user input.
-#[allow(dead_code)]
-const PROMPT_SYMBOL: &str = "❯";
 /// Default max turns for conversation history initialization.
 pub(super) const HISTORY_DEFAULT_MAX_TURNS: usize = 10;
 
@@ -55,7 +49,6 @@ pub(super) const HISTORY_DEFAULT_MAX_TURNS: usize = 10;
 pub struct ReplSession {
     app: RupooApp,
     ui_rx: Option<Receiver<AgentToTui>>,
-    rl: Editor<completion::RupooHelper, FileHistory>,
     /// Streaming state for current assistant response
     stream_state: markdown::StreamState,
     /// Timestamp when current generation started
@@ -106,26 +99,9 @@ impl ReplSession {
             .cloned()
             .unwrap_or_default();
 
-        // Init rustyline with completion support
-        let mut rl = completion::create_editor().map_err(|_| "readline_init_failed")?;
-
-        // Session labels are handled internally
-
-        // Persist history to $RUPOO_HOME/history.txt — survives restarts
-        let history_path = crate::tracing_setup::history_path();
-        if let Some(parent) = history_path.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
-        if history_path.exists() {
-            if let Err(e) = rl.load_history(&history_path) {
-                warn!("Failed to load history: {e}");
-            }
-        }
-
         Ok(Self {
             app,
             ui_rx,
-            rl,
             stream_state: markdown::StreamState::new(),
             gen_start: None,
         })
@@ -141,56 +117,14 @@ impl ReplSession {
 
         let result = self.run_loop();
 
-        // Save history on exit
-        let history_path = crate::tracing_setup::history_path();
-        let _ = self.rl.save_history(&history_path);
-
         // Reset cursor style on exit
         output::reset_cursor_style();
 
         result
     }
 
-    /// Inner REPL loop.
+    /// Inner REPL loop — uses crossterm raw mode for input, no rustyline.
     fn run_loop(&mut self) -> Result<(), &'static str> {
-        // Create a channel for readline input from a background thread.
-        let (input_tx, input_rx) = crossbeam_channel::bounded::<String>(16);
-
-        // Move rustyline to a background thread so the main thread can
-        // select! between user input and UI messages (e.g. loop completion).
-        let mut rl = std::mem::replace(
-            &mut self.rl,
-            // Create a minimal placeholder editor (won't be used)
-            Editor::new().map_err(|_| "failed to create editor")?,
-        );
-        let history_path = crate::tracing_setup::history_path();
-        let _rl_handle = std::thread::spawn(move || {
-            loop {
-                let prompt = "> ";
-                match rl.readline(prompt) {
-                    Ok(line) => {
-                        let _ = rl.add_history_entry(&line);
-                        let _ = rl.save_history(&history_path);
-                        if input_tx.send(line.trim().to_string()).is_err() {
-                            break; // main thread dropped receiver
-                        }
-                    }
-                    Err(rustyline::error::ReadlineError::Interrupted) => {
-                        // SIGINT — send empty to wake up main thread
-                        let _ = input_tx.send(String::new());
-                    }
-                    Err(rustyline::error::ReadlineError::Eof) => {
-                        // Ctrl+D — signal quit
-                        let _ = input_tx.send("/quit".to_string());
-                        break;
-                    }
-                    Err(_) => break,
-                }
-            }
-        });
-
-        let mut skip_footer = false; // Skip footer once after showing a background msg
-
         loop {
             if self.app.quit {
                 break Ok(());
@@ -202,95 +136,409 @@ impl ReplSession {
                 continue;
             }
 
-            // Drain pending background messages (will be empty most of the time)
+            // Drain pending background messages
             if let Some(ref rx) = self.ui_rx {
                 while let Ok(msg) = rx.try_recv() {
                     if let AgentToTui::Message(m) = msg {
                         if m.role == rupoo::MessageRole::System && !m.content.is_empty() {
                             println!();
                             output::system(&m.content);
-                            skip_footer = true; // Don't show another footer after this msg
                         }
                     }
                 }
             }
 
-            // Show footer status bar (skip if we just displayed a background msg)
-            if !skip_footer {
-                output::footer(
-                    self.app.token_in,
-                    self.app.token_out,
-                    self.app.ctx_tokens,
-                    self.app.ctx_budget,
-                    &self.app.model_label,
-                    self.app.hybrid_search,
-                );
-            }
-            skip_footer = false;
+            // Read user input with custom handler (crossterm raw mode)
+            self.handle_input()?;
+        }
+    }
 
-            // Clone ui_rx to avoid borrow conflicts with self in closures.
-            let ui_rx_clone = self.ui_rx.clone();
+    /// Read one line of user input using crossterm raw mode.
+    /// Blocks until Enter, Ctrl+C (×2 to quit), or Ctrl+D.
+    /// Draws "> " prompt + bottom bar, handles editing, history, tab completion.
+    fn handle_input(&mut self) -> Result<(), &'static str> {
+        use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
+        use crossterm::terminal;
 
-            let should_quit = if let Some(ref rx) = ui_rx_clone {
-                crossbeam_channel::select! {
-                    recv(input_rx) -> msg => {
-                        match msg {
-                            Ok(input) => {
-                                if input == "/quit" {
-                                    println!("\n  Bye! 👋");
-                                    true
-                                } else if input.is_empty()
-                                    || (input.starts_with('/') && self.handle_command(&input))
-                                    || self.handle_quick_action(&input)
-                                {
-                                    false
-                                } else {
-                                    self.submit_message(&input);
-                                    false
+        terminal::enable_raw_mode().map_err(|_| "raw mode failed")?;
+
+        use unicode_width::UnicodeWidthStr;
+        let mut buf = String::with_capacity(256);
+        let mut cursor_pos: usize = 0;
+
+        // Show initial prompt with bottom bar (no previous bar to erase)
+        self.redraw_prompt(&buf, cursor_pos, None);
+
+        loop {
+            // Poll with timeout so we can check cancelled flag
+            if event::poll(std::time::Duration::from_millis(100)).unwrap_or(false) {
+                if let Event::Key(key) = event::read().ok().unwrap() {
+                    if key.kind != KeyEventKind::Press {
+                        continue;
+                    }
+
+                    match (key.code, key.modifiers) {
+                        // ── Enter ──
+                        (KeyCode::Enter, _) => {
+                            let input = buf.trim().to_string();
+                            terminal::disable_raw_mode().ok();
+                            if input.is_empty() {
+                                self.redraw_prompt(&buf, cursor_pos, None);
+                                continue;
+                            }
+                            // Save to history (skip if same as last)
+                            let is_dup =
+                                self.app.input_history.last().map_or(false, |h| h == &input);
+                            if !is_dup {
+                                self.app.input_history.push(input.clone());
+                                if self.app.input_history.len() > MAX_INPUT_HISTORY {
+                                    self.app.input_history.remove(0);
                                 }
                             }
-                            Err(_) => true, // channel closed
+                            self.app.input_history_index = self.app.input_history.len();
+                            self.process_input(&input);
+                            return Ok(());
                         }
-                    }
-                    recv(rx) -> msg => {
-                        if let Ok(AgentToTui::Message(m)) = msg {
-                            if m.role == rupoo::MessageRole::System && !m.content.is_empty() {
-                                println!();
-                                output::system(&m.content);
+
+                        // ── Ctrl+C — cancel generation, twice to quit ──
+                        (KeyCode::Char('c'), KeyModifiers::CONTROL) => {
+                            if self
+                                .app
+                                .cancel_flag
+                                .load(std::sync::atomic::Ordering::Relaxed)
+                            {
+                                // Second Ctrl+C → quit
+                                self.app.quit = true;
+                                terminal::disable_raw_mode().ok();
+                                return Ok(());
+                            }
+                            // First Ctrl+C → cancel current generation
+                            self.app
+                                .cancel_flag
+                                .store(true, std::sync::atomic::Ordering::Relaxed);
+                            // Show cancel feedback on the input line
+                            print!("\r\x1b[2K");
+                            println!("  {} 已取消", "⏹".to_string());
+                            // Erase bottom bar
+                            for _ in 0..3 {
+                                print!("\x1b[1A\x1b[2K");
+                            }
+                            let _ = io::stdout().flush();
+                            terminal::disable_raw_mode().ok();
+                            return Ok(());
+                        }
+
+                        // ── Ctrl+D — quit ──
+                        (KeyCode::Char('d'), KeyModifiers::CONTROL) => {
+                            println!("\n  Bye! 👋");
+                            self.app.quit = true;
+                            terminal::disable_raw_mode().ok();
+                            return Ok(());
+                        }
+
+                        // ── Backspace ──
+                        (KeyCode::Backspace, _) if cursor_pos > 0 => {
+                            if !buf.is_char_boundary(cursor_pos) {
+                                cursor_pos = buf.floor_char_boundary(cursor_pos);
+                            }
+                            let s = &buf[..cursor_pos];
+                            let char_boundary = s.floor_char_boundary(s.len().saturating_sub(1));
+                            if char_boundary < cursor_pos {
+                                buf.drain(char_boundary..cursor_pos);
+                                cursor_pos = char_boundary;
+                                self.redraw_prompt(&buf, cursor_pos, None);
                             }
                         }
-                        false
-                    }
-                }
-            } else {
-                match input_rx.recv() {
-                    Ok(input) => {
-                        if input == "/quit" {
-                            true
-                        } else if input.is_empty()
-                            || (input.starts_with('/') && self.handle_command(&input))
-                            || self.handle_quick_action(&input)
-                        {
-                            false
-                        } else {
-                            self.submit_message(&input);
-                            false
-                        }
-                    }
-                    Err(_) => true,
-                }
-            };
 
-            if should_quit {
-                break Ok(());
+                        // ── Left arrow ──
+                        (KeyCode::Left, _) if cursor_pos > 0 => {
+                            cursor_pos -= 1;
+                            print!("\x1b[D");
+                            let _ = io::stdout().flush();
+                        }
+
+                        // ── Right arrow ──
+                        (KeyCode::Right, _) if cursor_pos < buf.len() => {
+                            cursor_pos += 1;
+                            print!("\x1b[C");
+                            let _ = io::stdout().flush();
+                        }
+
+                        // ── Home / Ctrl+A ──
+                        (KeyCode::Home, _) | (KeyCode::Char('a'), KeyModifiers::CONTROL) => {
+                            if cursor_pos > 0 {
+                                print!("\x1b[{}D", cursor_pos);
+                                cursor_pos = 0;
+                                let _ = io::stdout().flush();
+                            }
+                        }
+
+                        // ── End / Ctrl+E ──
+                        (KeyCode::End, _) | (KeyCode::Char('e'), KeyModifiers::CONTROL) => {
+                            if cursor_pos < buf.len() {
+                                let n = buf.len() - cursor_pos;
+                                print!("\x1b[{}C", n);
+                                cursor_pos = buf.len();
+                                let _ = io::stdout().flush();
+                            }
+                        }
+
+                        // ── Up arrow — history back ──
+                        (KeyCode::Up, _) => {
+                            if self.app.input_history_index > 0 {
+                                self.app.input_history_index -= 1;
+                                buf = self.app.input_history[self.app.input_history_index].clone();
+                                cursor_pos = buf.len();
+                                let hint = format!(
+                                    "历史 {}/{}",
+                                    self.app.input_history_index + 1,
+                                    self.app.input_history.len()
+                                );
+                                self.redraw_prompt(&buf, cursor_pos, Some(&hint));
+                            }
+                        }
+
+                        // ── Down arrow — history forward ──
+                        (KeyCode::Down, _) => {
+                            let max = self.app.input_history.len();
+                            if self.app.input_history_index < max {
+                                self.app.input_history_index += 1;
+                                if self.app.input_history_index >= max {
+                                    buf.clear();
+                                    cursor_pos = 0;
+                                } else {
+                                    buf = self.app.input_history[self.app.input_history_index]
+                                        .clone();
+                                    cursor_pos = buf.len();
+                                }
+                                self.redraw_prompt(&buf, cursor_pos, None);
+                            }
+                        }
+
+                        // ── Shift+Tab — cycle mode ──
+                        (KeyCode::BackTab, _) => {
+                            terminal::disable_raw_mode().ok();
+                            // Erase prompt + bottom bar
+                            print!("\r\x1b[1B");
+                            for _ in 0..3 {
+                                print!("\x1b[2K\x1b[1B");
+                            }
+                            print!("\x1b[4A\r\x1b[2K");
+                            let _ = io::stdout().flush();
+
+                            // Cycle mode
+                            self.app.layout_mode = match self.app.layout_mode {
+                                LayoutMode::Chat => LayoutMode::Work,
+                                LayoutMode::Work => LayoutMode::Summary,
+                                LayoutMode::Summary => LayoutMode::Chat,
+                            };
+
+                            let mode_name = match self.app.layout_mode {
+                                LayoutMode::Chat => "auto mode",
+                                LayoutMode::Work => "plan mode",
+                                LayoutMode::Summary => "summary mode",
+                            };
+                            println!(
+                                "  {} ⏵ {}",
+                                "⏵".to_string().color(theme::current().think),
+                                mode_name.color(theme::current().ai_header)
+                            );
+                            terminal::enable_raw_mode().ok();
+
+                            // Debounce — drain any queued repeats
+                            use std::time::Duration;
+                            std::thread::sleep(Duration::from_millis(150));
+                            while event::poll(Duration::from_millis(0)).unwrap_or(false) {
+                                if let Ok(Event::Key(_)) = event::read() { /* discard */ }
+                            }
+                        }
+
+                        // ── Tab — command completion ──
+                        (KeyCode::Tab, _) => {
+                            if self.complete_input(&mut buf, &mut cursor_pos) {
+                                self.redraw_prompt(&buf, cursor_pos, None);
+                            }
+                        }
+
+                        // ── Printable character ──
+                        (KeyCode::Char(ch), _) => {
+                            buf.insert(cursor_pos, ch);
+                            cursor_pos += ch.len_utf8(); // handle multi-byte UTF-8
+                            self.redraw_prompt(&buf, cursor_pos, None);
+                        }
+
+                        _ => {}
+                    }
+                }
             }
         }
     }
 
-    /// Build the input prompt string.
-    #[allow(dead_code)]
-    fn build_prompt(&self) -> String {
-        format!("{} ", PROMPT_SYMBOL.green().bold())
+    /// Redraw the "> " prompt line and bottom bar (3 lines) below it.
+    /// No erase — just overwrite. Keeps cursor on prompt line for typing.
+    fn redraw_prompt(&self, buf: &str, cursor_pos: usize, history_hint: Option<&str>) {
+        use std::fmt::Write;
+        use unicode_width::UnicodeWidthStr;
+        let mut out = String::with_capacity(256);
+
+        // ── Draw prompt (colored) ──
+        let t = theme::current();
+        let (prompt_color, buf_color) = if buf.starts_with("/read ") {
+            (t.think, t.think)
+        } else if buf.starts_with("/cmd ") {
+            (t.error, t.error)
+        } else if buf.starts_with("/search ") {
+            (t.ai_accent, t.ai_accent)
+        } else if buf.starts_with('/') {
+            (t.ai_header, t.ai_header)
+        } else {
+            (t.prompt, t.user_bright)
+        };
+
+        let _ = write!(out, "\r\x1b[2K{}", "> ".color(prompt_color).bold());
+        if buf.is_empty() {
+            let _ = write!(out, "{}", "输入消息，/help 查看命令...".color(t.dim));
+        } else {
+            let _ = write!(out, "{}", buf.color(buf_color));
+        }
+
+        // ── Draw bottom bar (separator, mode, hint) ──
+        let width = (console::Term::stdout().size().1 as usize).max(40);
+        let sep = format!("{}", "─".repeat(width.min(60)).color(t.border));
+
+        // Mode text (real)
+        let mode_label = match self.app.layout_mode {
+            LayoutMode::Chat => "auto",
+            LayoutMode::Work => "dev",
+            LayoutMode::Summary => "auto",
+        };
+
+        // Token counts (real)
+        let tok_in = if self.app.token_in > 10000 {
+            format!(
+                "{}.{}k",
+                self.app.token_in / 1000,
+                (self.app.token_in % 1000) / 100
+            )
+        } else if self.app.token_in > 1000 {
+            format!("{:.1}k", self.app.token_in as f64 / 1000.0)
+        } else {
+            self.app.token_in.to_string()
+        };
+        let tok_out = if self.app.token_out > 10000 {
+            format!(
+                "{}.{}k",
+                self.app.token_out / 1000,
+                (self.app.token_out % 1000) / 100
+            )
+        } else if self.app.token_out > 1000 {
+            format!("{:.1}k", self.app.token_out as f64 / 1000.0)
+        } else {
+            self.app.token_out.to_string()
+        };
+
+        // Model name (real, truncated)
+        let model_short = if self.app.model_label.len() > 28 {
+            format!("{}…", &self.app.model_label[..28])
+        } else {
+            self.app.model_label.clone()
+        };
+
+        // Hint text
+        let hint = match history_hint {
+            Some(h) => h.to_string(),
+            None => "Shift+Tab:切换模式 · /help:查看命令".to_string(),
+        };
+
+        let _ = write!(
+            out,
+            "\r\n{}\r\n  {} {} · {} in · {} out · {}\r\n  {} {}",
+            sep,
+            "⏵".color(t.think),
+            mode_label.color(t.ai_header),
+            tok_in.color(t.dim),
+            tok_out.color(t.dim),
+            model_short.color(t.dim),
+            "⏵".color(t.think),
+            hint.color(t.dim),
+        );
+
+        // ── Move cursor to prompt line, column 0, then right to cursor_pos ──
+        out.push_str("\x1b[3A\r"); // up 3 from hint → prompt line, col 0
+        let right = 2 + buf[..cursor_pos].width(); // "> " + text before cursor
+        let _ = write!(out, "\x1b[{}C", right);
+
+        // Atomic write + flush
+        use std::io::Write as IoWrite;
+        let _ = io::stdout().write_all(out.as_bytes());
+        let _ = io::stdout().flush();
+    }
+
+    /// Process an input string: quit, command, quick action, or submit.
+    fn process_input(&mut self, input: &str) {
+        if input == "/quit" || input == "/exit" || input == "/q" {
+            self.app.quit = true;
+            return;
+        }
+        if input.starts_with('/') && self.handle_command(input) {
+            return;
+        }
+        if self.handle_quick_action(input) {
+            return;
+        }
+        self.submit_message(input);
+    }
+
+    /// Tab completion: commands and file paths.
+    /// Returns true if completion was attempted.
+    fn complete_input(&self, buf: &mut String, cursor_pos: &mut usize) -> bool {
+        // Command completion
+        if buf.starts_with('/') {
+            let cmd_part = &buf[1..];
+            let commands = [
+                "help", "h", "?", "tools", "ts", "new", "sessions", "ls", "switch", "s", "model",
+                "m", "theme", "t", "plan", "clear", "cls", "quit", "q", "exit", "history", "alias",
+                "read", "cmd", "search", "memory", "mem", "deep", "status",
+            ];
+            let candidates: Vec<&&str> = commands
+                .iter()
+                .filter(|c| c.starts_with(cmd_part))
+                .collect();
+
+            if candidates.len() == 1 {
+                *buf = format!("/{}", candidates[0]);
+                *cursor_pos = buf.len();
+                return true;
+            } else if candidates.len() > 1 && !cmd_part.is_empty() {
+                print!("\r\x1b[2K");
+                println!(
+                    "  {}",
+                    candidates
+                        .iter()
+                        .map(|c| format!("/{}", c))
+                        .collect::<Vec<_>>()
+                        .join("  ")
+                );
+                return true;
+            }
+        }
+
+        // Path completion for /read
+        if buf.starts_with("/read ") {
+            let path_part = &buf[6..];
+            let candidates = complete_path(path_part);
+            if candidates.len() == 1 && !candidates[0].is_empty() {
+                *buf = format!("/read {}", candidates[0]);
+                *cursor_pos = buf.len();
+                return true;
+            } else if candidates.len() > 1 && !path_part.is_empty() {
+                print!("\r\x1b[2K");
+                println!("  {}", candidates.join("  "));
+                return true;
+            }
+        }
+
+        false
     }
 
     /// Drain agent events and render streaming output.
@@ -385,62 +633,137 @@ impl ReplSession {
         &mut self,
         msg: AgentToTui,
         spinner_frame: &mut usize,
-        tool_card_open: &mut bool,
+        _tool_card_open: &mut bool,
         rx: &Option<crossbeam_channel::Receiver<AgentToTui>>,
     ) -> bool {
-        match msg {
-            AgentToTui::StreamChunk { text } => {
-                output::clear_spinner();
-                markdown::render_stream_chunk(&text, &mut self.stream_state);
+        // ── LayoutModeHint always fires first — update state immediately ──
+        if let AgentToTui::LayoutModeHint(mode) = &msg {
+            if self.app.layout_mode != *mode {
+                self.app.layout_mode = *mode;
+                output::layout_mode_banner(*mode);
             }
+        }
+
+        // ── Dispatch by event type, mode-aware where needed ──
+        match msg {
+            AgentToTui::LayoutModeHint(_) => {
+                // Already handled above
+            }
+            AgentToTui::StreamChunk { text } => match self.app.layout_mode {
+                LayoutMode::Chat => {
+                    output::clear_thinking_summary();
+                    markdown::render_stream_chunk(&text, &mut self.stream_state);
+                }
+                LayoutMode::Work => {
+                    output::clear_thinking_summary();
+                    markdown::render_stream_chunk(&text, &mut self.stream_state);
+                }
+                LayoutMode::Summary => {
+                    // Summary mode doesn't render stream chunks
+                }
+            },
             AgentToTui::Thinking => {
-                output::thinking_spinner(*spinner_frame, None);
+                match self.app.layout_mode {
+                    LayoutMode::Chat => {
+                        output::thinking_spinner(*spinner_frame, None);
+                    }
+                    LayoutMode::Work | LayoutMode::Summary => {
+                        // Work mode: use thinking_summary instead of spinner
+                    }
+                }
             }
             AgentToTui::Message(m) => {
                 output::clear_spinner();
-                if m.role == rupoo::MessageRole::User {
-                    // User messages are already printed by submit_message
-                } else if m.role == rupoo::MessageRole::System {
-                    if m.content.starts_with("🔧") {
-                        output::clear_spinner();
-                        let (tool_name, args) = parse_tool_call(&m.content);
-                        output::tool_call_start(&tool_name, &args);
-                        *tool_card_open = true;
-                    } else if m.content.starts_with("✅") && *tool_card_open {
-                        let result = m.content.strip_prefix("✅ ").unwrap_or(&m.content);
-                        output::tool_result(result, result.lines().count() > 8);
-                        output::tool_call_end(true, None);
-                        *tool_card_open = false;
-                    } else {
-                        if !m.content.is_empty() {
-                            output::system(&m.content);
+                output::clear_thinking_summary();
+
+                match self.app.layout_mode {
+                    LayoutMode::Chat => {
+                        // Chat mode: clean bubble-style rendering
+                        if m.role == rupoo::MessageRole::User {
+                            // Already printed by submit_message
+                        } else if m.role == rupoo::MessageRole::Assistant {
+                            // Content already streamed via StreamChunk → markdown rendering.
+                            // Just flush stream state and store to history — don't re-render.
+                            markdown::flush_stream(&mut self.stream_state);
+                            self.stream_state = markdown::StreamState::new();
+                        } else if m.role == rupoo::MessageRole::System {
+                            // In Chat mode, suppress tool call noise (🔧/✅/执行工具)
+                            // Only show non-tool system messages
+                            if !m.content.starts_with("🔧")
+                                && !m.content.starts_with("✅")
+                                && !m.content.starts_with("⠋")
+                            {
+                                output::chat_bubble(&m.content, m.role);
+                            }
+                        } else if m.content.contains("Error") {
+                            output::error(&m.content);
                         }
                     }
-                } else if m.role == rupoo::MessageRole::Assistant {
-                    markdown::flush_stream(&mut self.stream_state);
-                    self.stream_state = markdown::StreamState::new();
-                } else if m.content.contains("Error") {
-                    output::error(&m.content);
+                    LayoutMode::Work => {
+                        // Work mode: show user messages and final results only
+                        if m.role == rupoo::MessageRole::User {
+                            // Already printed by submit_message
+                        } else if m.role == rupoo::MessageRole::Assistant {
+                            markdown::flush_stream(&mut self.stream_state);
+                            self.stream_state = markdown::StreamState::new();
+                            // Print assistant output as-is (it's the work result)
+                            for line in m.content.lines() {
+                                println!("  {}", line);
+                            }
+                        } else if m.role == rupoo::MessageRole::System {
+                            // Work mode: suppress tool call noise
+                            if !m.content.starts_with("🔧")
+                                && !m.content.starts_with("✅")
+                                && !m.content.starts_with("⠋")
+                            {
+                                output::system(&m.content);
+                            }
+                        } else if m.content.contains("Error") {
+                            output::error(&m.content);
+                        }
+                    }
+                    LayoutMode::Summary => {
+                        // Summary mode: just pass through to message history
+                    }
                 }
                 self.app.push_message(m);
                 self.app.persist_sessions();
             }
             AgentToTui::Idle => {
                 output::clear_spinner();
+                output::clear_thinking_summary();
                 markdown::flush_stream(&mut self.stream_state);
                 self.stream_state = markdown::StreamState::new();
 
                 if let Some(start) = self.gen_start.take() {
                     let duration = start.elapsed().as_secs_f64();
-                    let ctx_tokens = self.app.conversation_history.estimated_tokens();
-                    let ctx_budget = self.app.conversation_history.token_budget();
-                    output::assistant_footer(
-                        duration,
-                        self.app.token_in,
-                        self.app.token_out,
-                        ctx_tokens,
-                        ctx_budget,
-                    );
+
+                    match self.app.layout_mode {
+                        LayoutMode::Chat => {
+                            // Compact timing line — no thick separator (footer_bar shown by main loop)
+                            let t = theme::current();
+                            println!(
+                                "{} {:.1}s │ {} in │ {} out",
+                                "⏱".color(t.dim),
+                                duration,
+                                self.app.token_in.to_string().color(t.dim),
+                                self.app.token_out.to_string().color(t.dim),
+                            );
+                        }
+                        LayoutMode::Work => {
+                            // Work mode: compact footer
+                            println!(
+                                "{} {:.1}s · {} in · {} out",
+                                "⏱".to_string(),
+                                duration,
+                                self.app.token_in,
+                                self.app.token_out,
+                            );
+                        }
+                        LayoutMode::Summary => {
+                            // Summary is rendered separately
+                        }
+                    }
                 }
 
                 self.app.set_idle();
@@ -494,6 +817,23 @@ impl ReplSession {
             }
             AgentToTui::HybridSearchUpdate { enabled } => {
                 self.app.hybrid_search = enabled;
+            }
+            // ═══ 方案 C 新增事件处理 ═══
+            AgentToTui::ThinkingSummary { text } => {
+                output::thinking_summary(&text);
+            }
+            AgentToTui::PhaseProgress {
+                phase_name,
+                percentage,
+            } => {
+                output::clear_spinner();
+                output::phase_progress(&phase_name, percentage);
+            }
+            AgentToTui::FileChanges { ref files } => {
+                output::clear_spinner();
+                for f in files {
+                    output::file_change(f);
+                }
             }
         }
         true
@@ -687,25 +1027,23 @@ impl ReplSession {
 
     /// Show command history
     fn show_history(&self, arg: &str) {
-        let history = self.rl.history();
-
         if arg.is_empty() {
-            // Show recent history
-            let count = history.len().min(10);
+            let count = self.app.input_history.len().min(10);
+            let start = self.app.input_history.len().saturating_sub(count);
             println!();
             println!("  {} Recent History:", "📜".cyan().bold());
-            for (i, entry) in history.iter().rev().take(count).enumerate() {
-                let idx = history.len() - i;
-                println!("  {} [{}] {}", "▸".dimmed(), idx, entry);
+            for (i, entry) in self.app.input_history[start..].iter().enumerate() {
+                println!("  {} [{}] {}", "▸".dimmed(), start + i + 1, entry);
             }
             println!();
         } else {
-            // Search history
             let query = arg.to_lowercase();
-            let results: Vec<_> = history
+            let results: Vec<(usize, &String)> = self
+                .app
+                .input_history
                 .iter()
                 .enumerate()
-                .filter(|(_, entry): &(usize, &String)| entry.to_lowercase().contains(&query))
+                .filter(|(_, entry)| entry.to_lowercase().contains(&query))
                 .collect();
 
             if results.is_empty() {
@@ -786,42 +1124,45 @@ impl ReplSession {
             return;
         }
 
-        // Ask user
-        loop {
-            match self.rl.readline("  Approve? [y/n/a(ll)] ") {
-                Ok(line) => {
-                    let answer = line.trim().to_lowercase();
-                    match answer.as_str() {
-                        "y" | "yes" => {
-                            if let Some(ref tx) = self.app.agent_tx {
-                                let _ = tx.send(TuiToAgent::ApproveTool("approved".to_string()));
-                            }
-                            break;
-                        }
-                        "n" | "no" => {
-                            if let Some(ref tx) = self.app.agent_tx {
-                                let _ = tx.send(TuiToAgent::DenyTool);
-                            }
-                            break;
-                        }
-                        "a" | "all" => {
-                            self.app.approve_all = true;
-                            if let Some(ref tx) = self.app.agent_tx {
-                                let _ = tx.send(TuiToAgent::ApproveAll);
-                            }
-                            println!("  {} Auto-approve enabled for this session", "✓".green());
-                            break;
-                        }
-                        _ => continue,
+        // Ask user using crossterm raw input
+        use crossterm::event::{self, Event, KeyCode, KeyEventKind};
+        use crossterm::terminal;
+        let _ = terminal::enable_raw_mode();
+        print!("  Approve? [y/n/a(ll)] ");
+        let _ = io::stdout().flush();
+        let answer = loop {
+            if let Event::Key(key) = event::read().ok().unwrap() {
+                if key.kind == KeyEventKind::Press {
+                    match key.code {
+                        KeyCode::Char('y') | KeyCode::Char('Y') => break "y",
+                        KeyCode::Char('n') | KeyCode::Char('N') => break "n",
+                        KeyCode::Char('a') | KeyCode::Char('A') => break "a",
+                        _ => {}
                     }
-                }
-                Err(_) => {
-                    if let Some(ref tx) = self.app.agent_tx {
-                        let _ = tx.send(TuiToAgent::DenyTool);
-                    }
-                    break;
                 }
             }
+        };
+        let _ = terminal::disable_raw_mode();
+        println!("{}", answer);
+        match answer {
+            "y" => {
+                if let Some(ref tx) = self.app.agent_tx {
+                    let _ = tx.send(TuiToAgent::ApproveTool("approved".to_string()));
+                }
+            }
+            "n" => {
+                if let Some(ref tx) = self.app.agent_tx {
+                    let _ = tx.send(TuiToAgent::DenyTool);
+                }
+            }
+            "a" => {
+                self.app.approve_all = true;
+                if let Some(ref tx) = self.app.agent_tx {
+                    let _ = tx.send(TuiToAgent::ApproveAll);
+                }
+                println!("  {} Auto-approve enabled for this session", "✓".green());
+            }
+            _ => {}
         }
     }
 
@@ -1052,6 +1393,7 @@ impl ReplSession {
 // ═══════════════════════════════════════════════════════════════════════════
 
 /// Parse "🔧 tool_name(args)" into (tool_name, args).
+#[allow(dead_code)]
 fn parse_tool_call(content: &str) -> (String, String) {
     let rest = content.strip_prefix("🔧 ").unwrap_or(content);
     if let Some(paren_pos) = rest.find('(') {
@@ -1064,6 +1406,66 @@ fn parse_tool_call(content: &str) -> (String, String) {
     } else {
         (rest.to_string(), String::new())
     }
+}
+
+/// Simple path completion for /read and /cmd commands.
+/// Returns matching file/directory paths.
+fn complete_path(prefix: &str) -> Vec<String> {
+    let dir = if prefix.is_empty() {
+        std::path::PathBuf::from(".")
+    } else {
+        let p = std::path::Path::new(prefix);
+        if prefix.ends_with('/') {
+            p.to_path_buf()
+        } else if let Some(parent) = p.parent() {
+            if parent.as_os_str().is_empty() {
+                std::path::PathBuf::from(".")
+            } else {
+                parent.to_path_buf()
+            }
+        } else {
+            std::path::PathBuf::from(".")
+        }
+    };
+
+    let file_prefix = if prefix.is_empty() {
+        String::new()
+    } else {
+        std::path::Path::new(prefix)
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_default()
+    };
+
+    let mut candidates = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(&dir) {
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if name.starts_with('.') {
+                continue;
+            }
+            if !name.starts_with(&file_prefix) {
+                continue;
+            }
+            let full = if prefix.is_empty() {
+                name.clone()
+            } else if prefix.ends_with('/') {
+                format!("{}{}", prefix, name)
+            } else {
+                let parent = dir.join(&name);
+                parent.to_string_lossy().to_string()
+            };
+            // Append / for directories
+            let display = if entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+                format!("{}/", full)
+            } else {
+                full
+            };
+            candidates.push(display);
+        }
+    }
+    candidates.sort();
+    candidates
 }
 
 // ═══════════════════════════════════════════════════════════════════════════

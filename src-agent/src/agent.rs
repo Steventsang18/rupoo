@@ -136,6 +136,8 @@ pub struct Agent {
     pub loop_engine: Option<std::sync::Arc<crate::loop_engine::LoopEngine>>,
     /// Trait-based memory system bridge (shared with Orchestrator).
     pub memory_system: std::sync::Arc<MemorySystemBridge>,
+    /// Source tag for stored memories — "agent" for CLI, "feishu" for Feishu.
+    pub memory_source: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -281,6 +283,7 @@ impl Agent {
             tool_usage_tracker,
             loop_engine,
             memory_system,
+            memory_source: "agent".to_string(),
         }
     }
 
@@ -582,8 +585,12 @@ impl Agent {
 
         let llm_provider = match provider {
             "anthropic" => crate::llm::LlmProvider::Anthropic,
-            "openai" | "deepseek" => crate::llm::LlmProvider::OpenAI,
+            "openai" => crate::llm::LlmProvider::OpenAI,
             "ollama" => crate::llm::LlmProvider::Ollama,
+            // 所有 OpenAI 兼容的国产模型都走 OpenAI 驱动
+            "deepseek" | "qwen" | "glm" | "moonshot" | "yi" | "baichuan" | "minimax" | "spark" => {
+                crate::llm::LlmProvider::OpenAI
+            }
             _ => {
                 return Err(AgentError::Config(format!(
                     "Unknown provider: '{}'",
@@ -598,11 +605,24 @@ impl Agent {
         } else if let Ok(Some(m)) = repo.get_setting(&format!("model.{}", provider)).await {
             cfg.model = m;
         }
-        // DeepSeek uses OpenAI-compatible API via base_url
-        if provider == "deepseek" && cfg.base_url.is_none() {
-            cfg.base_url = Some("https://api.deepseek.com".to_string());
+        // 国产大模型预设 base_url — 无需用户记忆地址
+        let default_base_url = match provider {
+            "deepseek" => Some("https://api.deepseek.com"),
+            "qwen" => Some("https://dashscope.aliyuncs.com/compatible-mode/v1"),
+            "glm" => Some("https://open.bigmodel.cn/api/paas/v4"),
+            "moonshot" => Some("https://api.moonshot.cn/v1"),
+            "yi" => Some("https://api.lingyiwanwu.com/v1"),
+            "baichuan" => Some("https://api.baichuan-ai.com/v1"),
+            "minimax" => Some("https://api.minimax.chat/v1"),
+            "spark" => Some("https://spark-api-open.xf-yun.com/v1"),
+            _ => None,
+        };
+        if let Some(url) = default_base_url {
+            if cfg.base_url.is_none() {
+                cfg.base_url = Some(url.to_string());
+            }
         }
-        // Load base_url if explicitly configured
+        // Load base_url if explicitly configured (overrides default)
         if let Ok(Some(base_url)) = repo.get_setting(&format!("base_url.{}", provider)).await {
             cfg.base_url = Some(base_url);
         }
@@ -623,7 +643,19 @@ impl Agent {
     /// Call this after `rupoo config set` to apply changes without restart.
     pub async fn reconfigure_from_db(&mut self, repo: &TaskRepo) -> AgentResult<String> {
         // Try providers in priority order
-        for provider in &["anthropic", "openai", "deepseek", "ollama"] {
+        for provider in &[
+            "anthropic",
+            "openai",
+            "deepseek",
+            "qwen",
+            "glm",
+            "moonshot",
+            "yi",
+            "baichuan",
+            "minimax",
+            "spark",
+            "ollama",
+        ] {
             if let Ok(Some(_api_key)) = repo.get_setting(&format!("api_key.{}", provider)).await {
                 return self.switch_llm(provider, None, repo).await;
             }
@@ -739,7 +771,25 @@ impl Agent {
             tool_usage_tracker: Arc::clone(&self.tool_usage_tracker),
             loop_engine: None, // child agents share parent's engine via Arc
             memory_system: std::sync::Arc::clone(&self.memory_system),
+            memory_source: self.memory_source.clone(),
         })
+    }
+
+    // ------------------------------------------------------------------
+    // Memory Search
+    // ------------------------------------------------------------------
+
+    /// Search across all stored memories.
+    pub async fn search_memories(
+        &self,
+        query: &str,
+        limit: usize,
+    ) -> AgentResult<Vec<crate::task::MemoryEntry>> {
+        if self.is_memory_enabled() {
+            self.memory_store.recall(query, limit).await
+        } else {
+            Err(crate::error::AgentError::MemoryDisabled)
+        }
     }
 
     // ------------------------------------------------------------------
@@ -748,6 +798,9 @@ impl Agent {
 
     /// Run an agent chat with the given message, history, and callbacks.
     /// Returns the final response and token usage.
+    /// When `system_prompt_override` is `Some`, it replaces the cached system prompt
+    /// for this call (e.g. a Feishu channel can inject its own identity).
+        #[allow(clippy::too_many_arguments)]
     pub async fn agent_chat<F>(
         &self,
         user_message: &str,
@@ -756,6 +809,7 @@ impl Agent {
         safe_mode: bool,
         on_event: F,
         intent: Option<&crate::signal::IntentState>,
+        system_prompt_override: Option<String>,
     ) -> AgentResult<(String, TokenUsage)>
     where
         F: FnMut(AgentEvent) + Send,
@@ -782,8 +836,12 @@ impl Agent {
 
         let context_ref = memory_context.as_deref();
 
-        // Check for DB-stored system prompt override
-        let custom_preamble = self.repo.get_setting("system_prompt").await.ok().flatten();
+        // Determine system prompt: explicit override > DB setting > cached default
+        let db_preamble = self.repo.get_setting("system_prompt").await.ok().flatten();
+        let custom_preamble: Option<&str> = match system_prompt_override {
+            Some(ref prompt) if !prompt.is_empty() => Some(prompt.as_str()),
+            _ => db_preamble.as_deref(),
+        };
 
         // Run the agent loop
         let (response, usage) = gateway
@@ -794,7 +852,7 @@ impl Agent {
                 safe_mode,
                 context_ref,
                 on_event,
-                custom_preamble.as_deref(),
+                custom_preamble,
                 intent,
             )
             .await?;
@@ -802,7 +860,10 @@ impl Agent {
         // Store conversation memory after successful chat
         if self.is_memory_enabled() {
             let mem_content = format!("User: {}\nAssistant: {}", user_message, response);
-            match self.remember(&mem_content, &["chat", "conversation"]).await {
+            match self
+                .remember_from(&mem_content, &["chat", "conversation"], &self.memory_source)
+                .await
+            {
                 Ok(id) => {
                     info!(memory_id = %id, "conversation memory stored successfully");
                 }

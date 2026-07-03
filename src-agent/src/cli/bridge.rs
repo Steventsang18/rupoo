@@ -9,6 +9,7 @@ use super::approval::ApprovalExt;
 use super::ChatMessage;
 use super::{AgentToTui, TuiToAgent};
 use rupoo::agent::ToolExecutor;
+use rupoo::LayoutMode;
 
 // Magic number constants
 const BRIDGE_POLL_MS: u64 = 100;
@@ -90,6 +91,8 @@ impl AgentUiBridge {
             self.handle_plan_mode(task).await;
         } else if text.starts_with("/loop") {
             self.handle_loop_command(text).await;
+        } else if text.starts_with("/cron") {
+            self.handle_cron_command(text).await;
         } else if text.starts_with("/model ") {
             self.handle_model_switch(text).await;
         } else if text.starts_with("/memory") {
@@ -103,6 +106,17 @@ impl AgentUiBridge {
         } else if text == "/help" || text == "/?" {
             self.handle_help().await;
         } else {
+            // Detect intent → send LayoutModeHint before chat
+            if rupoo::signal::IntentState::looks_like_development_demand(text) {
+                let _ = self
+                    .ui_tx
+                    .send(AgentToTui::LayoutModeHint(LayoutMode::Work));
+            } else {
+                let _ = self
+                    .ui_tx
+                    .send(AgentToTui::LayoutModeHint(LayoutMode::Chat));
+            }
+
             // Chat Mode: multi-turn agent chat
             self.handle_chat_message(text).await;
         }
@@ -454,6 +468,145 @@ Available commands:
         }
     }
 
+    /// Handle /cron commands — cron job management.
+    async fn handle_cron_command(&mut self, text: &str) {
+        let input = text.trim_start_matches("/cron").trim();
+        let parts: Vec<&str> = input.splitn(2, ' ').collect();
+        let subcmd = parts.first().copied().unwrap_or("");
+
+        match subcmd {
+            "list" => {
+                let repo = self.repo.clone();
+                let jobs = rupoo::cron::list_cron_jobs(&repo, 100, 0).await;
+                match jobs {
+                    Ok(list) if list.is_empty() => {
+                        self.send_system("没有定时任务。使用 /cron add 添加一个。")
+                            .await;
+                    }
+                    Ok(list) => {
+                        let mut msg = String::from("📋 Cron 任务列表:\n");
+                        let now = chrono::Utc::now().timestamp();
+                        for j in &list {
+                            let status = if j.enabled {
+                                match j.next_run_at {
+                                    Some(ts) if ts <= now => "● 待执行",
+                                    Some(_) => "● 活跃",
+                                    None => "○ 无计划",
+                                }
+                            } else {
+                                "○ 已暂停"
+                            };
+                            let next_str = j
+                                .next_run_at
+                                .and_then(|ts| chrono::DateTime::from_timestamp(ts, 0))
+                                .map(|dt| {
+                                    dt.with_timezone(&chrono::Local)
+                                        .format("%m-%d %H:%M")
+                                        .to_string()
+                                })
+                                .unwrap_or_else(|| "-".to_string());
+                            msg.push_str(&format!(
+                                "  {} | {} | {} | {}\n",
+                                &j.id[..8],
+                                j.name,
+                                next_str,
+                                status,
+                            ));
+                        }
+                        self.send_system(&msg).await;
+                    }
+                    Err(e) => {
+                        self.send_error(&format!("获取 cron 列表失败: {e}")).await;
+                    }
+                }
+            }
+            "add" => {
+                let args = parts.get(1).copied().unwrap_or("");
+                // Parse: "name" "schedule" "task message"
+                let parsed = parse_cron_add_args(args);
+                match parsed {
+                    Some((name, schedule, task)) => {
+                        let repo = self.repo.clone();
+                        match rupoo::cron::calculate_next_run(schedule) {
+                            Ok(_) => match rupoo::cron::CronJob::new(name, schedule, task) {
+                                Ok(job) => match rupoo::cron::save_cron_job(&repo, &job).await {
+                                    Ok(()) => {
+                                        let desc = job
+                                            .next_run_at
+                                            .and_then(|ts| chrono::DateTime::from_timestamp(ts, 0))
+                                            .map(|dt| {
+                                                dt.with_timezone(&chrono::Local)
+                                                    .format("%Y-%m-%d %H:%M")
+                                                    .to_string()
+                                            })
+                                            .unwrap_or_else(|| "未知".to_string());
+                                        self.send_system(&format!(
+                                            "✅ Cron '{}' 已添加，下次执行: {desc}",
+                                            name
+                                        ))
+                                        .await;
+                                    }
+                                    Err(e) => self.send_error(&format!("保存失败: {e}")).await,
+                                },
+                                Err(e) => self.send_error(&format!("创建失败: {e}")).await,
+                            },
+                            Err(e) => {
+                                self.send_error(&format!("无效 cron 表达式: {e}")).await;
+                            }
+                        }
+                    }
+                    None => {
+                        self.send_system("用法: /cron add \"名称\" \"cron表达式\" \"任务描述\"")
+                            .await;
+                        self.send_system(
+                            "示例: /cron add \"日报\" \"0 9 * * 1-5\" \"生成每日工作报告\"",
+                        )
+                        .await;
+                    }
+                }
+            }
+            "remove" | "delete" => {
+                let id = parts.get(1).copied().unwrap_or("");
+                if id.is_empty() {
+                    self.send_system("用法: /cron remove <job_id>").await;
+                    return;
+                }
+                let repo = self.repo.clone();
+                match rupoo::cron::delete_cron_job(&repo, id).await {
+                    Ok(()) => self.send_system("✅ Cron 任务已删除").await,
+                    Err(e) => self.send_error(&format!("删除失败: {e}")).await,
+                }
+            }
+            "pause" => {
+                let id = parts.get(1).copied().unwrap_or("");
+                if id.is_empty() {
+                    self.send_system("用法: /cron pause <job_id>").await;
+                    return;
+                }
+                let repo = self.repo.clone();
+                match rupoo::cron::toggle_cron_job(&repo, id, false).await {
+                    Ok(()) => self.send_system("⏸️ Cron 任务已暂停").await,
+                    Err(e) => self.send_error(&format!("暂停失败: {e}")).await,
+                }
+            }
+            "resume" => {
+                let id = parts.get(1).copied().unwrap_or("");
+                if id.is_empty() {
+                    self.send_system("用法: /cron resume <job_id>").await;
+                    return;
+                }
+                let repo = self.repo.clone();
+                match rupoo::cron::toggle_cron_job(&repo, id, true).await {
+                    Ok(()) => self.send_system("▶️ Cron 任务已恢复").await,
+                    Err(e) => self.send_error(&format!("恢复失败: {e}")).await,
+                }
+            }
+            _ => {
+                self.send_system("📋 Cron 命令:\n  /cron list                    — 列出所有任务\n  /cron add \"name\" \"schedule\" \"task\" — 添加任务\n  /cron remove <id>            — 删除任务\n  /cron pause <id>             — 暂停任务\n  /cron resume <id>            — 恢复任务").await;
+            }
+        }
+    }
+
     async fn send_system(&self, msg: &str) {
         if let Err(e) = self
             .ui_tx
@@ -729,4 +882,44 @@ async fn format_loop_summary(
     }
 
     msg
+}
+
+/// Parse /cron add arguments: "name" "schedule" "task message"
+/// Supports both quoted strings and positional arguments.
+fn parse_cron_add_args(args: &str) -> Option<(&str, &str, &str)> {
+    let args = args.trim();
+    if args.is_empty() {
+        return None;
+    }
+
+    // Try quoted parsing: "name" "schedule" "task message"
+    let mut parts = Vec::new();
+    let mut remaining = args;
+    while let Some(start) = remaining.find('"') {
+        let after = &remaining[start + 1..];
+        if let Some(end) = after.find('"') {
+            parts.push(&after[..end]);
+            remaining = &after[end + 1..];
+        } else {
+            break;
+        }
+    }
+
+    if parts.len() >= 3 {
+        Some((parts[0], parts[1], parts[2]))
+    } else if parts.len() == 2 {
+        Some((parts[0], parts[1], remaining.trim()))
+    } else {
+        // Fallback: parse by whitespace, first 2 args as name+schedule, rest as task
+        let words: Vec<&str> = args.split_whitespace().collect();
+        if words.len() >= 3 {
+            Some((
+                words[0],
+                words[1],
+                &args[words[0].len() + words[1].len() + 2..],
+            ))
+        } else {
+            None
+        }
+    }
 }

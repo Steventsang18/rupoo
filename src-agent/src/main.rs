@@ -3,7 +3,6 @@ use clap::{Parser, Subcommand};
 mod cli;
 mod tracing_setup;
 
-mod build_engine;
 mod executor;
 mod main_cli;
 
@@ -97,6 +96,14 @@ enum Commands {
         #[arg(long)]
         db: Option<String>,
     },
+    /// Manage cron jobs for scheduled task execution
+    Cron {
+        #[command(subcommand)]
+        action: Option<main_cli::CronAction>,
+        /// Database path (default: $RUPOO_HOME/agent.db)
+        #[arg(long)]
+        db: Option<String>,
+    },
     /// Manage and install external tools (MCP servers, search engines)
     Tools {
         #[command(subcommand)]
@@ -123,15 +130,33 @@ enum Commands {
         #[arg(long)]
         prev: bool,
     },
-    /// Start in server mode (placeholder for future daemon)
+    /// Start channel daemon (Feishu, DingTalk, etc.)
     Serve {
         /// Database path (default: $RUPOO_HOME/agent.db)
         #[arg(long)]
         db: Option<String>,
-        /// Port to listen on
-        #[arg(long, default_value_t = 8080)]
-        port: u16,
+        /// Path to rupoo config.toml (default: $RUPOO_HOME/config.toml)
+        #[arg(long)]
+        config: Option<String>,
+        /// Run as daemon in background (auto-daemonize)
+        #[arg(short, long)]
+        daemon: bool,
     },
+    /// Configure channels (Feishu, DingTalk, etc.)
+    Channel {
+        #[command(subcommand)]
+        action: main_cli::ChannelAction,
+    },
+    /// 停止后台服务
+    ServeStop,
+    /// 查看后台服务状态
+    ServeStatus,
+    /// 接入飞书通道
+    Feishu,
+    /// 接入钉钉通道
+    Dingtalk,
+    /// 查看已配置通道
+    Channels,
     /// Generate shell completions
     Completions {
         /// Shell type (bash, zsh, fish, elvish, powershell)
@@ -155,7 +180,7 @@ async fn main() -> anyhow::Result<()> {
             std::fs::create_dir_all(&data_dir).ok();
             let db_path = data_dir.join("agent.db");
             let (repo, agent, tool_executor) =
-                build_engine::build_engine(db_path.to_str().unwrap_or("agent.db")).await?;
+                rupoo::build_engine::build_engine(db_path.to_str().unwrap_or("agent.db")).await?;
 
             // Capture tokio handle on the main async thread (not inside spawn_blocking)
             let handle = tokio::runtime::Handle::current();

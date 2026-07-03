@@ -12,6 +12,33 @@ const PROVIDER_KEYS: &[(&str, &str, &str, &str)] = &[
     ),
     ("openai", "gpt-4o", "api_key.openai", "base_url.openai"),
     ("ollama", "llama3.2", "", ""),
+    // ────────────────────────────────────────────────────────────────
+    // 国产大模型 — 均兼容 OpenAI API 格式
+    // 使用方式: /model set deepseek 或 rupoo config set active_provider deepseek
+    // ────────────────────────────────────────────────────────────────
+    (
+        "deepseek",
+        "deepseek-chat",
+        "api_key.deepseek",
+        "base_url.deepseek",
+    ),
+    ("qwen", "qwen-max", "api_key.qwen", "base_url.qwen"),
+    ("glm", "glm-4", "api_key.glm", "base_url.glm"),
+    (
+        "moonshot",
+        "moonshot-v1-auto",
+        "api_key.moonshot",
+        "base_url.moonshot",
+    ),
+    ("yi", "yi-lightning", "api_key.yi", "base_url.yi"),
+    (
+        "baichuan",
+        "Baichuan4",
+        "api_key.baichuan",
+        "base_url.baichuan",
+    ),
+    ("minimax", "abab6.5s", "api_key.minimax", "base_url.minimax"),
+    ("spark", "spark-4.0", "api_key.spark", "base_url.spark"),
 ];
 
 pub async fn run(db_path: &str, action: Option<crate::main_cli::ModelAction>) -> Result<()> {

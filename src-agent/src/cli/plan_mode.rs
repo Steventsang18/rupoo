@@ -2,8 +2,11 @@
 
 use tracing::warn;
 
+use std::process::Command;
+
 use super::bridge::AgentUiBridge;
 use super::{AgentToTui, ChatMessage, PendingTool};
+use rupoo::{FileAction, FileChangeInfo};
 
 impl AgentUiBridge {
     /// Handle Plan Mode: generate plan from task and execute step by step.
@@ -147,12 +150,33 @@ impl AgentUiBridge {
                 Ok(rupoo::agent::StepOutcome::Advanced) => {
                     // Send token update BEFORE last-step check so it's always emitted
                     self.send_token_update();
+
+                    // Send phase progress — completed steps / total
+                    let pct = ((plan.current_step_index as f64) / (plan.steps.len() as f64) * 100.0)
+                        as u8;
+                    let phase_name = plan
+                        .steps
+                        .get(plan.current_step_index.saturating_sub(1))
+                        .map(|s| s.label())
+                        .unwrap_or_else(|| "执行中".to_string());
+                    let _ = self.ui_tx.send(AgentToTui::PhaseProgress {
+                        phase_name,
+                        percentage: pct.min(100),
+                    });
+
                     if plan.current_step_index >= plan.steps.len() {
                         // Send the final output before going idle
                         let output = self.extract_output(plan);
                         let _ = self
                             .ui_tx
                             .send(AgentToTui::Message(ChatMessage::assistant(output)));
+
+                        // Detect and report file changes
+                        let changes = detect_file_changes();
+                        if !changes.is_empty() {
+                            let _ = self.ui_tx.send(AgentToTui::FileChanges { files: changes });
+                        }
+
                         let _ = self.ui_tx.send(AgentToTui::Idle);
                         *self.pending_plan.lock().unwrap_or_else(|e| e.into_inner()) = None;
                         *self
@@ -167,6 +191,13 @@ impl AgentUiBridge {
                     let _ = self.ui_tx.send(AgentToTui::Message(ChatMessage::assistant(
                         self.extract_output(plan),
                     )));
+
+                    // Detect and report file changes
+                    let changes = detect_file_changes();
+                    if !changes.is_empty() {
+                        let _ = self.ui_tx.send(AgentToTui::FileChanges { files: changes });
+                    }
+
                     let _ = self.ui_tx.send(AgentToTui::Idle);
                     *self.pending_plan.lock().unwrap_or_else(|e| e.into_inner()) = None;
                     *self
@@ -383,4 +414,48 @@ impl AgentUiBridge {
             args: params_json,
         }));
     }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// File change detection via git diff
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Run `git diff --stat` and parse file changes.
+/// Returns empty vec if not in a git repo or no changes.
+fn detect_file_changes() -> Vec<FileChangeInfo> {
+    let output = match Command::new("git").args(["diff", "--stat"]).output() {
+        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).to_string(),
+        _ => return Vec::new(), // Not a git repo or git not available
+    };
+
+    let mut changes = Vec::new();
+    for line in output.lines() {
+        // Format: "src/file.rs | 10 ++++++------"
+        let line = line.trim();
+        if line.is_empty() || line.contains("file changed") || line.contains("files changed") {
+            continue;
+        }
+        // Split on " | " to get filename and stats
+        if let Some(pipe_pos) = line.find(" | ") {
+            let filepath = line[..pipe_pos].trim().to_string();
+            let stats = &line[pipe_pos + 3..];
+            // Parse additions and deletions from the +/- chars
+            let adds = stats.chars().filter(|&c| c == '+').count();
+            let dels = stats.chars().filter(|&c| c == '-').count();
+            let action = if adds > 0 && dels == 0 {
+                // Check if it's a new file via git diff --stat (no "new file" marker here)
+                // We'll use a simple heuristic: predominantly + lines
+                FileAction::Modified
+            } else {
+                FileAction::Modified
+            };
+            changes.push(FileChangeInfo {
+                path: filepath,
+                action,
+                lines_added: adds as u32,
+                lines_removed: dels as u32,
+            });
+        }
+    }
+    changes
 }
