@@ -2,6 +2,7 @@
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 use tracing::warn;
 
 use super::bridge::AgentUiBridge;
@@ -10,6 +11,9 @@ use super::{AgentToTui, ChatMessage, ToolPhase};
 // Magic number constants
 /// Default max turns per chat request.
 const DEFAULT_MAX_TURNS: usize = 50;
+/// Default wall-clock timeout (seconds) for a single chat turn. Prevents an
+/// agent run from hanging indefinitely on a stuck tool call or network stall.
+const DEFAULT_CHAT_TIMEOUT_SECS: u64 = 600;
 
 impl AgentUiBridge {
     /// Handle Chat Mode: multi-turn agent conversation with streaming.
@@ -97,9 +101,21 @@ impl AgentUiBridge {
             .flatten()
             .and_then(|v| v.parse().ok())
             .unwrap_or(DEFAULT_MAX_TURNS);
-        match self
-            .agent
-            .agent_chat(
+        // Bound the whole turn with a timeout so a stuck tool call or network
+        // stall can't hang the session forever. Configurable via the
+        // `chat_timeout_secs` setting; operators can raise it for long tasks.
+        let chat_timeout_secs: u64 = self
+            .repo
+            .get_setting("chat_timeout_secs")
+            .await
+            .ok()
+            .flatten()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(DEFAULT_CHAT_TIMEOUT_SECS);
+
+        let inner = match tokio::time::timeout(
+            Duration::from_secs(chat_timeout_secs),
+            self.agent.agent_chat(
                 user_message,
                 &self.conversation_history,
                 max_turns,
@@ -107,9 +123,25 @@ impl AgentUiBridge {
                 on_event,
                 Some(&self.intent_state),
                 None,
-            )
-            .await
+            ),
+        )
+        .await
         {
+            Ok(result) => result,
+            Err(_) => {
+                let _ = self.ui_tx.send(AgentToTui::Message(ChatMessage::error(
+                    format!(
+                        "⏱ 请求超时（超过 {} 秒），已中止本次对话。可稍后重试，或用 `rupoo config set chat_timeout_secs <N>` 调大上限。",
+                        chat_timeout_secs
+                    ),
+                )));
+                self.conversation_history.push_user(user_message);
+                let _ = self.ui_tx.send(AgentToTui::Idle);
+                return;
+            }
+        };
+
+        match inner {
             Ok((response, usage)) => {
                 // Parse intent update from LLM response
                 let (clean_response, new_intent) =

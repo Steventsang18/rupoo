@@ -16,7 +16,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::time::sleep;
 use tracing::{error, info};
 
-use crate::agent::Agent;
 use crate::build_engine;
 use crate::channel::base::ChannelRuntime;
 use crate::channel::dingtalk::DingTalkChannel;
@@ -58,11 +57,23 @@ pub async fn run_channel_daemon(config_override: Option<RupooConfig>) -> Result<
 
     // Build agent engine
     info!(db = %db_path, "building agent engine for channel daemon");
-    let (_repo, mut agent, _tool_exe) = build_engine::build_engine(&db_path)
+    let (repo, mut agent, _tool_exe) = build_engine::build_engine(&db_path)
         .await
         .context("build agent engine for channel daemon")?;
     // Tag memories stored from channel daemon as "channel" (not "agent"/CLI)
     agent.memory_source = "channel".to_string();
+    if let Some(profile) = config.agents.get("feishu") {
+        if profile.allowed_tools.is_some() || profile.excluded_tools.is_some() {
+            agent.tool_executor =
+                std::sync::Arc::new(crate::channel::base::FilteredToolExecutor::new(
+                    agent.tool_executor.clone(),
+                    profile.allowed_tools.clone(),
+                    profile.excluded_tools.clone(),
+                ));
+        }
+    }
+
+    // Start Feishu channel if configured
     let agent = Arc::new(agent);
 
     // Check if agent has LLM configured
@@ -77,16 +88,18 @@ pub async fn run_channel_daemon(config_override: Option<RupooConfig>) -> Result<
 
     let shutdown = Arc::new(AtomicBool::new(false));
     let sig = shutdown.clone();
-    // Start Feishu channel if configured
+
+    // Apply tool filter from agent profile (allowed_tools / excluded_tools)
     if let Some(feishu_cfg) = &channel_cfg.feishu {
-        // Read feishu agent profile for role-specific system prompt
-        let feishu_prompt = config
-            .agents
-            .get("feishu")
-            .and_then(|a| a.system_prompt.clone());
-        let channel = FeishuChannel::with_prompt(feishu_cfg.clone(), feishu_prompt)
+        // 飞书走共享运行时：会话管理 / slash 命令 / agent_chat 全部收敛到 ChannelRuntime。
+        let runtime = Arc::new(ChannelRuntime::new(
+            Arc::clone(&agent),
+            config.clone(),
+            "feishu",
+            Some(repo.clone()),
+        ));
+        let channel = FeishuChannel::with_runtime(feishu_cfg.clone(), runtime)
             .context("initialize feishu channel")?;
-        let agent = Arc::clone(&agent);
 
         info!(
             app_id = %feishu_cfg.app_id,
@@ -96,7 +109,7 @@ pub async fn run_channel_daemon(config_override: Option<RupooConfig>) -> Result<
 
         let shutdown_f = shutdown.clone();
         tokio::spawn(async move {
-            run_supervised_feishu(channel, agent, shutdown_f).await;
+            run_supervised_feishu(channel, shutdown_f).await;
         });
     } else {
         info!("no feishu channel configured, skipping");
@@ -108,7 +121,7 @@ pub async fn run_channel_daemon(config_override: Option<RupooConfig>) -> Result<
             Arc::clone(&agent),
             config.clone(),
             "dingtalk",
-            "dingtalk",
+            Some(repo.clone()),
         ));
         let channel = DingTalkChannel::new(
             dd_cfg.client_id.clone(),
@@ -164,11 +177,7 @@ pub async fn run_channel_daemon(config_override: Option<RupooConfig>) -> Result<
 // ── Supervised listener ──────────────────────────────────────────────
 
 /// Run a Feishu channel with exponential-backoff reconnection.
-async fn run_supervised_feishu(
-    channel: FeishuChannel,
-    agent: Arc<Agent>,
-    shutdown: Arc<AtomicBool>,
-) {
+async fn run_supervised_feishu(channel: FeishuChannel, shutdown: Arc<AtomicBool>) {
     let mut backoff = Duration::from_secs(INITIAL_BACKOFF_SECS);
     let max_backoff = Duration::from_secs(MAX_BACKOFF_SECS);
 
@@ -179,7 +188,7 @@ async fn run_supervised_feishu(
         }
         info!("feishu channel: connecting...");
 
-        match channel.run_listener(&agent).await {
+        match channel.run_listener().await {
             Ok(()) => {
                 info!("feishu channel: disconnected (clean), reconnecting");
                 backoff = Duration::from_secs(INITIAL_BACKOFF_SECS);

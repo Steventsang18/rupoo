@@ -172,13 +172,26 @@ impl ConversationHistory {
             .cloned()
             .collect();
 
-        // Remove from front until budget is met
+        // Remove from front until budget is met, always keeping the most recent
+        // (current) message so we never drop the user's in-flight turn.
         let system_chars: usize = systems.iter().map(|m| m.content.len()).sum();
         let budget_chars = budget.saturating_mul(2).saturating_sub(system_chars);
 
         let mut current_chars: usize = non_system.iter().map(|m| m.content.len()).sum();
-        while current_chars > budget_chars && non_system.len() > 2 {
+        while current_chars > budget_chars && non_system.len() > 1 {
             current_chars -= non_system.remove(0).content.len();
+        }
+
+        // If a single message (typically the current turn) still exceeds the
+        // budget on its own, truncate it rather than letting it blow the context
+        // window. Multi-turn accumulation is handled by the loop above.
+        if current_chars > budget_chars && !non_system.is_empty() {
+            let excess = current_chars - budget_chars;
+            let last = non_system.last_mut().unwrap();
+            if last.content.len() > excess {
+                let keep = last.content.len() - excess;
+                last.content.truncate(keep);
+            }
         }
 
         self.messages.clear();

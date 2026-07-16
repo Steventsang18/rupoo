@@ -204,7 +204,7 @@ async fn all_checks() -> Vec<CheckResult> {
     match rupoo::git::GitRepo::open(".") {
         Ok(git) => {
             let branch = git.current_branch().unwrap_or_default();
-            let msg = format!("libgit2 available, repository at ./ ({})", branch);
+            let msg = format!("git CLI available, repository at ./ ({})", branch);
             results.push(CheckResult::new("Git", true, Some(msg), false));
         }
         Err(_) => {

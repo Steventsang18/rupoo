@@ -10,14 +10,17 @@ pub mod enhanced_ui;
 pub mod markdown;
 pub mod output;
 pub mod theme;
+pub mod tui_view;
 
 mod approval;
 mod bridge;
 mod chat_mode;
 mod plan_mode;
+mod tui_run;
 
 pub use app::RupooApp;
 pub use rupoo::{AgentToTui, ChatMessage, LayoutMode, PendingTool, ToolPhase, TuiToAgent};
+use tui_view::ChatView;
 
 use std::io::{self, Write};
 
@@ -26,7 +29,6 @@ use owo_colors::OwoColorize;
 use rupoo::agent::Agent;
 use rupoo::db::TaskRepo;
 use rupoo::llm::ConversationHistory;
-use unicode_width::UnicodeWidthChar;
 
 // Magic number constants
 /// Max input history entries to retain.
@@ -46,6 +48,19 @@ pub(super) const HISTORY_DEFAULT_MAX_TURNS: usize = 10;
 // REPL Session
 // ═══════════════════════════════════════════════════════════════════════════
 
+/// RAII guard that restores the terminal out of raw mode on drop.
+///
+/// Ensures the terminal is never left in raw mode (no echo, broken cursor)
+/// if `handle_input` returns early or panics — a key "safe by construction"
+/// property for a terminal app.
+struct RawModeGuard;
+
+impl Drop for RawModeGuard {
+    fn drop(&mut self) {
+        let _ = crossterm::terminal::disable_raw_mode();
+    }
+}
+
 pub struct ReplSession {
     app: RupooApp,
     ui_rx: Option<Receiver<AgentToTui>>,
@@ -53,6 +68,13 @@ pub struct ReplSession {
     stream_state: markdown::StreamState,
     /// Timestamp when current generation started
     gen_start: Option<std::time::Instant>,
+    /// The ratatui companion view. Only rendered when `app.render_mode ==
+    /// RenderMode::Ratatui`; unused by the default terminal printer.
+    chat_view: ChatView,
+    /// Clock for the ~120ms animation tick (status pulse + hint rotation).
+    anim_clock: std::time::Instant,
+    /// Clock for the bottom-hint tip rotation cadence.
+    hint_clock: std::time::Instant,
 }
 
 impl ReplSession {
@@ -65,10 +87,12 @@ impl ReplSession {
         rt_handle: tokio::runtime::Handle,
     ) -> Result<Self, &'static str> {
         let mut app = RupooApp::new(agent_tx, rt_handle);
-        app.model_label = model_label;
+        app.model_label = model_label.clone();
 
         if let Some(r) = repo {
             app = app.set_repo(r);
+            // Single background writer for all subsequent persist_sessions calls.
+            app.init_persister();
         }
 
         let active_id: String = sessions_data
@@ -88,8 +112,15 @@ impl ReplSession {
                 active: *is_active,
                 has_context: true,
             });
-            if let Ok(msgs) = serde_json::from_str::<Vec<ChatMessage>>(messages_json) {
-                app.session_messages.insert(id.clone(), msgs);
+            // Keep raw JSON; only the active session is parsed up front.
+            // Inactive sessions are parsed lazily on first switch
+            // (see RupooApp::get_session_messages), avoiding a full
+            // O(all sessions' messages) parse at startup.
+            app.session_raw.insert(id.clone(), messages_json.clone());
+            if *is_active {
+                if let Ok(msgs) = serde_json::from_str::<Vec<ChatMessage>>(messages_json) {
+                    app.session_messages.insert(id.clone(), msgs);
+                }
             }
         }
 
@@ -104,6 +135,15 @@ impl ReplSession {
             ui_rx,
             stream_state: markdown::StreamState::new(),
             gen_start: None,
+            chat_view: ChatView {
+                // Seed the status-bar model label from the resolved startup
+                // model so the banner never shows the empty "no model" state
+                // before an LlmStatus event arrives.
+                model_label,
+                ..ChatView::default()
+            },
+            anim_clock: std::time::Instant::now(),
+            hint_clock: std::time::Instant::now(),
         })
     }
 
@@ -161,8 +201,9 @@ impl ReplSession {
         use crossterm::terminal;
 
         terminal::enable_raw_mode().map_err(|_| "raw mode failed")?;
+        // Disables raw mode automatically on scope exit or panic.
+        let _raw_guard = RawModeGuard;
 
-        use unicode_width::UnicodeWidthStr;
         let mut buf = String::with_capacity(256);
         let mut cursor_pos: usize = 0;
 
@@ -172,7 +213,13 @@ impl ReplSession {
         loop {
             // Poll with timeout so we can check cancelled flag
             if event::poll(std::time::Duration::from_millis(100)).unwrap_or(false) {
-                if let Event::Key(key) = event::read().ok().unwrap() {
+                let raw_ev = event::read().ok();
+                // Terminal resized → refresh cached width, keep reading input.
+                if let Some(Event::Resize(_, _)) = raw_ev {
+                    output::refresh_terminal_width();
+                    continue;
+                }
+                if let Some(Event::Key(key)) = raw_ev {
                     if key.kind != KeyEventKind::Press {
                         continue;
                     }
@@ -187,8 +234,7 @@ impl ReplSession {
                                 continue;
                             }
                             // Save to history (skip if same as last)
-                            let is_dup =
-                                self.app.input_history.last().map_or(false, |h| h == &input);
+                            let is_dup = self.app.input_history.last() == Some(&input);
                             if !is_dup {
                                 self.app.input_history.push(input.clone());
                                 if self.app.input_history.len() > MAX_INPUT_HISTORY {
@@ -218,7 +264,7 @@ impl ReplSession {
                                 .store(true, std::sync::atomic::Ordering::Relaxed);
                             // Show cancel feedback on the input line
                             print!("\r\x1b[2K");
-                            println!("  {} 已取消", "⏹".to_string());
+                            println!("  ⏹ 已取消");
                             // Erase bottom bar
                             for _ in 0..3 {
                                 print!("\x1b[1A\x1b[2K");
@@ -355,7 +401,7 @@ impl ReplSession {
 
                         // ── Tab — command completion ──
                         (KeyCode::Tab, _) => {
-                            if self.complete_input(&mut buf, &mut cursor_pos) {
+                            if Self::complete_input(&mut buf, &mut cursor_pos, true) {
                                 self.redraw_prompt(&buf, cursor_pos, None);
                             }
                         }
@@ -474,6 +520,29 @@ impl ReplSession {
         let _ = io::stdout().flush();
     }
 
+    /// Whether the ratatui companion surface is active.
+    #[inline]
+    fn tui_mode(&self) -> bool {
+        self.app.render_mode == app::RenderMode::Ratatui
+    }
+
+    /// Unified textual output for command / info lines.
+    ///
+    /// - `Terminal` mode: prints exactly as before (ANSI colors preserved).
+    /// - `Ratatui` mode: appends a plain `Command` line to the companion stream
+    ///   (ANSI stripped) so command output no longer flashes under the
+    ///   per-frame repaint. Command output is rendered distinctly from agent
+    ///   `System`/`Error` lines for a calmer, humanistic surface.
+    fn emit(&mut self, text: String) {
+        if self.tui_mode() {
+            self.chat_view
+                .items
+                .push(tui_view::StreamItem::Command(tui_view::strip_ansi(&text)));
+        } else {
+            println!("{}", text);
+        }
+    }
+
     /// Process an input string: quit, command, quick action, or submit.
     fn process_input(&mut self, input: &str) {
         if input == "/quit" || input == "/exit" || input == "/q" {
@@ -491,7 +560,13 @@ impl ReplSession {
 
     /// Tab completion: commands and file paths.
     /// Returns true if completion was attempted.
-    fn complete_input(&self, buf: &mut String, cursor_pos: &mut usize) -> bool {
+    ///
+    /// Takes no `&self` (it only inspects `buf` + `complete_path`) so the
+    /// ratatui inline editor can call it while also mutating the view.
+    /// `print_candidates` controls whether ambiguous candidates are echoed to
+    /// the terminal — `false` in ratatui mode so they don't flash under the
+    /// per-frame repaint.
+    fn complete_input(buf: &mut String, cursor_pos: &mut usize, print_candidates: bool) -> bool {
         // Command completion
         if buf.starts_with('/') {
             let cmd_part = &buf[1..];
@@ -510,15 +585,17 @@ impl ReplSession {
                 *cursor_pos = buf.len();
                 return true;
             } else if candidates.len() > 1 && !cmd_part.is_empty() {
-                print!("\r\x1b[2K");
-                println!(
-                    "  {}",
-                    candidates
-                        .iter()
-                        .map(|c| format!("/{}", c))
-                        .collect::<Vec<_>>()
-                        .join("  ")
-                );
+                if print_candidates {
+                    print!("\r\x1b[2K");
+                    println!(
+                        "  {}",
+                        candidates
+                            .iter()
+                            .map(|c| format!("/{}", c))
+                            .collect::<Vec<_>>()
+                            .join("  ")
+                    );
+                }
                 return true;
             }
         }
@@ -532,8 +609,10 @@ impl ReplSession {
                 *cursor_pos = buf.len();
                 return true;
             } else if candidates.len() > 1 && !path_part.is_empty() {
-                print!("\r\x1b[2K");
-                println!("  {}", candidates.join("  "));
+                if print_candidates {
+                    print!("\r\x1b[2K");
+                    println!("  {}", candidates.join("  "));
+                }
                 return true;
             }
         }
@@ -603,7 +682,19 @@ impl ReplSession {
 
     /// Submit a user message to the agent.
     fn submit_message(&mut self, message: &str) {
-        output::replace_readline_with_user_message(message);
+        let ts = self.app.messages.last().and_then(|m| m.timestamp);
+        if self.tui_mode() {
+            // Ratatui surface renders the user turn inline in the stream.
+            self.chat_view
+                .items
+                .push(tui_view::StreamItem::User(message.to_string()));
+            // Sending a message always jumps back to the bottom (WeChat/Feishu
+            // habit): the new turn and the incoming reply stay in view, and any
+            // manual scroll-up is cancelled so the user sees their own input.
+            self.chat_view.follow = true;
+        } else {
+            output::replace_readline_with_user_message(message, ts);
+        }
 
         self.app
             .push_message(ChatMessage::user(message.to_string()));
@@ -693,7 +784,7 @@ impl ReplSession {
                                 && !m.content.starts_with("✅")
                                 && !m.content.starts_with("⠋")
                             {
-                                output::chat_bubble(&m.content, m.role);
+                                output::chat_bubble(&m.content, m.role, m.timestamp);
                             }
                         } else if m.content.contains("Error") {
                             output::error(&m.content);
@@ -707,8 +798,15 @@ impl ReplSession {
                             markdown::flush_stream(&mut self.stream_state);
                             self.stream_state = markdown::StreamState::new();
                             // Print assistant output as-is (it's the work result)
+                            if let Some(ts) = m.timestamp {
+                                println!("\x1b[2m[{}]\x1b[0m", ts.format("%H:%M:%S"));
+                            }
+                            let wrap_w = output::terminal_width().max(40);
+                            let cw = wrap_w.saturating_sub(2); // "  " prefix
                             for line in m.content.lines() {
-                                println!("  {}", line);
+                                for seg in output::wrap_content(line, cw) {
+                                    println!("  {}", seg);
+                                }
                             }
                         } else if m.role == rupoo::MessageRole::System {
                             // Work mode: suppress tool call noise
@@ -753,11 +851,8 @@ impl ReplSession {
                         LayoutMode::Work => {
                             // Work mode: compact footer
                             println!(
-                                "{} {:.1}s · {} in · {} out",
-                                "⏱".to_string(),
-                                duration,
-                                self.app.token_in,
-                                self.app.token_out,
+                                "⏱ {:.1}s · {} in · {} out",
+                                duration, self.app.token_in, self.app.token_out,
                             );
                         }
                         LayoutMode::Summary => {
@@ -865,43 +960,58 @@ impl ReplSession {
 
         match cmd {
             "/help" | "/h" | "/?" => {
-                println!();
-                println!("  {}", "Commands:".cyan().bold());
-                println!("  {} /help        — show this help", "›".dimmed());
-                println!("  {} /tools (/ts) — list available tools", "›".dimmed());
-                println!("  {} /new         — new session", "›".dimmed());
-                println!("  {} /sessions    — list sessions", "›".dimmed());
-                println!("  {} /switch <n>  — switch to session #n", "›".dimmed());
-                println!("  {} /model       — show current model", "›".dimmed());
-                println!(
+                self.emit(String::new());
+                self.emit(format!("  {}", "Commands:".cyan().bold()));
+                self.emit(format!("  {} /help        — show this help", "›".dimmed()));
+                self.emit(format!(
+                    "  {} /tools (/ts) — list available tools",
+                    "›".dimmed()
+                ));
+                self.emit(format!("  {} /new         — new session", "›".dimmed()));
+                self.emit(format!("  {} /sessions    — list sessions", "›".dimmed()));
+                self.emit(format!(
+                    "  {} /switch <n>  — switch to session #n",
+                    "›".dimmed()
+                ));
+                self.emit(format!(
+                    "  {} /model       — show current model",
+                    "›".dimmed()
+                ));
+                self.emit(format!(
                     "  {} /theme (/t)  — switch theme (dark/light/monokai)",
                     "›".dimmed()
-                );
-                println!("  {} /plan <msg>  — plan mode", "›".dimmed());
-                println!("  {} /history     — show command history", "›".dimmed());
-                println!("  {} /alias       — show command aliases", "›".dimmed());
-                println!("  {} /clear       — clear screen", "›".dimmed());
-                println!("  {} /quit        — exit rupoo", "›".dimmed());
-                println!();
-                println!("  {}", "Quick Actions:".cyan().bold());
-                println!(
+                ));
+                self.emit(format!("  {} /plan <msg>  — plan mode", "›".dimmed()));
+                self.emit(format!(
+                    "  {} /history     — show command history",
+                    "›".dimmed()
+                ));
+                self.emit(format!(
+                    "  {} /alias       — show command aliases",
+                    "›".dimmed()
+                ));
+                self.emit(format!("  {} /clear       — clear screen", "›".dimmed()));
+                self.emit(format!("  {} /quit        — exit rupoo", "›".dimmed()));
+                self.emit(String::new());
+                self.emit(format!("  {}", "Quick Actions:".cyan().bold()));
+                self.emit(format!(
                     "  {} /read <path>   — read file (e.g., /read ./src/main.rs)",
                     "›".dimmed()
-                );
-                println!(
+                ));
+                self.emit(format!(
                     "  {} /cmd <cmd>     — execute shell command (e.g., /cmd ls -la)",
                     "›".dimmed()
-                );
-                println!(
+                ));
+                self.emit(format!(
                     "  {} /search <query> — web search (e.g., /search Rust async)",
                     "›".dimmed()
-                );
-                println!("  {} /ls [path]    — list directory", "›".dimmed());
-                println!();
-                println!("  {}", "Tips:".cyan().bold());
-                println!("  {} Press Tab for autocomplete", "›".dimmed());
-                println!("  {} Ctrl+R to search history", "›".dimmed());
-                println!();
+                ));
+                self.emit(format!("  {} /ls [path]    — list directory", "›".dimmed()));
+                self.emit(String::new());
+                self.emit(format!("  {}", "Tips:".cyan().bold()));
+                self.emit(format!("  {} Press Tab for autocomplete", "›".dimmed()));
+                self.emit(format!("  {} Ctrl+R to search history", "›".dimmed()));
+                self.emit(String::new());
                 true
             }
             "/tools" | "/ts" => {
@@ -920,17 +1030,17 @@ impl ReplSession {
                 if let Ok(idx) = arg.parse::<usize>() {
                     self.switch_to_session(idx);
                 } else {
-                    println!("  {} Usage: /switch <number>", "✗".red());
+                    self.emit(format!("  {} Usage: /switch <number>", "✗".red()));
                 }
                 true
             }
             "/model" | "/m" => {
                 if arg.is_empty() {
-                    println!(
+                    self.emit(format!(
                         "  {} {}",
                         "Model:".cyan(),
                         self.app.model_label.cyan().bold()
-                    );
+                    ));
                     true
                 } else {
                     // /model <provider> [model] — forward to bridge for hot switch
@@ -941,7 +1051,7 @@ impl ReplSession {
                         self.gen_start = Some(std::time::Instant::now());
                         self.stream_state = markdown::StreamState::new();
                     } else {
-                        println!("  {} Agent not available", "✗".red());
+                        self.emit(format!("  {} Agent not available", "✗".red()));
                     }
                     true
                 }
@@ -960,11 +1070,11 @@ impl ReplSession {
                             }
                         })
                         .collect();
-                    println!("  {} Themes: {}", "▸".cyan(), names.join(", "));
+                    self.emit(format!("  {} Themes: {}", "▸".cyan(), names.join(", ")));
                 } else if let Some(t) = theme::Theme::from_name(arg) {
                     theme::set(t);
                     output::set_cursor_style_bar();
-                    println!("  {} Switched to {} theme", "✓".green(), arg);
+                    self.emit(format!("  {} Switched to {} theme", "✓".green(), arg));
                     // Persist theme preference
                     if let Some(ref repo) = self.app.repo {
                         if let Some(ref handle) = self.app.rt_handle {
@@ -977,18 +1087,25 @@ impl ReplSession {
                     }
                 } else {
                     let names = theme::Theme::all_names().join("/");
-                    println!(
+                    self.emit(format!(
                         "  {} Unknown theme '{}'. Available: {}",
                         "✗".red(),
                         arg,
                         names
-                    );
+                    ));
                 }
                 true
             }
             "/clear" | "/cls" => {
-                print!("{}", CLEAR_SCREEN_ESCAPE); // Clear screen + cursor home
-                let _ = io::stdout().flush();
+                if self.tui_mode() {
+                    // Clear the companion stream instead of the OS screen.
+                    self.chat_view.items.clear();
+                    self.chat_view.pending_assistant.clear();
+                    self.chat_view.phase_detail = None;
+                } else {
+                    print!("{}", CLEAR_SCREEN_ESCAPE); // Clear screen + cursor home
+                    let _ = io::stdout().flush();
+                }
                 true
             }
             "/quit" | "/q" | "/exit" => {
@@ -997,7 +1114,13 @@ impl ReplSession {
             }
             "/plan" => {
                 if !arg.is_empty() {
-                    output::user_message(arg);
+                    if self.tui_mode() {
+                        self.chat_view
+                            .items
+                            .push(tui_view::StreamItem::User(arg.to_string()));
+                    } else {
+                        output::user_message(arg);
+                    }
                     if let Some(ref tx) = self.app.agent_tx {
                         let _ = tx.send(TuiToAgent::SubmitMessage(format!("/plan {}", arg)));
                     }
@@ -1005,7 +1128,7 @@ impl ReplSession {
                     self.gen_start = Some(std::time::Instant::now());
                     self.stream_state = markdown::StreamState::new();
                 } else {
-                    println!("  {} Usage: /plan <your goal>", "✗".red());
+                    self.emit(format!("  {} Usage: /plan <your goal>", "✗".red()));
                 }
                 true
             }
@@ -1026,57 +1149,70 @@ impl ReplSession {
     }
 
     /// Show command history
-    fn show_history(&self, arg: &str) {
+    fn show_history(&mut self, arg: &str) {
         if arg.is_empty() {
             let count = self.app.input_history.len().min(10);
             let start = self.app.input_history.len().saturating_sub(count);
-            println!();
-            println!("  {} Recent History:", "📜".cyan().bold());
-            for (i, entry) in self.app.input_history[start..].iter().enumerate() {
-                println!("  {} [{}] {}", "▸".dimmed(), start + i + 1, entry);
+            // Collect lines first so the immutable borrow of `input_history`
+            // ends before we call the `&mut self` `emit` (avoids a borrow
+            // conflict inside the loop).
+            let lines: Vec<String> = self.app.input_history[start..]
+                .iter()
+                .enumerate()
+                .map(|(i, entry)| format!("  {} [{}] {}", "▸".dimmed(), start + i + 1, entry))
+                .collect();
+            self.emit(String::new());
+            self.emit(format!("  {} Recent History:", "📜".cyan().bold()));
+            for l in lines {
+                self.emit(l);
             }
-            println!();
+            self.emit(String::new());
         } else {
             let query = arg.to_lowercase();
-            let results: Vec<(usize, &String)> = self
+            let results: Vec<String> = self
                 .app
                 .input_history
                 .iter()
                 .enumerate()
                 .filter(|(_, entry)| entry.to_lowercase().contains(&query))
+                .map(|(idx, entry)| format!("  {} [{}] {}", "▸".dimmed(), idx + 1, entry))
                 .collect();
 
             if results.is_empty() {
-                println!("  {} No history found matching '{}'", "✗".red(), arg);
+                self.emit(format!(
+                    "  {} No history found matching '{}'",
+                    "✗".red(),
+                    arg
+                ));
             } else {
-                println!();
-                println!("  {} Search Results:", "🔍".cyan().bold());
-                for (idx, entry) in results {
-                    println!("  {} [{}] {}", "▸".dimmed(), idx + 1, entry);
+                self.emit(String::new());
+                self.emit(format!("  {} Search Results:", "🔍".cyan().bold()));
+                for r in results {
+                    self.emit(r);
                 }
-                println!();
+                self.emit(String::new());
             }
         }
     }
 
     /// Handle alias command
-    fn handle_alias(&self, arg: &str) {
+    fn handle_alias(&mut self, arg: &str) {
         if arg.is_empty() {
             // Show available aliases
-            println!();
-            println!("  {} Command Aliases:", "⚡".cyan().bold());
-            println!("  {} /h      → /help", "▸".dimmed());
-            println!("  {} /ts     → /tools", "▸".dimmed());
-            println!("  {} /ls     → /sessions", "▸".dimmed());
-            println!("  {} /s      → /switch", "▸".dimmed());
-            println!("  {} /m      → /model", "▸".dimmed());
-            println!("  {} /t      → /theme", "▸".dimmed());
-            println!("  {} /q      → /quit", "▸".dimmed());
-            println!("  {} /cls    → /clear", "▸".dimmed());
-            println!("  {} /mem    → /memory", "▸".dimmed());
-            println!();
+            self.emit(String::new());
+            self.emit(format!("  {} Command Aliases:", "⚡".cyan().bold()));
+            self.emit(format!("  {} /h      → /help", "▸".dimmed()));
+            self.emit(format!("  {} /ts     → /tools", "▸".dimmed()));
+            self.emit(format!("  {} /ls     → /sessions", "▸".dimmed()));
+            self.emit(format!("  {} /s      → /switch", "▸".dimmed()));
+            self.emit(format!("  {} /m      → /model", "▸".dimmed()));
+            self.emit(format!("  {} /t      → /theme", "▸".dimmed()));
+            self.emit(format!("  {} /q      → /quit", "▸".dimmed()));
+            self.emit(format!("  {} /cls    → /clear", "▸".dimmed()));
+            self.emit(format!("  {} /mem    → /memory", "▸".dimmed()));
+            self.emit(String::new());
         } else {
-            println!("  {} Usage: /alias (no arguments)", "✗".red());
+            self.emit(format!("  {} Usage: /alias (no arguments)", "✗".red()));
         }
     }
 
@@ -1094,7 +1230,7 @@ impl ReplSession {
             self.gen_start = Some(std::time::Instant::now());
             self.stream_state = markdown::StreamState::new();
         } else {
-            println!("  {} Agent not available", "✗".red());
+            self.emit(format!("  {} Agent not available", "✗".red()));
         }
     }
 
@@ -1134,9 +1270,9 @@ impl ReplSession {
             if let Event::Key(key) = event::read().ok().unwrap() {
                 if key.kind == KeyEventKind::Press {
                     match key.code {
-                        KeyCode::Char('y') | KeyCode::Char('Y') => break "y",
-                        KeyCode::Char('n') | KeyCode::Char('N') => break "n",
-                        KeyCode::Char('a') | KeyCode::Char('A') => break "a",
+                        KeyCode::Char('y' | 'Y') => break "y",
+                        KeyCode::Char('n' | 'N') => break "n",
+                        KeyCode::Char('a' | 'A') => break "a",
                         _ => {}
                     }
                 }
@@ -1195,56 +1331,67 @@ impl ReplSession {
         self.app.intent_state = rupoo::signal::IntentState::new();
         self.app.persist_sessions();
 
-        println!("  {} New session started", "✓".green());
+        self.emit(format!("  {} New session started", "✓".green()));
     }
 
     /// List all sessions.
-    fn list_sessions(&self) {
-        println!();
-        println!("  {}", "Sessions:".cyan().bold());
-        for (i, s) in self.app.sessions.iter().enumerate() {
-            let marker = if s.active { "▸" } else { " " };
-            let color = if s.active {
-                "●".green().to_string()
-            } else {
-                "○".dimmed().to_string()
-            };
-            println!("  {} {} [{}] {}", marker, color, i + 1, s.label);
+    fn list_sessions(&mut self) {
+        // Collect lines first so the immutable borrow of `sessions` ends before
+        // we call the `&mut self` `emit` (avoids a borrow conflict in the loop).
+        let lines: Vec<String> = self
+            .app
+            .sessions
+            .iter()
+            .enumerate()
+            .map(|(i, s)| {
+                let marker = if s.active { "▸" } else { " " };
+                let color = if s.active {
+                    "●".green().to_string()
+                } else {
+                    "○".dimmed().to_string()
+                };
+                format!("  {} {} [{}] {}", marker, color, i + 1, s.label)
+            })
+            .collect();
+        self.emit(String::new());
+        self.emit(format!("  {}", "Sessions:".cyan().bold()));
+        for l in lines {
+            self.emit(l);
         }
-        println!();
+        self.emit(String::new());
     }
 
     /// Show available tools with descriptions.
-    fn show_available_tools(&self) {
-        println!();
-        println!("  {}", "Available Tools:".cyan().bold());
-        println!("  ──────────────────────────────────────────────────");
-        println!("  {} {}", "📄".bold(), "file_read".cyan());
-        println!("      Read file contents");
-        println!("      Example: /read ./Cargo.toml");
-        println!();
-        println!("  {} {}", "📁".bold(), "list_dir".cyan());
-        println!("      List directory contents");
-        println!("      Example: /ls ./src");
-        println!();
-        println!("  {} {}", "🔧".bold(), "shell_exec".cyan());
-        println!("      Execute shell command");
-        println!("      Example: /cmd ls -la");
-        println!();
-        println!("  {} {}", "🔍".bold(), "web_search".cyan());
-        println!("      Search the web");
-        println!("      Example: /search Rust async programming");
-        println!();
-        println!("  {} {}", "✏️".bold(), "file_write".cyan());
-        println!("      Write content to file");
-        println!("      Example: Write to ./output.txt");
-        println!();
-        println!("  {}", "Quick Actions:".cyan().bold());
-        println!("    /read <path>   - Read file directly");
-        println!("    /cmd <cmd>     - Execute shell command");
-        println!("    /search <query> - Web search");
-        println!("    /ls [path]    - List directory");
-        println!();
+    fn show_available_tools(&mut self) {
+        self.emit(String::new());
+        self.emit(format!("  {}", "Available Tools:".cyan().bold()));
+        self.emit("  ──────────────────────────────────────────────────".to_string());
+        self.emit(format!("  {} {}", "📄".bold(), "file_read".cyan()));
+        self.emit("      Read file contents".to_string());
+        self.emit("      Example: /read ./Cargo.toml".to_string());
+        self.emit(String::new());
+        self.emit(format!("  {} {}", "📁".bold(), "list_dir".cyan()));
+        self.emit("      List directory contents".to_string());
+        self.emit("      Example: /ls ./src".to_string());
+        self.emit(String::new());
+        self.emit(format!("  {} {}", "🔧".bold(), "shell_exec".cyan()));
+        self.emit("      Execute shell command".to_string());
+        self.emit("      Example: /cmd ls -la".to_string());
+        self.emit(String::new());
+        self.emit(format!("  {} {}", "🔍".bold(), "web_search".cyan()));
+        self.emit("      Search the web".to_string());
+        self.emit("      Example: /search Rust async programming".to_string());
+        self.emit(String::new());
+        self.emit(format!("  {} {}", "✏️".bold(), "file_write".cyan()));
+        self.emit("      Write content to file".to_string());
+        self.emit("      Example: Write to ./output.txt".to_string());
+        self.emit(String::new());
+        self.emit(format!("  {}", "Quick Actions:".cyan().bold()));
+        self.emit("    /read <path>   - Read file directly".to_string());
+        self.emit("    /cmd <cmd>     - Execute shell command".to_string());
+        self.emit("    /search <query> - Web search".to_string());
+        self.emit("    /ls [path]    - List directory".to_string());
+        self.emit(String::new());
     }
 
     /// Handle quick action shortcuts (/read, /cmd, /search, /ls).
@@ -1267,7 +1414,13 @@ impl ReplSession {
         if let Some(path) = trimmed.strip_prefix("/read ") {
             let path = path.trim();
             if !path.is_empty() {
-                output::user_message(input);
+                if self.tui_mode() {
+                    self.chat_view
+                        .items
+                        .push(tui_view::StreamItem::User(input.to_string()));
+                } else {
+                    output::user_message(input);
+                }
                 if let Some(ref tx) = self.app.agent_tx {
                     let _ = tx.send(TuiToAgent::SubmitMessage(format!("Read file at: {}", path)));
                 }
@@ -1282,7 +1435,13 @@ impl ReplSession {
         if let Some(cmd) = trimmed.strip_prefix("/cmd ") {
             let cmd = cmd.trim();
             if !cmd.is_empty() {
-                output::user_message(input);
+                if self.tui_mode() {
+                    self.chat_view
+                        .items
+                        .push(tui_view::StreamItem::User(input.to_string()));
+                } else {
+                    output::user_message(input);
+                }
                 if let Some(ref tx) = self.app.agent_tx {
                     let _ = tx.send(TuiToAgent::SubmitMessage(format!(
                         "Execute command: {}",
@@ -1300,7 +1459,13 @@ impl ReplSession {
         if let Some(query) = trimmed.strip_prefix("/search ") {
             let query = query.trim();
             if !query.is_empty() {
-                output::user_message(input);
+                if self.tui_mode() {
+                    self.chat_view
+                        .items
+                        .push(tui_view::StreamItem::User(input.to_string()));
+                } else {
+                    output::user_message(input);
+                }
                 if let Some(ref tx) = self.app.agent_tx {
                     let _ = tx.send(TuiToAgent::SubmitMessage(format!(
                         "Search the web for: {}",
@@ -1337,7 +1502,7 @@ impl ReplSession {
     /// Switch to a session by index (1-based).
     fn switch_to_session(&mut self, idx: usize) {
         if idx == 0 || idx > self.app.sessions.len() {
-            println!("  {} Invalid session number", "✗".red());
+            self.emit(format!("  {} Invalid session number", "✗".red()));
             return;
         }
 
@@ -1345,7 +1510,7 @@ impl ReplSession {
         let old_id = self.app.current_session_id();
 
         if new_id == old_id {
-            println!("  {} Already on this session", "│".dimmed());
+            self.emit(format!("  {} Already on this session", "│".dimmed()));
             return;
         }
 
@@ -1358,12 +1523,7 @@ impl ReplSession {
         for s in &mut self.app.sessions {
             s.active = s.id == new_id;
         }
-        self.app.messages = self
-            .app
-            .session_messages
-            .get(&new_id)
-            .cloned()
-            .unwrap_or_default();
+        self.app.messages = self.app.get_session_messages(&new_id);
 
         // Load conversation history
         if let (Some(repo), Some(handle)) = (self.app.repo.as_ref(), self.app.rt_handle.as_ref()) {
@@ -1384,7 +1544,7 @@ impl ReplSession {
         }
 
         self.app.persist_sessions();
-        println!("  {} Switched to session {}", "✓".green(), idx);
+        self.emit(format!("  {} Switched to session {}", "✓".green(), idx));
     }
 }
 
@@ -1598,5 +1758,18 @@ pub fn run_tui_with_agent(
     session.app.cancel_flag = cancel_flag;
     session.app.approve_all = approve_all;
 
-    session.run()
+    // Ratatui "humanistic companion" surface is now the DEFAULT REPL renderer.
+    // The long-stable line-by-line terminal printer remains fully intact as a
+    // fallback and can be selected explicitly via RUPOO_TUI=0/false/off/no.
+    // The two paths are isolated; this switch only picks which one to start.
+    let render_mode = match std::env::var("RUPOO_TUI").as_deref() {
+        Ok("0" | "false" | "off" | "no") => app::RenderMode::Terminal,
+        // "1"/"true" and any other value (incl. unset) → default ratatui.
+        _ => app::RenderMode::Ratatui,
+    };
+    session.app.render_mode = render_mode;
+    match render_mode {
+        app::RenderMode::Ratatui => session.run_ratatui(),
+        app::RenderMode::Terminal => session.run(),
+    }
 }

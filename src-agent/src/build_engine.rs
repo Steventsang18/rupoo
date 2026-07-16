@@ -33,8 +33,19 @@ pub async fn build_engine(
     let mut agent = Agent::new(Arc::clone(&repo), tool_executor);
     agent.safety_ctx = safety_ctx;
 
+    // Batch-fetch every provider setting in ONE query instead of one
+    // `get_setting` await per key (which could be ~13 sequential round-trips).
+    // All subsequent lookups below are instant HashMap reads.
+    let mut setting_keys: Vec<String> = vec!["active_provider".to_string()];
+    for p in ["anthropic", "openai", "deepseek", "ollama"] {
+        setting_keys.push(format!("api_key.{}", p));
+        setting_keys.push(format!("model.{}", p));
+        setting_keys.push(format!("base_url.{}", p));
+    }
+    let settings_map = repo.get_settings(&setting_keys).await?;
+
     // Check active_provider first (set by /model switch), then fall back to priority order
-    let active_provider: Option<String> = repo.get_setting("active_provider").await?;
+    let active_provider: Option<String> = settings_map.get("active_provider").cloned();
 
     let provider_list = if let Some(ref ap) = active_provider {
         // Try active provider first, then fall back to others as backup
@@ -53,7 +64,7 @@ pub async fn build_engine(
     let mut embedding_config: Option<(crate::llm::LlmProvider, String)> = None;
 
     for provider in &provider_list {
-        if let Some(api_key) = repo.get_setting(&format!("api_key.{}", provider)).await? {
+        if let Some(api_key) = settings_map.get(&format!("api_key.{}", provider)) {
             let llm_provider = match *provider {
                 "anthropic" => crate::llm::LlmProvider::Anthropic,
                 "openai" | "deepseek" => crate::llm::LlmProvider::OpenAI,
@@ -61,18 +72,18 @@ pub async fn build_engine(
                 _ => continue,
             };
             let mut cfg = crate::llm::LlmConfig::new(llm_provider.clone(), Some(api_key.clone()));
-            if let Some(model) = repo.get_setting(&format!("model.{}", provider)).await? {
-                cfg.model = model;
+            if let Some(model) = settings_map.get(&format!("model.{}", provider)) {
+                cfg.model = model.clone();
             }
             // DeepSeek uses OpenAI-compatible API with official base_url
             if *provider == "deepseek" && cfg.base_url.is_none() {
                 cfg.base_url = Some("https://api.deepseek.com".to_string());
             }
-            if let Some(base_url) = repo.get_setting(&format!("base_url.{}", provider)).await? {
-                cfg.base_url = Some(base_url);
+            if let Some(base_url) = settings_map.get(&format!("base_url.{}", provider)) {
+                cfg.base_url = Some(base_url.clone());
             }
             // Save embedding config before passing cfg to gateway
-            embedding_config = Some((llm_provider, api_key));
+            embedding_config = Some((llm_provider, api_key.clone()));
             let gateway = crate::llm::LlmGateway::with_http_client(
                 cfg,
                 jail_root.clone(),

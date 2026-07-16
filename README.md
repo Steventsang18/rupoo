@@ -2,14 +2,14 @@
 
 [中文版本](README_CN.md) | English
 
-Rupoo is a terminal-based AI assistant with a native REPL interface, featuring syntax-highlighted code blocks, Markdown rendering, theme switching, and Claude Code–style tool call display — driven by a triple-mode agent engine (Chat + Plan + Loop).
+Rupoo is a terminal-based AI assistant with a native REPL interface, featuring rendered code blocks, Markdown rendering, theme switching, and Claude Code–style tool call display — driven by a triple-mode agent engine (Chat + Plan + Loop).
 
 ```
-Version:   0.5.0          Language: Rust 2021
-Lines:     ~48,000        Tests:    275 ✅
+Version:   0.6.0          Language: Rust 2021
+Lines:     ~48,000        Tests:    291 ✅
 Interface: Native REPL    LLM:      Anthropic / OpenAI / DeepSeek / Ollama
 DB:        SQLite (FTS5)  Memory:   Hybrid Search (FTS5 + Vector)
-Safety:    path_jail sandbox + SSRF protection
+Safety:    path_jail sandbox + SSRF protection + MCP auth + command blocklist hardening
 ```
 
 ---
@@ -19,7 +19,7 @@ Safety:    path_jail sandbox + SSRF protection
 | Feature | Description |
 |---------|-------------|
 | **Native REPL** | Smooth scrolling, resize-safe, no frame buffer |
-| **Syntax Highlighting** | syntect-powered with 3 themes (ocean / GitHub / mocha) |
+| **Code Block Rendering** | Markdown pipeline renders code blocks (theme colors controlled by theme system) |
 | **Markdown Rendering** | Tables, blockquotes, task lists, code blocks, links |
 | **Theme System** | `/theme dark\|light\|monokai` with persistent storage |
 | **Chat Bubbles** | User right-aligned (▸), AI left-aligned (◂) |
@@ -209,10 +209,34 @@ trait, providing backward compatibility while enabling the unified recall path.
 
 ### Quality & Safety
 
-- **239 unit tests** + **4 integration tests** + **9 doc tests** = **275 total**
+- **255 unit tests** + **27 integration tests** + **9 doc tests** = **291 total**
 - **Clippy clean** — zero warnings across all targets
 - **Hygiene fixes**: memory leak patched (vector store `remove()`), placeholder implementations emit runtime warnings, `clippy --fix` applied project-wide
 - **Safety alignment**: `SafetyContext` now reads config file defaults and merges with runtime rules
+
+---
+
+## 🎯 New in v0.6.0 — Optimization & Hardening
+
+v0.6.0 targets the two biggest technical debts — security boundaries and code duplication — and adds several robustness/UX improvements (see `OPTIMIZATION-SUMMARY.md` for details).
+
+### Unified Tool System (biggest debt)
+- Added a single `rupoo_tools!` macro as the **only tool registry**; `rig_tools.rs` / `mcp.rs` / `llm/providers.rs` all reuse it, eliminating triplicate definitions.
+- Provider agents now consistently include the previously-missing `run_tests` / `check_output` / `diff_check` tools.
+
+### Security Hardening
+- **MCP Server Auth**: optional token check via `RUPOO_MCP_TOKEN`; backward-compatible when unset, but `initialize` must carry the matching `authToken` once configured.
+- **Command Blocklist Hardening**: resolves the real executable name via PATH and detects `env` / `command` wrappers to block bypasses.
+- **SSRF Hardening**: added IPv6 link-local address interception.
+
+### Performance & Robustness
+- **Channel session token budget**: per-session history capped at 8000 tokens to prevent context bloat; oversized single messages are auto-truncated.
+- **execute_nl timeout**: the whole chat round is wrapped in `tokio::time::timeout` (default 600s, adjustable via `chat_timeout_secs`) to prevent the agent from hanging indefinitely.
+- Session cloning optimized from O(n²) to O(n); Feishu/DingTalk share a global HTTP connection pool; Feishu event deduplication now uses a bounded `LruCache`.
+
+### UX & Cleanup
+- **TUI message timestamps**: user/system/error bubbles and Work-mode assistant messages show `[HH:MM:SS]`.
+- Removed the unused `syntect` dead dependency.
 
 ---
 
@@ -332,8 +356,10 @@ rupoo [OPTIONS] [COMMAND]
 |------------|----------------|
 | Command Blocklist | 20+ dangerous commands blocked |
 | Path Sandbox | `path_jail` prevents path traversal |
-| SSRF Protection | Blocks localhost and internal IPs |
-| Timeout Protection | 30s limits for commands/HTTP/browser |
+| SSRF Protection | Blocks localhost, internal IPs, and IPv6 link-local |
+| MCP Server Auth | Optional `RUPOO_MCP_TOKEN` token verification |
+| Command Blocklist Hardening | Resolves real binary via PATH; detects `env`/`command` wrappers |
+| Timeout Protection | 30s limits for commands/HTTP/browser; 600s chat-round timeout |
 | Environment Sanitization | Only safe env vars preserved |
 | Output Truncation | Limits on command output and file reads |
 
@@ -443,5 +469,4 @@ MIT License - see [LICENSE](LICENSE) for details.
 ## 🙏 Acknowledgments
 
 - [rig-core](https://github.com/gregpr07/rig) - LLM agent framework
-- [syntect](https://github.com/trishume/syntect) - Syntax highlighting
 - [rustyline](https://github.com/kknghk/rustyline) - Readline implementation

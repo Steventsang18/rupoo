@@ -26,16 +26,14 @@ async-trait = "0.1"
 rig-core = "0.30"
 seahash = "4"
 indexmap = "2"
-hnswx = "0.2"        # reserved for future ANN index; not yet wired in
 futures = "0.3"
 crossbeam-channel = "0.5"
 unicode-width = "0.2"
 crossterm = "0.28"
 owo-colors = "4"
-syntect = "5"
 indicatif = "0.17"
-git2 = { version = "0.19", features = ["vendored-libgit2", "vendored-openssl"] }
 console = "0.15"
+ratatui = "0.29"
 which = "8.0.2"
 reqwest = { version = "0.12", features = ["json", "rustls-tls"] }
 urlencoding = "2"

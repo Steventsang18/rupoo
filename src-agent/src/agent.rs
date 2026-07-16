@@ -800,7 +800,7 @@ impl Agent {
     /// Returns the final response and token usage.
     /// When `system_prompt_override` is `Some`, it replaces the cached system prompt
     /// for this call (e.g. a Feishu channel can inject its own identity).
-        #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments)]
     pub async fn agent_chat<F>(
         &self,
         user_message: &str,
@@ -1366,19 +1366,15 @@ impl Agent {
         };
 
         // Update step status
-        if let Some(step) = plan.steps.get_mut(step_index) {
-            let step_status = match outcome {
-                StepOutcome::Advanced => StepStatus::Completed,
-                _ => StepStatus::Failed,
-            };
-            step.set_status(step_status);
-            set_output(step, output.clone());
-        }
-
         let step_status = match outcome {
             StepOutcome::Advanced => StepStatus::Completed,
             _ => StepStatus::Failed,
         };
+        if let Some(step) = plan.steps.get_mut(step_index) {
+            step.set_status(step_status.clone());
+            set_output(step, output.clone());
+        }
+
         self.repo
             .record_step_completion(&pid, step_index, step_status, output)
             .await?;

@@ -10,6 +10,57 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 
 // ---------------------------------------------------------------------------
+// Canonical tool registry — single source of truth
+// ---------------------------------------------------------------------------
+
+/// The single source of truth for Rupoo's built-in tool set.
+///
+/// Every place that needs the list of tools — the rig `ToolSet` builder
+/// (`default_tool_set`), the per-provider agent builders (`providers.rs`),
+/// and the MCP dispatcher (`mcp.rs`) — expands this macro with its own
+/// `$register!($name, $tool)` callback. This guarantees all surfaces expose
+/// exactly the same tools and removes the previously triplicated list.
+///
+/// `$register` receives the canonical tool *name* (used by the MCP dispatcher)
+/// and an owned tool instance. File tools are jail-aware via `$jail`
+/// (`Option<PathBuf>`).
+#[macro_export]
+macro_rules! rupoo_tools {
+    ($register:ident, $jail:expr) => {{
+        let __jail: Option<std::path::PathBuf> = $jail;
+
+        $register!("echo", $crate::rig_tools::EchoTool::new());
+        $register!("web_search", $crate::rig_tools::WebSearchTool::new());
+        $register!("shell_exec", $crate::rig_tools::ShellExecTool::new());
+        $register!("run_tests", $crate::tools::verify::RunTestsTool);
+        $register!("check_output", $crate::tools::verify::CheckOutputTool);
+        $register!("diff_check", $crate::tools::verify::DiffCheckTool);
+
+        match __jail {
+            Some(ref __root) => {
+                $register!(
+                    "file_read",
+                    $crate::rig_tools::FileReadTool::with_jail(__root.clone())
+                );
+                $register!(
+                    "file_write",
+                    $crate::rig_tools::FileWriteTool::with_jail(__root.clone())
+                );
+                $register!(
+                    "list_directory",
+                    $crate::rig_tools::ListDirTool::with_jail(__root.clone())
+                );
+            }
+            None => {
+                $register!("file_read", $crate::rig_tools::FileReadTool::new());
+                $register!("file_write", $crate::rig_tools::FileWriteTool::new());
+                $register!("list_directory", $crate::rig_tools::ListDirTool::new());
+            }
+        }
+    }};
+}
+
+// ---------------------------------------------------------------------------
 // Echo tool
 // ---------------------------------------------------------------------------
 
@@ -488,9 +539,8 @@ impl rig::tool::Tool for ShellExecTool {
         async move {
             let safety = crate::safety::SafetyContext::default();
 
-            // Parse command: extract the base command for safety validation
-            let base_cmd = args.command.split_whitespace().next().unwrap_or("");
-            if let Err(e) = safety.validate_command(base_cmd) {
+            // Pass the full command; validate_command resolves PATH / wrappers
+            if let Err(e) = safety.validate_command(&args.command) {
                 return Ok(ShellExecOutput {
                     stdout: String::new(),
                     exit_code: None,
@@ -671,25 +721,30 @@ impl Default for ListDirTool {
 pub fn default_tool_set(jail_root: Option<PathBuf>) -> rig::tool::ToolSet {
     use rig::tool::ToolSetBuilder;
 
-    let mut builder = ToolSetBuilder::default()
-        .static_tool(EchoTool)
-        .static_tool(WebSearchTool::new())
-        .static_tool(ShellExecTool::new())
-        .static_tool(crate::tools::verify::RunTestsTool)
-        .static_tool(crate::tools::verify::CheckOutputTool)
-        .static_tool(crate::tools::verify::DiffCheckTool);
-    if let Some(ref root) = jail_root {
-        builder = builder
-            .static_tool(FileReadTool::with_jail(root.clone()))
-            .static_tool(FileWriteTool::with_jail(root.clone()))
-            .static_tool(ListDirTool::with_jail(root.clone()));
-    } else {
-        builder = builder
-            .static_tool(FileReadTool::new())
-            .static_tool(FileWriteTool::new())
-            .static_tool(ListDirTool::new());
+    let mut builder = ToolSetBuilder::default();
+    macro_rules! reg {
+        ($name:expr, $tool:expr) => {
+            builder = builder.static_tool($tool);
+        };
     }
+    rupoo_tools!(reg, jail_root);
     builder.build()
+}
+
+/// Build the canonical tool set as boxed `ToolDyn` instances.
+///
+/// Used by the per-provider agent builders via `AgentBuilder::tools(...)`, so
+/// every LLM provider exposes exactly the same tools as the MCP dispatcher and
+/// `default_tool_set`. Shares the single `rupoo_tools!` source of truth.
+pub fn build_boxed_tools(jail_root: Option<PathBuf>) -> Vec<Box<dyn rig::tool::ToolDyn>> {
+    let mut tools: Vec<Box<dyn rig::tool::ToolDyn>> = Vec::new();
+    macro_rules! reg {
+        ($name:expr, $tool:expr) => {
+            tools.push(Box::new($tool));
+        };
+    }
+    rupoo_tools!(reg, jail_root);
+    tools
 }
 
 #[cfg(test)]

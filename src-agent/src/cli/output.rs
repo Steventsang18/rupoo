@@ -3,9 +3,12 @@
 //!
 //! Note: Some functions are reserved for future UI enhancements.
 
+use chrono::{DateTime, Utc};
 use console::Term;
 use owo_colors::OwoColorize;
-use std::io::{self, Write};
+use std::io::Write;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use unicode_width::UnicodeWidthChar;
 use unicode_width::UnicodeWidthStr;
 
 use super::enhanced_ui;
@@ -22,8 +25,115 @@ thread_local! {
 // Terminal helpers
 // ═══════════════════════════════════════════════════════════════════════════
 
-fn terminal_width() -> usize {
-    Term::stdout().size().1 as usize
+// Cached terminal width. Re-queried lazily on first use and whenever
+// `refresh_terminal_width` is called (e.g. on SIGWINCH / Event::Resize),
+// so the streaming render path doesn't issue a TIOCGWINSZ ioctl per line.
+static CACHED_WIDTH: AtomicUsize = AtomicUsize::new(0);
+
+pub(crate) fn terminal_width() -> usize {
+    let w = CACHED_WIDTH.load(Ordering::Relaxed);
+    if w != 0 {
+        return w;
+    }
+    let live = Term::stdout().size().1 as usize;
+    if live != 0 {
+        CACHED_WIDTH.store(live, Ordering::Relaxed);
+        live
+    } else {
+        0 // caller applies .max(40) for piped/non-tty output
+    }
+}
+
+/// Re-query the terminal width (call after a resize event).
+pub(crate) fn refresh_terminal_width() {
+    let live = Term::stdout().size().1 as usize;
+    if live != 0 {
+        CACHED_WIDTH.store(live, Ordering::Relaxed);
+    }
+}
+
+/// Greedy word-wrap `text` to fit `content_width` display columns.
+///
+/// Breaks on ASCII spaces; for a run longer than `content_width` (e.g. CJK
+/// text with no spaces) it falls back to character-level breaking so nothing
+/// overflows the terminal. Returns plain-text content lines (no prefix);
+/// the caller prepends the per-line prefix/indent.
+///
+/// Uses `UnicodeWidthStr::width()` so double-width (CJK) characters are
+/// counted correctly.
+pub(crate) fn wrap_content(text: &str, content_width: usize) -> Vec<String> {
+    let cw = content_width.max(1);
+    let mut lines: Vec<String> = Vec::new();
+    let mut cur = String::new();
+    let mut cur_w = 0usize;
+
+    for raw in text.split(' ') {
+        // Skip empty tokens produced by runs of spaces.
+        if raw.is_empty() {
+            continue;
+        }
+        let word_w = raw.width();
+        if cur.is_empty() {
+            // First word on the line — break it internally if too long.
+            if word_w > cw {
+                push_wrapped_word(&mut lines, &mut cur, &mut cur_w, raw, cw);
+            } else {
+                cur.push_str(raw);
+                cur_w = word_w;
+            }
+        } else {
+            let sep = 1usize; // the joining space
+            if cur_w + sep + word_w > cw {
+                // Word doesn't fit — flush current line and start a new one.
+                lines.push(std::mem::take(&mut cur));
+                cur_w = 0;
+                if word_w > cw {
+                    push_wrapped_word(&mut lines, &mut cur, &mut cur_w, raw, cw);
+                } else {
+                    cur.push_str(raw);
+                    cur_w = word_w;
+                }
+            } else {
+                cur.push(' ');
+                cur.push_str(raw);
+                cur_w += sep + word_w;
+            }
+        }
+    }
+    if !cur.is_empty() {
+        lines.push(cur);
+    }
+    if lines.is_empty() {
+        lines.push(String::new());
+    }
+    lines
+}
+
+/// Break a single over-long word (no internal spaces) into display-width
+/// bounded pieces, pushing all but the last piece as complete lines and
+/// leaving the last piece in `cur`.
+fn push_wrapped_word(
+    lines: &mut Vec<String>,
+    cur: &mut String,
+    cur_w: &mut usize,
+    word: &str,
+    cw: usize,
+) {
+    let mut piece = String::new();
+    let mut piece_w = 0usize;
+    for ch in word.chars() {
+        let c = ch.width().unwrap_or(0);
+        if piece_w + c > cw && !piece.is_empty() {
+            lines.push(std::mem::take(&mut piece));
+            piece_w = 0;
+        }
+        piece.push(ch);
+        piece_w += c;
+    }
+    if !piece.is_empty() {
+        *cur = piece;
+        *cur_w = piece_w;
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -106,7 +216,7 @@ fn print_right_separator(text: &str, width: usize) {
 }
 
 /// Erase the input prompt line and replace with a right-aligned user message.
-pub fn replace_readline_with_user_message(text: &str) {
+pub fn replace_readline_with_user_message(text: &str, ts: Option<DateTime<Utc>>) {
     let width = terminal_width().max(40);
 
     // Calculate how many lines the user's input wraps across
@@ -120,6 +230,11 @@ pub fn replace_readline_with_user_message(text: &str) {
         print!("\x1b[1A\x1b[2K");
     }
     let _ = std::io::stdout().flush();
+
+    // Print a dimmed timestamp line above the right-aligned user message
+    if let Some(t) = ts {
+        println!("{}", timestamp_prefix(Some(t)));
+    }
 
     // Print right-aligned user message
     for line in text.lines() {
@@ -284,7 +399,12 @@ pub fn error(msg: &str) {
 
 pub fn system(msg: &str) {
     let t = theme::current();
-    println!("{} {}", "│".color(t.dim), msg.color(t.dim));
+    let width = terminal_width().max(40);
+    let border = "│".color(t.dim).to_string();
+    let cw = width.saturating_sub(2); // "│ " prefix (same for all lines)
+    for seg in wrap_content(msg, cw) {
+        println!("{} {}", border, seg.color(t.dim));
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -307,49 +427,6 @@ pub fn thinking_summary(text: &str) {
 pub fn clear_thinking_summary() {
     eprint!("\r{}\r", " ".repeat(80));
     let _ = std::io::stderr().flush();
-}
-
-// ═══════════════════════════════════════════════════════════════════════════
-// Bottom bar — drawn below the input "> " line
-// ═══════════════════════════════════════════════════════════════════════════
-
-/// Draw bottom bar below the input line: separator + mode indicator + usage hints.
-/// Saves cursor, draws 3 lines below, restores cursor to input line.
-pub fn draw_bottom_bar(mode: LayoutMode, model: &str, history_hint: Option<&str>) {
-    let t = theme::current();
-    let width = terminal_width().max(40);
-
-    let model_short = if model.len() > 28 {
-        format!("{}…", &model[..26])
-    } else {
-        model.to_string()
-    };
-
-    let (mode_text, mut hint_text) = match mode {
-        LayoutMode::Chat => ("auto mode", "tab:切换模式 · /help:查看命令"),
-        LayoutMode::Work => ("working", "esc:回到对话 · tab:切换模式"),
-        LayoutMode::Summary => ("auto mode", "tab:切换模式 · /help:查看命令"),
-    };
-
-    // Append history hint if provided
-    if let Some(hh) = history_hint {
-        hint_text = hh;
-    }
-
-    // Separator, mode, hint — 3 lines below the prompt.
-    // \r\n required: raw mode disables ONLCR.
-    let sep = "─".repeat(width.min(60));
-    let _ = write!(
-        io::stdout(),
-        "{}\r\n  {} {} · {}\r\n  {} {}",
-        sep.color(t.border),
-        "⏵".color(t.think),
-        mode_text.color(t.ai_header),
-        model_short.color(t.dim),
-        "⏵".color(t.think),
-        hint_text.color(t.dim),
-    );
-    let _ = io::stdout().flush();
 }
 
 /// Display phase progress bar (Work mode).
@@ -394,12 +471,23 @@ pub fn file_change(info: &FileChangeInfo) {
     );
 }
 
+/// Render a dimmed `[HH:MM:SS]` prefix for a message timestamp.
+/// Returns an empty string when no timestamp is available (e.g. messages
+/// loaded from older history that predate the field).
+fn timestamp_prefix(ts: Option<DateTime<Utc>>) -> String {
+    match ts {
+        Some(t) => format!("\x1b[2m[{}]\x1b[0m ", t.format("%H:%M:%S")),
+        None => String::new(),
+    }
+}
+
 /// Display a chat bubble (Chat mode).
 /// Role=User: right-aligned with ▸ marker
 /// Role=Assistant: left-aligned with subtle border
-pub fn chat_bubble(text: &str, role: rupoo::MessageRole) {
+pub fn chat_bubble(text: &str, role: rupoo::MessageRole, ts: Option<DateTime<Utc>>) {
     let t = theme::current();
     let width = terminal_width().max(40);
+    let stamp = timestamp_prefix(ts);
     match role {
         rupoo::MessageRole::User => {
             for line in text.lines() {
@@ -410,12 +498,30 @@ pub fn chat_bubble(text: &str, role: rupoo::MessageRole) {
         }
         rupoo::MessageRole::Assistant => {
             // Print with subtle border — just a thin left bar
-            for line in text.lines() {
-                println!("{} {}", "╎".color(t.ai_header).dimmed(), line);
+            let border = "╎".color(t.ai_header).dimmed().to_string();
+            // First line reserves room for "╎ " + stamp + " "; continuations
+            // align under the content with a 2-space indent ("╎  ").
+            let cw_first = width.saturating_sub(3 + stamp.width());
+            let segs = wrap_content(text, cw_first.max(1));
+            for (i, seg) in segs.iter().enumerate() {
+                if i == 0 {
+                    println!("{} {}{}", border, stamp, seg);
+                } else {
+                    println!("{}  {}", border, seg);
+                }
             }
         }
         _ => {
-            println!("{} {}", "│".color(t.dim), text.color(t.dim));
+            let border = "│".color(t.dim).to_string();
+            let cw_first = width.saturating_sub(3 + stamp.width());
+            let segs = wrap_content(text, cw_first.max(1));
+            for (i, seg) in segs.iter().enumerate() {
+                if i == 0 {
+                    println!("{} {}{}", border, stamp, seg.color(t.dim));
+                } else {
+                    println!("{}  {}", border, seg.color(t.dim));
+                }
+            }
         }
     }
 }
@@ -450,6 +556,7 @@ pub fn layout_mode_banner(mode: LayoutMode) {
 
 /// Display a compact task completion summary.
 #[allow(dead_code)]
+#[allow(clippy::too_many_arguments)]
 pub fn summary_block(
     summary: &str,
     files_changed: u32,
@@ -554,4 +661,50 @@ pub fn plan_task_list(tasks: &[(String, rupoo::task::StepStatus)]) {
         })
         .collect();
     enhanced_ui::task_list(&converted);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::wrap_content;
+    use unicode_width::UnicodeWidthStr;
+
+    #[test]
+    fn wraps_on_word_boundary() {
+        let lines = wrap_content("the quick brown fox jumps", 10);
+        assert_eq!(lines, vec!["the quick", "brown fox", "jumps"]);
+    }
+
+    #[test]
+    fn cjk_wraps_by_char_width() {
+        // Each CJK char is 2 display columns; width 8 → 4 chars per line.
+        let lines = wrap_content("中文中文中文中文", 8);
+        assert_eq!(lines, vec!["中文中文", "中文中文"]);
+        // No single line may exceed the content width.
+        for l in &lines {
+            assert!(l.width() <= 8);
+        }
+    }
+
+    #[test]
+    fn long_word_breaks_char_by_char() {
+        let lines = wrap_content("abcdefghijklmnop", 5);
+        assert_eq!(lines, vec!["abcde", "fghij", "klmno", "p"]);
+        for l in &lines {
+            assert!(l.width() <= 5);
+        }
+    }
+
+    #[test]
+    fn empty_text_yields_one_empty_line() {
+        assert_eq!(wrap_content("", 20), vec![""]);
+    }
+
+    #[test]
+    fn respects_content_width_exactly() {
+        let lines = wrap_content("hello world foo bar", 11);
+        assert_eq!(lines, vec!["hello world", "foo bar"]);
+        for l in &lines {
+            assert!(l.width() <= 11);
+        }
+    }
 }

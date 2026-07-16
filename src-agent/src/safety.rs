@@ -178,16 +178,69 @@ impl SafetyContext {
     /// Returns `Ok(())` if the command is safe, or `Err` with a description
     /// if the command is blacklisted.
     pub fn validate_command(&self, command: &str) -> AgentResult<()> {
-        let base = command.split_whitespace().next().unwrap_or(command);
+        let tokens: Vec<&str> = command.split_whitespace().collect();
+        if tokens.is_empty() {
+            return Ok(());
+        }
+        // 透过 `env` / `command` 包装器取真实程序名（如 `env rm -rf /` → rm）。
+        let base = match tokens[0].to_ascii_lowercase().as_str() {
+            "env" | "command" if tokens.len() > 1 => tokens[1],
+            _ => tokens[0],
+        };
+
+        // 候选名集合：字面 base、其文件名（若为路径）、经 PATH 解析后的真实二进制名。
+        // 这样 `/usr/bin/rm`、`env rm`、相对路径 `./rm` 都无法绕过黑名单。
+        let mut candidates: Vec<String> = Vec::new();
         let base_lower = base.to_lowercase();
-        if self.forbidden_commands.contains(&base_lower) {
-            warn!(command = %base, "blocked forbidden command");
-            return Err(AgentError::Safety(format!(
-                "Command '{}' is forbidden by security policy",
-                base
-            )));
+        candidates.push(base_lower.clone());
+        if base_lower.contains('/') {
+            if let Some(name) = Path::new(&base_lower).file_name() {
+                candidates.push(name.to_string_lossy().to_lowercase().to_string());
+            }
+        }
+        if let Some(resolved) = Self::resolve_in_path(base) {
+            if let Some(name) = Path::new(&resolved).file_name() {
+                candidates.push(name.to_string_lossy().to_lowercase().to_string());
+            }
+        }
+
+        for cand in &candidates {
+            if self.forbidden_commands.contains(cand) {
+                warn!(command = %base, "blocked forbidden command");
+                return Err(AgentError::Safety(format!(
+                    "Command '{}' is forbidden by security policy",
+                    base
+                )));
+            }
         }
         Ok(())
+    }
+
+    /// 解析命令的真实路径（类似 `which`），用于黑名单比对，防止通过绝对/相对路径绕过。
+    /// 返回解析后的完整路径（若存在），否则 `None`。
+    fn resolve_in_path(cmd: &str) -> Option<String> {
+        if cmd.contains('/') {
+            let p = Path::new(cmd);
+            if p.is_absolute() {
+                return Some(cmd.to_string());
+            }
+            // 相对路径：基于当前目录解析
+            if let Ok(cwd) = std::env::current_dir() {
+                let joined = cwd.join(cmd);
+                if joined.is_file() {
+                    return Some(joined.to_string_lossy().to_string());
+                }
+            }
+            return None;
+        }
+        let path_env = std::env::var("PATH").unwrap_or_default();
+        for dir in path_env.split(':') {
+            let candidate = Path::new(dir).join(cmd);
+            if candidate.is_file() {
+                return Some(candidate.to_string_lossy().to_string());
+            }
+        }
+        None
     }
 
     /// Resolve a path under the file sandbox.
@@ -320,7 +373,9 @@ impl SafetyContext {
                                 || v4.is_link_local()
                                 || v4.is_unspecified()
                         }
-                        std::net::IpAddr::V6(v6) => v6.is_loopback() || v6.is_unspecified(),
+                        std::net::IpAddr::V6(v6) => {
+                            v6.is_loopback() || v6.is_unspecified() || v6.is_unicast_link_local()
+                        }
                     };
                     if is_private {
                         warn!(
@@ -522,6 +577,22 @@ mod tests {
         // sh/bash are no longer forbidden — they require approval instead
         assert!(ctx.validate_command("bash -c 'echo hello'").is_ok());
         assert!(ctx.validate_command("sh -c 'ls'").is_ok());
+    }
+
+    #[test]
+    fn test_forbidden_bypass_via_path_is_blocked() {
+        let ctx = SafetyContext::default();
+        // 绝对路径绕过
+        assert!(ctx.validate_command("/usr/bin/rm -rf /").is_err());
+        assert!(ctx.validate_command("/bin/sudo reboot").is_err());
+        // 相对路径绕过
+        assert!(ctx.validate_command("./rm -rf /").is_err());
+        // env / command 包装器绕过
+        assert!(ctx.validate_command("env rm -rf /").is_err());
+        assert!(ctx.validate_command("command sudo reboot").is_err());
+        // 合法命令仍可执行
+        assert!(ctx.validate_command("/bin/echo hello").is_ok());
+        assert!(ctx.validate_command("env echo hello").is_ok());
     }
 
     #[test]

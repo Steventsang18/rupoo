@@ -847,7 +847,7 @@ fn daemonize_process() -> Result<i32> {
         let args: Vec<String> = std::env::args().collect();
         let child = Command::new(&args[0])
             .args(
-                &args[1..]
+                args[1..]
                     .iter()
                     .filter(|a| *a != "--daemon" && *a != "-d")
                     .collect::<Vec<_>>(),

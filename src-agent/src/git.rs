@@ -1,128 +1,133 @@
 //! Git integration for auto-commit, status, and PR creation.
-//! Uses `git2` for local operations and `gh` CLI for GitHub PRs.
+//!
+//! Local operations go through the `git` CLI (via `std::process::Command`)
+//! rather than `git2`. This keeps the binary free of the vendored OpenSSL /
+//! libgit2 C dependencies — leaving a single TLS stack (rustls) in the
+//! shipped artifact, which is both lighter and a smaller attack surface.
 
+use std::path::Path;
+use std::process::Command;
 use tracing::info;
 
 use crate::error::{AgentError, AgentResult};
 
 /// Wraps a git repository for programmatic operations.
 pub struct GitRepo {
-    repo: git2::Repository,
     #[allow(dead_code)]
     workdir: String,
 }
 
-/// A single status entry (modified file).
+/// A single status entry (changed file).
 pub struct StatusEntry {
     pub path: String,
     pub status: String,
 }
 
+/// Run `git <args>` with the given working directory; error if `git` is absent.
+fn git_in(workdir: &str, args: &[&str]) -> AgentResult<std::process::Output> {
+    let out = Command::new("git")
+        .args(args)
+        .current_dir(workdir)
+        .output()
+        .map_err(|e| AgentError::Git(format!("git CLI not found: {e}")))?;
+    Ok(out)
+}
+
+/// Run `git <args>` and return trimmed stdout, erroring on non-zero exit.
+fn git_out(workdir: &str, args: &[&str]) -> AgentResult<String> {
+    let out = git_in(workdir, args)?;
+    if !out.status.success() {
+        return Err(AgentError::Git(format!(
+            "git {} failed: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&out.stderr)
+        )));
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+}
+
 impl GitRepo {
     /// Open a git repository at or above the given path.
     pub fn open(path: &str) -> AgentResult<Self> {
-        let repo = git2::Repository::discover(path)
-            .map_err(|e| AgentError::Git(format!("not a git repository: {e}")))?;
-        let workdir = repo
-            .workdir()
-            .map(|p| p.to_string_lossy().to_string())
-            .unwrap_or_else(|| path.to_string());
+        let out = Command::new("git")
+            .args(["rev-parse", "--show-toplevel"])
+            .current_dir(path)
+            .output()
+            .map_err(|e| AgentError::Git(format!("git CLI not found: {e}")))?;
+        if !out.status.success() {
+            return Err(AgentError::Git(format!(
+                "not a git repository: {}",
+                String::from_utf8_lossy(&out.stderr)
+            )));
+        }
+        let workdir = String::from_utf8_lossy(&out.stdout).trim().to_string();
         info!(workdir = %workdir, "git repository opened");
-        Ok(Self { repo, workdir })
+        Ok(Self { workdir })
     }
 
     /// Get the current branch name.
     pub fn current_branch(&self) -> AgentResult<String> {
-        match self.repo.head() {
-            Ok(head) => Ok(head.shorthand().unwrap_or("(no branch)").to_string()),
-            Err(e) => {
-                // Unborn branch (no commits yet) or detached HEAD
-                // Try to read HEAD file directly for the branch name
-                if let Ok(content) = std::fs::read_to_string(self.repo.path().join("HEAD")) {
+        // `symbolic-ref` fails on detached/unborn HEAD — fall back to reading
+        // the raw HEAD ref, exactly like the previous git2 path did.
+        match git_out(&self.workdir, &["symbolic-ref", "--short", "HEAD"]) {
+            Ok(b) if !b.is_empty() => Ok(b),
+            _ => {
+                let head_path = Path::new(&self.workdir).join(".git").join("HEAD");
+                if let Ok(content) = std::fs::read_to_string(head_path) {
                     let trimmed = content.trim();
                     if let Some(branch) = trimmed.strip_prefix("ref: refs/heads/") {
                         return Ok(branch.trim().to_string());
                     }
                 }
-                Err(AgentError::Git(format!("failed to get HEAD: {e}")))
+                Err(AgentError::Git("failed to get current branch".into()))
             }
         }
     }
 
     /// Check git status and return list of changed files.
     pub fn status(&self) -> AgentResult<Vec<StatusEntry>> {
-        let mut opts = git2::StatusOptions::new();
-        opts.include_untracked(true);
-
-        let statuses = self
-            .repo
-            .statuses(Some(&mut opts))
-            .map_err(|e| AgentError::Git(format!("status error: {e}")))?;
-
-        let entries: Vec<StatusEntry> = statuses
-            .iter()
-            .map(|entry| {
-                let path = entry.path().unwrap_or("(unknown)").to_string();
-                let status = describe_status(entry.status());
-                StatusEntry { path, status }
-            })
-            .collect();
-
+        let out = git_in(&self.workdir, &["status", "--porcelain"])?;
+        let mut entries = Vec::new();
+        for line in String::from_utf8_lossy(&out.stdout).lines() {
+            if line.len() < 3 {
+                continue;
+            }
+            // Two-char XY status prefix, then space + path.
+            let x = line.as_bytes()[0] as char;
+            let y = line.as_bytes()[1] as char;
+            let raw_path = &line[3..];
+            // Handle renames ("R  old -> new") by taking the new name.
+            let path = if let Some(pos) = raw_path.find(" -> ") {
+                raw_path[pos + 4..].to_string()
+            } else {
+                raw_path.to_string()
+            };
+            entries.push(StatusEntry {
+                path,
+                status: describe_status(x, y),
+            });
+        }
         Ok(entries)
     }
 
     /// Stage all changes and commit with the given message.
-    /// Returns the commit hash (short).
+    /// Returns the short commit hash.
     pub fn commit_all(&self, message: &str) -> AgentResult<String> {
-        // Stage all changes
-        let mut index = self
-            .repo
-            .index()
-            .map_err(|e| AgentError::Git(format!("index error: {e}")))?;
-
-        index
-            .add_all(["*"].iter(), git2::IndexAddOption::DEFAULT, None)
-            .map_err(|e| AgentError::Git(format!("add error: {e}")))?;
-
-        index
-            .write()
-            .map_err(|e| AgentError::Git(format!("index write error: {e}")))?;
-
-        let oid = index
-            .write_tree()
-            .map_err(|e| AgentError::Git(format!("tree write error: {e}")))?;
-
-        let tree = self
-            .repo
-            .find_tree(oid)
-            .map_err(|e| AgentError::Git(format!("find tree error: {e}")))?;
-
-        // Get signature from git config
-        let sig = self
-            .repo
-            .signature()
-            .map_err(|e| AgentError::Git(format!("signature error: {e}")))?;
-
-        // Get parent commit (HEAD)
-        let parent = self.repo.head().ok().and_then(|h| h.peel_to_commit().ok());
-
-        let parents: Vec<&git2::Commit> = parent.iter().collect();
-
-        let commit_oid = self
-            .repo
-            .commit(Some("HEAD"), &sig, &sig, message, &tree, &parents)
-            .map_err(|e| AgentError::Git(format!("commit error: {e}")))?;
-
-        let short_hash = &commit_oid.to_string()[..7];
+        // Stage everything (respects .gitignore, same as the prior add_all).
+        git_out(&self.workdir, &["add", "-A"])?;
+        // `git commit` reads committer/author from git config — the same
+        // source git2::Repository::signature() used.
+        git_out(&self.workdir, &["commit", "-q", "-m", message])?;
+        let short = git_out(&self.workdir, &["rev-parse", "--short", "HEAD"])?;
 
         info!(
-            hash = %short_hash,
+            hash = %short,
             message = %message,
             files = self.status().ok().map_or(0, |s| s.len()),
             "git commit created"
         );
 
-        Ok(short_hash.to_string())
+        Ok(short)
     }
 
     /// Commit with a task ID reference in the message.
@@ -162,36 +167,31 @@ pub fn create_gh_pr(title: &str, body: &str) -> AgentResult<String> {
     Ok(url)
 }
 
-fn describe_status(flags: git2::Status) -> String {
+/// Map a `git status --porcelain` XY pair to the same category vocabulary
+/// the rest of the app already consumes.
+fn describe_status(x: char, y: char) -> String {
     let mut parts = Vec::new();
 
-    // CURRENT is defined as all-false (bits = 0).
-    // contains(CURRENT) is always true (any & 0 == 0),
-    // so we check bits() == 0 directly.
-    if flags.bits() == 0 {
-        return "clean".into();
+    // Index (staged) status, `x`.
+    match x {
+        'A' => parts.push("staged_new"),
+        'M' => parts.push("staged_modified"),
+        'D' => parts.push("staged_deleted"),
+        'R' => parts.push("staged_modified"),
+        _ => {}
     }
 
-    if flags.contains(git2::Status::INDEX_NEW) {
-        parts.push("staged_new");
+    // Worktree status, `y`.
+    match y {
+        '?' => parts.push("untracked"),
+        'M' => parts.push("modified"),
+        'D' => parts.push("deleted"),
+        'A' => parts.push("modified"),
+        _ => {}
     }
-    if flags.contains(git2::Status::INDEX_MODIFIED) {
-        parts.push("staged_modified");
-    }
-    if flags.contains(git2::Status::INDEX_DELETED) {
-        parts.push("staged_deleted");
-    }
-    if flags.contains(git2::Status::WT_NEW) {
-        parts.push("untracked");
-    }
-    if flags.contains(git2::Status::WT_MODIFIED) {
-        parts.push("modified");
-    }
-    if flags.contains(git2::Status::WT_DELETED) {
-        parts.push("deleted");
-    }
+
     if parts.is_empty() {
-        "unknown".into()
+        "clean".to_string()
     } else {
         parts.join(", ")
     }
@@ -202,35 +202,43 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_describe_status() {
-        // CURRENT (zero bits) must always return "clean"
-        assert_eq!(describe_status(git2::Status::CURRENT), "clean");
+    fn test_describe_status_clean() {
+        assert_eq!(describe_status(' ', ' '), "clean");
+    }
 
-        // Non-zero flags must produce non-clean output
-        let s = describe_status(git2::Status::INDEX_NEW);
-        assert_ne!(s, "clean", "INDEX_NEW should not be clean");
-        assert!(
-            s.contains("staged"),
-            "INDEX_NEW should contain 'staged', got '{s}'"
-        );
+    #[test]
+    fn test_describe_status_staged_new() {
+        let s = describe_status('A', ' ');
+        assert!(s.contains("staged"), "expected 'staged', got '{s}'");
+        assert!(s.contains("new"), "expected 'new', got '{s}'");
+        assert_ne!(s, "clean");
+    }
 
-        let s = describe_status(git2::Status::WT_MODIFIED);
-        assert_ne!(s, "clean", "WT_MODIFIED should not be clean");
-        assert!(
-            s.contains("modified"),
-            "WT_MODIFIED should contain 'modified', got '{s}'"
-        );
+    #[test]
+    fn test_describe_status_modified() {
+        let s = describe_status(' ', 'M');
+        assert!(s.contains("modified"), "expected 'modified', got '{s}'");
+        assert_ne!(s, "clean");
+    }
+
+    #[test]
+    fn test_describe_status_untracked() {
+        let s = describe_status('?', '?');
+        assert!(s.contains("untracked"), "expected 'untracked', got '{s}'");
+    }
+
+    #[test]
+    fn test_describe_status_deleted() {
+        let s = describe_status('D', 'D');
+        assert!(s.contains("staged_deleted"), "got '{s}'");
+        assert!(s.contains("deleted"), "got '{s}'");
     }
 
     #[test]
     fn test_open_current_repo() {
-        let result = GitRepo::open(".");
-        match result {
-            Ok(repo) => {
-                // May fail on unborn branch, but open() itself succeeded
-                let _branch = repo.current_branch().ok();
-            }
-            Err(e) => eprintln!("Not in git repo: {e}"),
+        // Only meaningful inside a git worktree (dev / CI).
+        if let Ok(repo) = GitRepo::open(".") {
+            let _branch = repo.current_branch().ok();
         }
     }
 }

@@ -3,6 +3,7 @@
 //! This module is the single source of truth for message types that flow
 //! between the agent engine and the terminal UI.
 
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::task::StepStatus;
@@ -54,6 +55,10 @@ pub struct ChatMessage {
     pub role: MessageRole,
     pub content: String,
     pub is_command_output: bool,
+    /// Wall-clock time the message was created. `None` for messages loaded
+    /// from older history that predates this field (serde default).
+    #[serde(default)]
+    pub timestamp: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -70,6 +75,7 @@ impl ChatMessage {
             role: MessageRole::User,
             content: text,
             is_command_output: false,
+            timestamp: Some(Utc::now()),
         }
     }
     pub fn assistant(text: String) -> Self {
@@ -77,6 +83,7 @@ impl ChatMessage {
             role: MessageRole::Assistant,
             content: text,
             is_command_output: false,
+            timestamp: Some(Utc::now()),
         }
     }
     pub fn system(text: String) -> Self {
@@ -84,6 +91,7 @@ impl ChatMessage {
             role: MessageRole::System,
             content: text,
             is_command_output: false,
+            timestamp: Some(Utc::now()),
         }
     }
     pub fn command_output(text: String) -> Self {
@@ -91,6 +99,7 @@ impl ChatMessage {
             role: MessageRole::System,
             content: text,
             is_command_output: true,
+            timestamp: Some(Utc::now()),
         }
     }
     pub fn error(text: String) -> Self {
@@ -98,6 +107,7 @@ impl ChatMessage {
             role: MessageRole::Error,
             content: text,
             is_command_output: false,
+            timestamp: Some(Utc::now()),
         }
     }
 }

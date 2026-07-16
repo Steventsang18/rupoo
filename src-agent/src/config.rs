@@ -60,16 +60,23 @@ pub struct RupooConfig {
     pub agents: HashMap<String, AgentProfile>,
 }
 
-/// Agent identity profile — defines system prompt + tool scope per role.
+/// Agent identity profile — defines system prompt, tool scope per role.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentProfile {
     /// System prompt that defines this agent's identity.
-    /// When empty, the default compiled-in prompt is used.
     #[serde(default)]
     pub system_prompt: Option<String>,
     /// Human-readable label (e.g. "终端助手", "飞书助手").
     #[serde(default)]
     pub label: Option<String>,
+    /// Only allow these tools. None = all tools allowed.
+    /// Example: ["web_search", "memory_query"]
+    #[serde(default)]
+    pub allowed_tools: Option<Vec<String>>,
+    /// Exclude these tools (applied on top of allowed_tools).
+    /// Example: ["shell", "file_write"]
+    #[serde(default)]
+    pub excluded_tools: Option<Vec<String>>,
 }
 
 // ---------------------------------------------------------------------------
@@ -89,8 +96,6 @@ pub struct ChannelSection {
     #[serde(default)]
     pub db_path: Option<String>,
 }
-
-
 
 /// DingTalk (钉钉) application configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]

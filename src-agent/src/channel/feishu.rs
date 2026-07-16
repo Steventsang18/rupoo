@@ -6,14 +6,15 @@
 
 use anyhow::{bail, Context, Result};
 use futures_util::{SinkExt, StreamExt};
-use std::collections::HashSet;
+use lru::LruCache;
+use std::num::NonZeroUsize;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::Message as WsMsg;
-use tracing::{error, info, warn};
+use tracing::{info, warn};
 
-use crate::agent::Agent;
+use crate::channel::base::ChannelRuntime;
 use crate::config::FeishuConfig;
 
 // ── Constants ────────────────────────────────────────────────────────
@@ -25,6 +26,11 @@ const LARK_WS_BASE: &str = "https://open.larksuite.com";
 
 const WS_HEARTBEAT_TIMEOUT_SECS: u64 = 60;
 const DEDUP_MAX_EVENTS: usize = 1000;
+
+/// 飞书 tenant_access_token 有效期（秒），实际约 2 小时。
+const FEISHU_TOKEN_TTL_SECS: u64 = 7200;
+/// token 刷新安全余量（秒），避免临界过期。
+const FEISHU_TOKEN_REFRESH_BUFFER_SECS: u64 = 300;
 
 // ── Minimal protobuf parser for pbbp2 frames ─────────────────────────
 
@@ -267,18 +273,26 @@ pub struct FeishuChannel {
     api_base: String,
     ws_base: String,
     locale: &'static str,
-    http_client: reqwest::Client,
-    sessions: crate::channel::base::SessionManager,
-    system_prompt: String,
+    /// 共享 HTTP 客户端（与 Agent / LLM 复用连接池，避免重复 TLS 握手）。
+    http_client: Arc<reqwest::Client>,
+    /// 共享运行时（会话管理 + agent + slash 命令）。运行期由 `with_runtime` 注入。
+    runtime: Option<Arc<ChannelRuntime>>,
+    /// 飞书 tenant_access_token 缓存（带 TTL 与安全余量）。
+    token_cache: std::sync::Mutex<Option<(String, Instant)>>,
 }
 
 impl FeishuChannel {
+    /// 构建轻量飞书通道用于配置校验（无 agent / runtime）。
     pub fn new(config: FeishuConfig) -> Result<Self> {
-        Self::with_prompt(config, None)
+        Self::build(config, None)
     }
 
-    /// Create channel with an optional system prompt override from AgentProfile.
-    pub fn with_prompt(config: FeishuConfig, system_prompt: Option<String>) -> Result<Self> {
+    /// 构建带共享运行时的飞书通道（运行期使用）。
+    pub fn with_runtime(config: FeishuConfig, runtime: Arc<ChannelRuntime>) -> Result<Self> {
+        Self::build(config, Some(runtime))
+    }
+
+    fn build(config: FeishuConfig, runtime: Option<Arc<ChannelRuntime>>) -> Result<Self> {
         let (api_base, ws_base, locale) = if config.lark_mode {
             (LARK_API_BASE.to_string(), LARK_WS_BASE.to_string(), "en")
         } else {
@@ -289,26 +303,14 @@ impl FeishuChannel {
             )
         };
 
-        let prompt = system_prompt.unwrap_or_else(|| {
-            "\
-你正在飞书 IM 上与用户对话。\
-请注意：用户通过手机或电脑的聊天界面发送消息，\
-你看不到对方的终端、文件系统或代码库。\
-用自然的中文回复，简洁口语化，适合聊天场景。"
-                .to_string()
-        });
-
         Ok(Self {
-            http_client: reqwest::Client::builder()
-                .timeout(Duration::from_secs(30))
-                .build()
-                .context("build feishu http client")?,
+            http_client: crate::http_client::HTTP_CLIENT.clone(),
             config,
             api_base,
             ws_base,
             locale,
-            sessions: crate::channel::base::SessionManager::new(1000),
-            system_prompt: prompt,
+            runtime,
+            token_cache: std::sync::Mutex::new(None),
         })
     }
 
@@ -345,6 +347,23 @@ impl FeishuChannel {
     }
 
     async fn get_tenant_token(&self) -> Result<String> {
+        // 1) 命中缓存且未过期（飞书 token TTL=2h，留 5min 余量）直接返回。
+        if let Some((tok, expiry)) = self.token_cache.lock().unwrap().as_ref() {
+            if expiry.elapsed()
+                < Duration::from_secs(FEISHU_TOKEN_TTL_SECS - FEISHU_TOKEN_REFRESH_BUFFER_SECS)
+            {
+                return Ok(tok.clone());
+            }
+        }
+        // 2) 重新获取并写回缓存。
+        let token = self.fetch_tenant_token().await?;
+        let expiry = Instant::now()
+            + Duration::from_secs(FEISHU_TOKEN_TTL_SECS - FEISHU_TOKEN_REFRESH_BUFFER_SECS);
+        *self.token_cache.lock().unwrap() = Some((token.clone(), expiry));
+        Ok(token)
+    }
+
+    async fn fetch_tenant_token(&self) -> Result<String> {
         let url = format!("{}/auth/v3/tenant_access_token/internal", self.api_base);
         let resp = self
             .http_client
@@ -436,7 +455,7 @@ impl FeishuChannel {
         Ok(())
     }
 
-    pub async fn run_listener(&self, agent: &Agent) -> Result<()> {
+    pub async fn run_listener(&self) -> Result<()> {
         let (wss_url, client_config) = self.get_ws_endpoint().await?;
         info!("connecting to feishu ws");
 
@@ -447,7 +466,9 @@ impl FeishuChannel {
 
         let (mut write, mut read) = ws_stream.split();
 
-        let seen_events = Arc::new(Mutex::new(HashSet::new()));
+        let seen_events = Arc::new(Mutex::new(LruCache::<String, ()>::new(
+            NonZeroUsize::new(DEDUP_MAX_EVENTS).unwrap(),
+        )));
 
         let ping_secs = client_config.ping_interval.unwrap_or(120).max(10);
         let mut hb_interval = tokio::time::interval(Duration::from_secs(ping_secs));
@@ -524,14 +545,14 @@ impl FeishuChannel {
 
                     if event.header.event_type != "im.message.receive_v1" { continue; }
 
-                    // Dedup by event_id
+                    // Dedup by event_id（有界 LRU，超过容量时淘汰最旧而非整集清空）
                     {
                         let mut seen = seen_events.lock().unwrap();
-                        if !seen.insert(event.header.event_id.clone()) {
+                        if seen.contains(&event.header.event_id) {
                             info!(event_id = %event.header.event_id, "duplicate event, skipping");
                             continue;
                         }
-                        if seen.len() > DEDUP_MAX_EVENTS { seen.clear(); }
+                        seen.put(event.header.event_id.clone(), ());
                     }
 
                     // Extract user text for content-type detection
@@ -555,7 +576,7 @@ impl FeishuChannel {
                         self.add_reaction(mid, if is_code { "HAMMER" } else { "GLANCE" }).await;
                     }
 
-                    let result = self.handle_event(&event.event, agent).await;
+                    let result = self.handle_event(&event.event).await;
 
                     // Update reaction on completion
                     if let Some(ref mid) = msg_id {
@@ -576,7 +597,7 @@ impl FeishuChannel {
         Ok(())
     }
 
-    async fn handle_event(&self, event: &serde_json::Value, agent: &Agent) -> Result<()> {
+    async fn handle_event(&self, event: &serde_json::Value) -> Result<()> {
         let sender = event.get("sender").context("missing sender")?;
         let sender_type = sender
             .get("sender_type")
@@ -610,7 +631,8 @@ impl FeishuChannel {
             .get("content")
             .and_then(|c| c.as_str())
             .unwrap_or("");
-        let text = extract_text_content(content_str);
+        let raw_text = extract_text_content(content_str);
+        let is_code = is_code_related(&raw_text);
 
         if self.config.mention_only && chat_type == "group" {
             // Check if the bot was @mentioned in the group message
@@ -623,86 +645,65 @@ impl FeishuChannel {
                 return Ok(()); // Not @bot, skip
             }
         }
-        let text = text.trim();
+
+        let text = raw_text.trim();
         if text.is_empty() {
             return Ok(());
         }
 
         // Strip @mention from group messages
         let text = if chat_type == "group" {
-            strip_mention(text)
+            strip_mention(text).to_string()
         } else {
-            text
+            text.to_string()
         };
 
-        // Handle slash commands
-        if let Some(cmd) = text.strip_prefix('/') {
-            return self.handle_slash_command(cmd, sender_open_id).await;
-        }
+        let runtime = self
+            .runtime
+            .as_ref()
+            .context("feishu runtime not initialized")?;
 
         info!(sender = %sender_open_id, chat = %chat_type, "feishu message received");
 
-        // Push user message, clone history, release lock before calling agent.
-        let history = self
-            .sessions
-            .push_and_clone(sender_open_id, text, &self.system_prompt);
+        // 收到消息时先打初始反应（基于内容类型）。
+        if let Some(mid) = extract_message_id(event) {
+            self.add_reaction(&mid, if is_code { "HAMMER" } else { "GLANCE" })
+                .await;
+        }
 
-        match agent
-            .agent_chat(
-                "",
-                &history,
-                8,
-                false,
-                |_| {},
-                None,
-                Some(self.system_prompt.clone()),
-            )
-            .await
-        {
-            Ok((response, _usage)) => {
-                self.sessions.push_response(sender_open_id, &response);
-                self.send_message(sender_open_id, &format!("{}\n\n[OK]", response))
-                    .await?;
+        // 统一走 ChannelRuntime 流水线：slash 命令 / 会话 / agent_chat。
+        let result = runtime.process_text_message(sender_open_id, &text).await;
+
+        // 完成时根据成败更新反应。
+        match &result {
+            Ok(_) => {
+                if let Some(mid) = extract_message_id(event) {
+                    self.add_reaction(&mid, "DONE").await;
+                }
             }
-            Err(e) => {
-                error!(error = %e, "agent chat failed");
-                self.send_message(sender_open_id, &format!("抱歉，处理消息时出错: {e}"))
-                    .await?;
+            Err(_) => {
+                if let Some(mid) = extract_message_id(event) {
+                    self.add_reaction(&mid, "Alarm").await;
+                }
             }
+        }
+
+        match result {
+            Ok(reply) => self.send_message(sender_open_id, &reply).await?,
+            Err(e) => self.send_message(sender_open_id, &e).await?,
         }
 
         Ok(())
     }
+}
 
-    /// Handle a slash command (e.g., /new, /help).
-    async fn handle_slash_command(&self, cmd: &str, recipient: &str) -> Result<()> {
-        match cmd.trim().to_lowercase().as_str() {
-            "new" | "clear" => {
-                self.sessions.clear_session(recipient);
-                self.send_message(recipient, "✅ 对话已重置，开始新的会话吧！")
-                    .await
-            }
-            "help" => {
-                let help = "🤖 **Rupoo 快捷指令**\n\n\
-                    /new 或 /clear — 重置对话\n\
-                    /help — 显示本帮助\n\
-                    /status — 查看机器人状态\n\n\
-                    其他消息直接发送即可，Rupoo 会自动识别并回复。";
-                self.send_message(recipient, help).await
-            }
-            "status" => {
-                self.send_message(recipient, "✅ Rupoo is running on Feishu")
-                    .await
-            }
-            _ => {
-                self.send_message(
-                    recipient,
-                    &format!("未知指令 `/{cmd}`，发送 /help 查看可用指令"),
-                )
-                .await
-            }
-        }
-    }
+/// Extract the message_id from a Lark event (for reactions).
+fn extract_message_id(event: &serde_json::Value) -> Option<String> {
+    event
+        .get("message")
+        .and_then(|m| m.get("message_id"))
+        .and_then(|m| m.as_str())
+        .map(|s| s.to_string())
 }
 
 /// Extract user text from Feishu's content JSON field.

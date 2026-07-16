@@ -220,11 +220,6 @@ pub fn data_dir() -> PathBuf {
     }
 }
 
-/// Return the history file path (always under [`data_dir()`]).
-pub fn history_path() -> PathBuf {
-    data_dir().join("history.txt")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

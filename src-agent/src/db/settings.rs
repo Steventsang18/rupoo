@@ -27,6 +27,7 @@ const VALID_CONFIG_KEYS: &[&str] = &[
     "browser_path",
     "max_turns",
     "theme",
+    "guide_dismissed",
 ];
 
 /// Check if a config key is valid, returning a suggestion for close matches.
@@ -218,6 +219,36 @@ impl TaskRepo {
                 .query_row(rusqlite::params![key], |row| row.get::<_, String>(0))
                 .ok();
             Ok(result)
+        })
+        .await
+    }
+
+    /// Get multiple configuration values in a single query (key → value).
+    /// More efficient than calling [`get_setting`] in a loop: one round-trip
+    /// instead of one per key.
+    pub async fn get_settings(
+        &self,
+        keys: &[String],
+    ) -> AgentResult<std::collections::HashMap<String, String>> {
+        let keys = keys.to_vec();
+        self.with_read_conn(move |conn| {
+            if keys.is_empty() {
+                return Ok(std::collections::HashMap::new());
+            }
+            let placeholders = vec!["?"; keys.len()].join(",");
+            let sql = format!(
+                "SELECT key, value FROM settings WHERE key IN ({})",
+                placeholders
+            );
+            let mut stmt = conn.prepare(&sql)?;
+            let rows = stmt.query_map(rusqlite::params_from_iter(keys.iter()), |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })?;
+            let mut map = std::collections::HashMap::new();
+            for r in rows.flatten() {
+                map.insert(r.0, r.1);
+            }
+            Ok(map)
         })
         .await
     }

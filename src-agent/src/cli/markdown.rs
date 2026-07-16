@@ -9,6 +9,7 @@
 //!
 //! Note: Some functions are reserved for future use and may not be currently active.
 
+use super::output::wrap_content;
 use super::theme;
 use console::Term;
 use owo_colors::OwoColorize;
@@ -226,42 +227,85 @@ fn terminal_width() -> usize {
     Term::stdout().size().1 as usize
 }
 
-/// Render a single markdown line
+/// Render a single markdown line, wrapping long content to the terminal width
+/// with hanging indents so lists/quotes stay aligned.
 fn render_markdown_line(line: &str, width: usize, t: &theme::Theme) {
-    // Headers
+    // Headers (marker is 2 columns: "█ "/"▓ "/"▒ ")
     if let Some(text) = line.strip_prefix("# ") {
-        println!(
-            "\n{} {}",
-            "█".color(t.ai_header),
-            text.color(t.ai_header).bold()
-        );
+        let cw = width.saturating_sub(2);
+        for (i, seg) in wrap_content(text, cw).iter().enumerate() {
+            if i == 0 {
+                println!(
+                    "\n{} {}",
+                    "█".color(t.ai_header),
+                    seg.color(t.ai_header).bold()
+                );
+            } else {
+                println!("  {}", seg.color(t.ai_header).bold());
+            }
+        }
         return;
     }
     if let Some(text) = line.strip_prefix("## ") {
-        println!("\n{} {}", "▓".color(t.ai_header), text.color(t.ai_header));
+        let cw = width.saturating_sub(2);
+        for (i, seg) in wrap_content(text, cw).iter().enumerate() {
+            if i == 0 {
+                println!("\n{} {}", "▓".color(t.ai_header), seg.color(t.ai_header));
+            } else {
+                println!("  {}", seg.color(t.ai_header));
+            }
+        }
         return;
     }
     if let Some(text) = line.strip_prefix("### ") {
-        println!("\n{} {}", "▒".color(t.ai_header), text.color(t.ai_header));
+        let cw = width.saturating_sub(2);
+        for (i, seg) in wrap_content(text, cw).iter().enumerate() {
+            if i == 0 {
+                println!("\n{} {}", "▒".color(t.ai_header), seg.color(t.ai_header));
+            } else {
+                println!("  {}", seg.color(t.ai_header));
+            }
+        }
         return;
     }
 
-    // List items
+    // List items (prefix "  • "/"  ▸ " is 4 columns → 4-space hanging indent)
     if let Some(text) = line.strip_prefix("- ").or_else(|| line.strip_prefix("* ")) {
-        println!("  {} {}", "•".color(t.user_med), render_inline(text, t));
+        let cw = width.saturating_sub(4);
+        for (i, seg) in wrap_content(text, cw).iter().enumerate() {
+            if i == 0 {
+                println!("  {} {}", "•".color(t.user_med), render_inline(seg, t));
+            } else {
+                println!("    {}", render_inline(seg, t));
+            }
+        }
         return;
     }
     if let Some(text) = line
         .strip_prefix("1. ")
         .or_else(|| line.strip_prefix("1) "))
     {
-        println!("  {} {}", "▸".color(t.user_med), render_inline(text, t));
+        let cw = width.saturating_sub(4);
+        for (i, seg) in wrap_content(text, cw).iter().enumerate() {
+            if i == 0 {
+                println!("  {} {}", "▸".color(t.user_med), render_inline(seg, t));
+            } else {
+                println!("    {}", render_inline(seg, t));
+            }
+        }
         return;
     }
 
-    // Blockquotes
+    // Blockquotes (prefix "  │ " is 4 columns → 4-space hanging indent)
     if let Some(text) = line.strip_prefix("> ") {
-        println!("  │ {}", text.color(t.dim));
+        let cw = width.saturating_sub(4);
+        for (i, seg) in wrap_content(text, cw).iter().enumerate() {
+            if i == 0 {
+                println!("  │ {}", seg.color(t.dim));
+            } else {
+                println!("    {}", seg.color(t.dim));
+            }
+        }
         return;
     }
 
@@ -277,8 +321,11 @@ fn render_markdown_line(line: &str, width: usize, t: &theme::Theme) {
         return;
     }
 
-    // Regular paragraph
-    println!("  {}", render_inline(line, t));
+    // Regular paragraph (prefix "  " is 2 columns → 2-space hanging indent)
+    let cw = width.saturating_sub(2);
+    for seg in wrap_content(line, cw) {
+        println!("  {}", render_inline(&seg, t));
+    }
 }
 
 /// Render inline elements (bold, italic, code, links)

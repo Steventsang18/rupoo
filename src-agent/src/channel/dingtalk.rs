@@ -6,8 +6,8 @@
 use anyhow::{bail, Context, Result};
 use futures_util::{SinkExt, StreamExt};
 use std::collections::HashMap;
-use std::sync::Arc;
-use std::time::Duration;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
 use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::Message as WsMsg;
@@ -18,6 +18,11 @@ use crate::channel::base::ChannelRuntime;
 // ── 常量 ──────────────────────────────────────────────────────────────
 
 const DINGTALK_API_BASE: &str = "https://api.dingtalk.com";
+
+/// 钉钉 access_token 有效期（秒），实际约 2 小时。
+const DINGTALK_TOKEN_TTL_SECS: u64 = 7200;
+/// token 刷新安全余量（秒）。
+const DINGTALK_TOKEN_REFRESH_BUFFER_SECS: u64 = 300;
 
 /// 钉钉 Stream 网关注册端点
 const GATEWAY_REGISTER_PATH: &str = "/v1.0/gateway/connections/open";
@@ -34,8 +39,10 @@ pub struct DingTalkChannel {
     session_webhooks: Arc<RwLock<HashMap<String, String>>>,
     /// 共享运行时
     runtime: Arc<ChannelRuntime>,
-    /// HTTP 客户端
-    http_client: reqwest::Client,
+    /// HTTP 客户端（与 Agent / LLM 复用连接池）
+    http_client: Arc<reqwest::Client>,
+    /// 钉钉 access_token 缓存（带 TTL 与安全余量）。
+    token_cache: Mutex<Option<(String, Instant)>>,
 }
 
 /// 钉钉网关注册响应
@@ -65,19 +72,33 @@ impl DingTalkChannel {
         runtime: Arc<ChannelRuntime>,
     ) -> Result<Self> {
         Ok(Self {
-            http_client: reqwest::Client::builder()
-                .timeout(Duration::from_secs(30))
-                .build()
-                .context("build dingtalk http client")?,
+            http_client: crate::http_client::HTTP_CLIENT.clone(),
             client_id,
             client_secret,
             session_webhooks: Arc::new(RwLock::new(HashMap::new())),
             runtime,
+            token_cache: Mutex::new(None),
         })
     }
 
-    /// 获取钉钉 access token。
+    /// 获取钉钉 access token（带缓存，避免每次请求重复鉴权）。
     async fn get_token(&self) -> Result<String> {
+        if let Some((tok, expiry)) = self.token_cache.lock().unwrap().as_ref() {
+            if expiry.elapsed()
+                < Duration::from_secs(DINGTALK_TOKEN_TTL_SECS - DINGTALK_TOKEN_REFRESH_BUFFER_SECS)
+            {
+                return Ok(tok.clone());
+            }
+        }
+        let token = self.fetch_token().await?;
+        let expiry = Instant::now()
+            + Duration::from_secs(DINGTALK_TOKEN_TTL_SECS - DINGTALK_TOKEN_REFRESH_BUFFER_SECS);
+        *self.token_cache.lock().unwrap() = Some((token.clone(), expiry));
+        Ok(token)
+    }
+
+    /// 实际发起钉钉 token 请求。
+    async fn fetch_token(&self) -> Result<String> {
         let url = format!("{}/v1.0/oauth2/accessToken", DINGTALK_API_BASE);
         let resp = self
             .http_client

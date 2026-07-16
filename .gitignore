@@ -16,6 +16,8 @@
 
 # Local config (contains API keys)
 rupoo-config.toml
+# Credentials file (contains API keys — MUST never be committed)
+credentials.toml
 
 # Demo HTML pages
 *.html

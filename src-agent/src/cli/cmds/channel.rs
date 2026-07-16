@@ -147,6 +147,8 @@ async fn add_dingtalk_wizard() -> Result<()> {
         rupoo::config::AgentProfile {
             system_prompt: Some("你正在钉钉上与用户对话。用自然的中文回复，简洁口语化。".into()),
             label: Some("钉钉助手".into()),
+            allowed_tools: None,
+            excluded_tools: None,
         },
     );
 
@@ -188,6 +190,8 @@ async fn save_feishu_config(feishu_cfg: FeishuConfig) -> Result<()> {
                     .into(),
             ),
             label: Some("飞书助手".into()),
+            allowed_tools: None,
+            excluded_tools: None,
         },
     );
 

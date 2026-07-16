@@ -1,13 +1,13 @@
 # Rupoo — AI 驱动的终端助手
 
-Rupoo 是一个基于终端的 AI 助手，采用原生 REPL 界面，支持语法高亮代码块、Markdown 渲染、主题切换和 Claude Code 风格的工具调用显示 —— 所有功能都由双模式代理引擎（聊天 + 计划）驱动。
+Rupoo 是一个基于终端的 AI 助手，采用原生 REPL 界面，支持渲染代码块、Markdown 渲染、主题切换和 Claude Code 风格的工具调用显示 —— 所有功能都由双模式代理引擎（聊天 + 计划）驱动。
 
 ```
-版本:    0.5.0          语言: Rust 2021
-代码行数: ~48,000       测试:    275 ✅
+版本:    0.6.0          语言: Rust 2021
+代码行数: ~48,000       测试:    291 ✅
 界面:    原生 REPL      LLM:     Anthropic / OpenAI / DeepSeek / Ollama
 数据库:  SQLite (FTS5)  记忆:    混合搜索 (FTS5 + 向量)
-安全:    path_jail 沙箱 + SSRF 防护
+安全:    path_jail 沙箱 + SSRF 防护 + MCP 认证 + 命令黑名单加固
 ```
 
 ---
@@ -17,7 +17,7 @@ Rupoo 是一个基于终端的 AI 助手，采用原生 REPL 界面，支持语�
 | 特性 | 描述 |
 |------|------|
 | **原生 REPL** | 流畅滚动，支持窗口调整，无需帧缓冲 |
-| **语法高亮** | 基于 syntect，支持 3 种主题（ocean / GitHub / mocha） |
+| **代码块渲染** | Markdown 管线渲染代码块（主题色由主题系统控制） |
 | **Markdown 渲染** | 表格、引用、任务列表、代码块、链接 |
 | **主题系统** | `/theme dark\|light\|monokai` 命令切换，持久化存储 |
 | **聊天气泡** | 用户右对齐 (▸)，AI 左对齐 (◂) |
@@ -214,6 +214,30 @@ v0.5.0 引入重大架构升级：正式的五层管线取代了单体代理核�
 
 ---
 
+## 🎯 v0.6.0 优化与加固
+
+v0.6.0 聚焦安全边界与代码重复两大技术债务，并补齐若干健壮性/体验项（详见 `OPTIMIZATION-SUMMARY.md`）。
+
+### 工具系统统一（最大技术债务）
+- 新增统一宏 `rupoo_tools!` 作为**唯一工具清单**，`rig_tools.rs` / `mcp.rs` / `llm/providers.rs` 三处注册全部复用，消除重复定义。
+- Provider agent 此前漏掉的 `run_tests` / `check_output` / `diff_check` 工具现已一致纳入。
+
+### 安全加固
+- **MCP Server 认证**：通过 `RUPOO_MCP_TOKEN` 启用 token 校验；未配置时保持向后兼容，配置后 `initialize` 必须携带匹配 `authToken`。
+- **命令黑名单加固**：按 PATH 解析真实可执行名，并识别 `env` / `command` 包装，阻止绕过。
+- **SSRF 加固**：新增 IPv6 链路本地地址拦截。
+
+### 性能与健壮性
+- **渠道会话 Token 预算**：每会话历史限制 8000 token，防止上下文无限膨胀；超大单条消息自动截断。
+- **execute_nl 超时**：整轮对话包裹 `tokio::time::timeout`（默认 600s，可用 `chat_timeout_secs` 调整），防止 Agent 无限挂起。
+- 会话克隆由 O(n²) 优化为 O(n)；飞书/钉钉复用全局 HTTP 连接池；飞书事件去重改用有界 `LruCache`。
+
+### 体验与清理
+- **TUI 消息时间戳**：用户/系统/错误气泡与 Work 模式助手消息显示 `[HH:MM:SS]`。
+- 移除未使用的 `syntect` 死依赖。
+
+---
+
 ## 🎯 v0.4.0 新功能
 
 ### 记忆系统
@@ -330,8 +354,10 @@ rupoo [OPTIONS] [COMMAND]
 |----------|----------|
 | 命令黑名单 | 阻止 20+ 危险命令 |
 | 路径沙箱 | `path_jail` 防止路径遍历 |
-| SSRF 防护 | 阻止本地和内网 IP |
-| 超时保护 | 命令/HTTP/浏览器操作 30s 限制 |
+| SSRF 防护 | 阻止本地、内网 IP 及 IPv6 链路本地地址 |
+| MCP Server 认证 | 可选 `RUPOO_MCP_TOKEN` token 校验 |
+| 命令黑名单加固 | 按 PATH 解析真实可执行名，识别 `env`/`command` 包装 |
+| 超时保护 | 命令/HTTP/浏览器操作 30s 限制；聊天整轮 600s 超时 |
 | 环境清理 | 仅保留安全的环境变量 |
 | 输出截断 | 限制命令输出和文件读取大小 |
 
@@ -441,5 +467,4 @@ MIT License - 详见 [LICENSE](LICENSE)。
 ## 🙏 致谢
 
 - [rig-core](https://github.com/gregpr07/rig) - LLM 代理框架
-- [syntect](https://github.com/trishume/syntect) - 语法高亮
 - [rustyline](https://github.com/kknghk/rustyline) - Readline 实现

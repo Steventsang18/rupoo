@@ -183,37 +183,8 @@ impl McpToolExecutor {
             }};
         }
 
-        // Echo
-        register!("echo", crate::rig_tools::EchoTool::new());
-
-        // File tools with optional jail
-        match jail_root {
-            Some(ref root) => {
-                register!(
-                    "file_read",
-                    crate::rig_tools::FileReadTool::with_jail(root.clone())
-                );
-                register!(
-                    "file_write",
-                    crate::rig_tools::FileWriteTool::with_jail(root.clone())
-                );
-                register!(
-                    "list_directory",
-                    crate::rig_tools::ListDirTool::with_jail(root.clone())
-                );
-            }
-            None => {
-                register!("file_read", crate::rig_tools::FileReadTool::new());
-                register!("file_write", crate::rig_tools::FileWriteTool::new());
-                register!("list_directory", crate::rig_tools::ListDirTool::new());
-            }
-        }
-
-        register!("web_search", crate::rig_tools::WebSearchTool::new());
-        register!("shell_exec", crate::rig_tools::ShellExecTool::new());
-        register!("run_tests", crate::tools::verify::RunTestsTool);
-        register!("check_output", crate::tools::verify::CheckOutputTool);
-        register!("diff_check", crate::tools::verify::DiffCheckTool);
+        // Register the canonical tool set (single source of truth).
+        crate::rupoo_tools!(register, jail_root);
 
         (tools, defs)
     }

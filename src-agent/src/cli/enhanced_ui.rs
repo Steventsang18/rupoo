@@ -11,6 +11,7 @@
 
 use console::Term;
 use owo_colors::OwoColorize;
+use unicode_width::UnicodeWidthChar;
 use unicode_width::UnicodeWidthStr;
 
 use super::theme;
@@ -64,15 +65,32 @@ pub fn header_bar(version: &str, _model: Option<&str>, memory_mb: Option<f64>, s
         content.push_str("  │  [?] ");
     }
 
-    // Calculate padding (subtract 4 for borders and spacing)
-    let content_width = content.chars().count(); // Use char count, not unicode width
-    let _padding = width.saturating_sub(content_width + 4); // Reserved for future alignment
+    // Calculate padding using display width (not char count) so CJK text
+    // like "内存" doesn't throw the box out of alignment. Truncate with an
+    // ellipsis if the content is wider than the box.
+    let max_content = width.saturating_sub(3); // borders + trailing " │"
+    let mut display = content.clone();
+    if display.width() > max_content {
+        let mut trimmed = String::new();
+        let mut w = 0usize;
+        for ch in display.chars() {
+            let c = ch.width().unwrap_or(0);
+            if w + c + 1 > max_content {
+                break;
+            }
+            trimmed.push(ch);
+            w += c;
+        }
+        trimmed.push('…');
+        display = trimmed;
+    }
+    let _padding = width.saturating_sub(display.width() + 3); // Reserved for future alignment
 
     // Top border
     println!("┌{}┐", "─".repeat(width - 2));
 
     // Content line
-    println!("│{} │", content);
+    println!("│{} │", display);
 
     // Bottom border
     println!("└{}┘", "─".repeat(width - 2));

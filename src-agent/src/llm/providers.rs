@@ -9,77 +9,6 @@ use crate::llm::LlmConfig;
 // Magic number constants
 const DEFAULT_MAX_TURNS: usize = 50;
 
-/// Register tools on the builder based on safe_mode setting.
-/// Returns AgentBuilderSimple because .tool() transitions from AgentBuilder to AgentBuilderSimple.
-pub fn register_tools<M: rig::completion::CompletionModel>(
-    builder: rig::agent::AgentBuilderSimple<M>,
-    jail_root: Option<&std::path::Path>,
-    _safe_mode: bool,
-) -> rig::agent::AgentBuilderSimple<M> {
-    // _safe_mode is retained for API compatibility but no longer gates FileWriteTool.
-    // File writes are always available; path jail enforces project-boundary safety.
-    let mut builder = builder;
-
-    // Web search is read-only and safe — always register
-    builder = builder.tool(crate::rig_tools::WebSearchTool::new());
-
-    // Shell execution with safety validation (sudo/rm/etc. blocked)
-    builder = builder.tool(crate::rig_tools::ShellExecTool::new());
-
-    // FileReadTool is safe
-    if let Some(root) = jail_root {
-        builder = builder.tool(crate::rig_tools::FileReadTool::with_jail(
-            root.to_path_buf(),
-        ));
-    } else {
-        builder = builder.tool(crate::rig_tools::FileReadTool::new());
-    }
-
-    // ListDirTool is safe
-    if let Some(root) = jail_root {
-        builder = builder.tool(crate::rig_tools::ListDirTool::with_jail(root.to_path_buf()));
-    } else {
-        builder = builder.tool(crate::rig_tools::ListDirTool::new());
-    }
-
-    // FileWriteTool — always register so the LLM knows it can write files.
-    // The jail_root still enforces that writes stay inside the project directory.
-    if let Some(root) = jail_root {
-        builder = builder.tool(crate::rig_tools::FileWriteTool::with_jail(
-            root.to_path_buf(),
-        ));
-    } else {
-        builder = builder.tool(crate::rig_tools::FileWriteTool::new());
-    }
-
-    builder
-}
-
-/// Register tools (all tools, no safe_mode filtering) for legacy non-streaming agents.
-pub fn register_tools_legacy<M: rig::completion::CompletionModel>(
-    builder: rig::agent::AgentBuilderSimple<M>,
-    jail_root: Option<&std::path::Path>,
-) -> rig::agent::AgentBuilderSimple<M> {
-    let builder = builder
-        .tool(crate::rig_tools::WebSearchTool::new())
-        .tool(crate::rig_tools::ShellExecTool::new());
-    if let Some(root) = jail_root {
-        builder
-            .tool(crate::rig_tools::FileReadTool::with_jail(
-                root.to_path_buf(),
-            ))
-            .tool(crate::rig_tools::FileWriteTool::with_jail(
-                root.to_path_buf(),
-            ))
-            .tool(crate::rig_tools::ListDirTool::with_jail(root.to_path_buf()))
-    } else {
-        builder
-            .tool(crate::rig_tools::FileReadTool::new())
-            .tool(crate::rig_tools::FileWriteTool::new())
-            .tool(crate::rig_tools::ListDirTool::new())
-    }
-}
-
 pub fn build_anthropic_agent(
     config: &LlmConfig,
     preamble: &str,
@@ -107,9 +36,9 @@ pub fn build_anthropic_agent(
         .temperature(config.temperature)
         .max_tokens(config.max_tokens as u64)
         .default_max_turns(DEFAULT_MAX_TURNS)
-        .tool(crate::rig_tools::EchoTool::new());
-
-    let builder = register_tools_legacy(builder, jail_root);
+        .tools(crate::rig_tools::build_boxed_tools(
+            jail_root.map(|p| p.to_path_buf()),
+        ));
 
     Ok(builder.build())
 }
@@ -150,7 +79,9 @@ pub fn build_openai_agent(
         .temperature(config.temperature)
         .max_tokens(config.max_tokens as u64)
         .default_max_turns(DEFAULT_MAX_TURNS)
-        .tool(crate::rig_tools::EchoTool::new());
+        .tools(crate::rig_tools::build_boxed_tools(
+            jail_root.map(|p| p.to_path_buf()),
+        ));
 
     // Disable thinking mode for custom base_url (e.g. DeepSeek)
     if config.base_url.is_some() {
@@ -158,8 +89,6 @@ pub fn build_openai_agent(
             "thinking": {"type": "disabled"}
         }));
     }
-
-    let builder = register_tools_legacy(builder, jail_root);
 
     Ok(builder.build())
 }
@@ -189,9 +118,9 @@ pub fn build_ollama_agent(
         .temperature(config.temperature)
         .max_tokens(config.max_tokens as u64)
         .default_max_turns(DEFAULT_MAX_TURNS)
-        .tool(crate::rig_tools::EchoTool::new());
-
-    let builder = register_tools_legacy(builder, jail_root);
+        .tools(crate::rig_tools::build_boxed_tools(
+            jail_root.map(|p| p.to_path_buf()),
+        ));
 
     Ok(builder.build())
 }
@@ -202,16 +131,16 @@ fn finish_streaming_agent<M: rig::completion::CompletionModel>(
     preamble: &str,
     config: &LlmConfig,
     jail_root: Option<&std::path::Path>,
-    safe_mode: bool,
+    _safe_mode: bool,
 ) -> AgentResult<rig::agent::Agent<M>> {
     let builder = builder
         .preamble(preamble)
         .temperature(config.temperature)
         .max_tokens(config.max_tokens as u64)
         .default_max_turns(DEFAULT_MAX_TURNS)
-        .tool(crate::rig_tools::EchoTool::new());
-
-    let builder = register_tools(builder, jail_root, safe_mode);
+        .tools(crate::rig_tools::build_boxed_tools(
+            jail_root.map(|p| p.to_path_buf()),
+        ));
 
     Ok(builder.build())
 }

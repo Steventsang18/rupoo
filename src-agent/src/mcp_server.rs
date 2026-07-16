@@ -76,13 +76,30 @@ struct McpServer {
     /// The executor holds all registered tools dynamically.
     executor: McpToolExecutor,
     initialized: bool,
+    /// Whether the client passed a valid auth token during `initialize`.
+    authenticated: bool,
+    /// Expected auth token (None = auth disabled, open server for backward compat).
+    token: Option<String>,
 }
 
 impl McpServer {
     fn new(safety_ctx: SafetyContext) -> Self {
+        // Opt-in auth: only enforced when a token is explicitly configured via
+        // `RUPOO_MCP_TOKEN`. When unset, the server stays open (stdio is spawned
+        // locally by a trusted client), but operators can require a token.
+        let token = std::env::var("RUPOO_MCP_TOKEN")
+            .ok()
+            .map(|t| t.trim().to_string())
+            .filter(|t| !t.is_empty());
+        Self::with_token(safety_ctx, token)
+    }
+
+    fn with_token(safety_ctx: SafetyContext, token: Option<String>) -> Self {
         Self {
             executor: McpToolExecutor::with_safety(safety_ctx),
             initialized: false,
+            authenticated: false,
+            token,
         }
     }
 
@@ -112,6 +129,30 @@ impl McpServer {
 
         match req.method.as_str() {
             "initialize" => {
+                // Authenticate: if a token is configured, the client MUST supply a
+                // matching `authToken` in the initialize params. Without it the
+                // session is rejected and never marked initialized.
+                let provided = req
+                    .params
+                    .as_ref()
+                    .and_then(|p| p.get("authToken"))
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string());
+
+                let authed = match &self.token {
+                    None => true, // auth disabled
+                    Some(expected) => provided.as_deref() == Some(expected.as_str()),
+                };
+
+                if !authed {
+                    return Some(self.error_response(
+                        id,
+                        -32001,
+                        "Authentication failed: missing or invalid authToken",
+                    ));
+                }
+
+                self.authenticated = true;
                 self.initialized = true;
                 info!("MCP client initialized");
                 Some(JsonRpcResponse {
@@ -275,7 +316,7 @@ mod tests {
     use super::*;
 
     fn make_server() -> McpServer {
-        McpServer::new(SafetyContext::default())
+        McpServer::with_token(SafetyContext::default(), None)
     }
 
     #[tokio::test]
@@ -363,6 +404,61 @@ mod tests {
         let resp = server.handle_request(req).await;
         assert!(resp.is_some());
         assert!(resp.unwrap().error.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_auth_required_when_token_configured() {
+        // Server configured with a token must reject initialize without a token.
+        let mut server = McpServer::with_token(SafetyContext::default(), Some("secret".into()));
+
+        let init = JsonRpcRequest {
+            id: Some(serde_json::json!(1)),
+            method: "initialize".into(),
+            params: None,
+        };
+        let resp = server.handle_request(init).await.unwrap();
+        assert!(resp.error.is_some());
+        assert_eq!(resp.error.unwrap().code, -32001);
+        assert!(!server.authenticated);
+        assert!(!server.initialized);
+
+        // A tools/list before successful init must be rejected.
+        let list = JsonRpcRequest {
+            id: Some(serde_json::json!(2)),
+            method: "tools/list".into(),
+            params: None,
+        };
+        let resp = server.handle_request(list).await.unwrap();
+        assert!(resp.error.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_auth_accepts_matching_token() {
+        let mut server = McpServer::with_token(SafetyContext::default(), Some("secret".into()));
+
+        let init = JsonRpcRequest {
+            id: Some(serde_json::json!(1)),
+            method: "initialize".into(),
+            params: Some(serde_json::json!({ "authToken": "secret" })),
+        };
+        let resp = server.handle_request(init).await.unwrap();
+        assert!(resp.result.is_some());
+        assert!(server.authenticated);
+        assert!(server.initialized);
+    }
+
+    #[tokio::test]
+    async fn test_auth_rejects_wrong_token() {
+        let mut server = McpServer::with_token(SafetyContext::default(), Some("secret".into()));
+
+        let init = JsonRpcRequest {
+            id: Some(serde_json::json!(1)),
+            method: "initialize".into(),
+            params: Some(serde_json::json!({ "authToken": "wrong" })),
+        };
+        let resp = server.handle_request(init).await.unwrap();
+        assert!(resp.error.is_some());
+        assert_eq!(resp.error.unwrap().code, -32001);
     }
 
     #[tokio::test]

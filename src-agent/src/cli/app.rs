@@ -74,6 +74,20 @@ impl CommandDef {
 // Main app state
 // ---------------------------------------------------------------------------
 
+/// Which rendering backend drives the REPL surface.
+///
+/// `Ratatui` is the default "humanistic companion" surface — a single
+/// downward-growing chat stream rendered with ratatui's retained-mode buffer.
+/// `Terminal` is the long-stable line-by-line printer, kept fully intact as a
+/// fallback (select via `RUPOO_TUI=0/false/off/no`). The two paths are isolated
+/// so the legacy printer can never regress.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum RenderMode {
+    Terminal,
+    #[default]
+    Ratatui,
+}
+
 #[allow(dead_code)]
 pub struct RupooApp {
     pub overlay: OverlayState,
@@ -98,6 +112,14 @@ pub struct RupooApp {
     pub input_history_index: usize,
     pub model_label: String,
     pub session_messages: std::collections::HashMap<String, Vec<ChatMessage>>,
+    /// Raw `messages_json` for each session, kept so inactive sessions are
+    /// parsed lazily (on first switch) instead of all at startup.
+    pub session_raw: std::collections::HashMap<String, String>,
+    /// Background session-persistence channel. A single worker thread drains
+    /// `PersistMsg`s and writes to the DB, so we never spawn a thread per
+    /// `persist_sessions` call (which previously happened on every submit /
+    /// switch). Initialized lazily via `init_persister`.
+    persister: Option<crossbeam_channel::Sender<PersistMsg>>,
     pub rt_handle: Option<tokio::runtime::Handle>,
     pub scroll_bottom: bool,
     pub conversation_history: ConversationHistory,
@@ -112,6 +134,16 @@ pub struct RupooApp {
     pub approve_all: bool,
     /// Current CLI layout mode — controls rendering style.
     pub layout_mode: LayoutMode,
+    /// Rendering backend. Defaults to the `Ratatui` companion surface; the
+    /// legacy `Terminal` printer remains available as a fallback (see `RenderMode`).
+    pub render_mode: RenderMode,
+}
+
+/// One queued session-persistence write, handed to the background worker.
+struct PersistMsg {
+    id: String,
+    label: String,
+    json: String,
 }
 
 #[allow(dead_code)]
@@ -121,32 +153,59 @@ impl RupooApp {
         self
     }
 
-    pub fn persist_sessions(&self) {
-        let repo = self.repo.clone();
-        let handle = self.rt_handle.clone();
-        if let (Some(repo), Some(handle)) = (repo, handle) {
-            let messages = self.messages.clone();
-            let messages_json =
-                serde_json::to_string(&messages).unwrap_or_else(|_| "[]".to_string());
-            let sessions = self.sessions.clone();
-            let active_id = sessions
-                .iter()
-                .find(|s| s.active)
-                .map(|s| s.id.clone())
-                .unwrap_or_else(|| "default".to_string());
-            let active_label = sessions
-                .iter()
-                .find(|s| s.active)
-                .map(|s| s.label.clone())
-                .unwrap_or_else(|| "default".to_string());
-            std::thread::spawn(move || {
-                handle.block_on(async {
-                    let _ = repo
-                        .save_ui_session(&active_id, &active_label, &messages_json, true)
-                        .await;
-                });
-            });
+    /// Spawn the background persistence worker. Idempotent — calling it more
+    /// than once is a no-op. Called once after the repo is attached.
+    pub fn init_persister(&mut self) {
+        if self.persister.is_some() {
+            return;
         }
+        let (Some(repo), Some(handle)) = (self.repo.clone(), self.rt_handle.clone()) else {
+            return;
+        };
+        let (tx, rx) = crossbeam_channel::unbounded::<PersistMsg>();
+        std::thread::spawn(move || {
+            // FIFO channel guarantees snapshots are written in send order,
+            // so the latest state always wins — stricter than the old
+            // spawn-per-call approach where writes could race.
+            while let Ok(msg) = rx.recv() {
+                let _ = handle.block_on(repo.save_ui_session(&msg.id, &msg.label, &msg.json, true));
+            }
+        });
+        self.persister = Some(tx);
+    }
+
+    pub fn persist_sessions(&self) {
+        let active_id = self
+            .sessions
+            .iter()
+            .find(|s| s.active)
+            .map(|s| s.id.clone())
+            .unwrap_or_else(|| "default".to_string());
+        let active_label = self
+            .sessions
+            .iter()
+            .find(|s| s.active)
+            .map(|s| s.label.clone())
+            .unwrap_or_else(|| "default".to_string());
+        let json = serde_json::to_string(&self.messages).unwrap_or_else(|_| "[]".to_string());
+
+        // Fast path: hand the snapshot to the background writer.
+        if let Some(tx) = &self.persister {
+            let _ = tx.send(PersistMsg {
+                id: active_id,
+                label: active_label,
+                json,
+            });
+            return;
+        }
+
+        // Fallback (e.g. tests without a persister): original spawn-per-call.
+        let (Some(repo), Some(handle)) = (self.repo.clone(), self.rt_handle.clone()) else {
+            return;
+        };
+        std::thread::spawn(move || {
+            let _ = handle.block_on(repo.save_ui_session(&active_id, &active_label, &json, true));
+        });
     }
 
     pub fn new(agent_tx: Option<Sender<TuiToAgent>>, rt_handle: tokio::runtime::Handle) -> Self {
@@ -184,6 +243,8 @@ impl RupooApp {
             input_history_index: 0,
             model_label: "not configured".to_string(),
             session_messages: std::collections::HashMap::new(),
+            session_raw: std::collections::HashMap::new(),
+            persister: None,
             rt_handle: Some(rt_handle),
             scroll_bottom: true,
             conversation_history: ConversationHistory::new(crate::cli::HISTORY_DEFAULT_MAX_TURNS)
@@ -198,6 +259,7 @@ impl RupooApp {
             cancel_flag: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             approve_all: false,
             layout_mode: LayoutMode::Chat,
+            render_mode: RenderMode::Terminal,
         }
     }
 
@@ -207,6 +269,21 @@ impl RupooApp {
             .find(|s| s.active)
             .map(|s| s.id.clone())
             .unwrap_or_else(|| "default".to_string())
+    }
+
+    /// Return the parsed messages for a session, parsing lazily from the
+    /// stored raw JSON on first access (and caching the result).
+    pub fn get_session_messages(&mut self, id: &str) -> Vec<ChatMessage> {
+        if let Some(m) = self.session_messages.get(id) {
+            return m.clone();
+        }
+        let parsed = self
+            .session_raw
+            .get(id)
+            .and_then(|raw| serde_json::from_str::<Vec<ChatMessage>>(raw).ok())
+            .unwrap_or_default();
+        self.session_messages.insert(id.to_string(), parsed.clone());
+        parsed
     }
 
     pub fn switch_session(&mut self, session_id: &str) {
@@ -222,11 +299,7 @@ impl RupooApp {
         for s in &mut self.sessions {
             s.active = s.id == session_id;
         }
-        self.messages = self
-            .session_messages
-            .get(session_id)
-            .cloned()
-            .unwrap_or_default();
+        self.messages = self.get_session_messages(session_id);
         self.persist_sessions();
     }
 
