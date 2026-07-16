@@ -3,7 +3,7 @@
 Rupoo 是一个基于终端的 AI 助手，采用原生 REPL 界面，支持渲染代码块、Markdown 渲染、主题切换和 Claude Code 风格的工具调用显示 —— 所有功能都由双模式代理引擎（聊天 + 计划）驱动。
 
 ```
-版本:    0.6.0          语言: Rust 2021
+版本:    0.6.1          语言: Rust 2021
 代码行数: ~48,000       测试:    291 ✅
 界面:    原生 REPL      LLM:     Anthropic / OpenAI / DeepSeek / Ollama
 数据库:  SQLite (FTS5)  记忆:    混合搜索 (FTS5 + 向量)
@@ -89,17 +89,17 @@ rupoo serve-status    # 查看运行状态
 
 | 平台 | 下载文件 |
 |------|----------|
-| 🍎 **macOS Apple Silicon** (M1/M2/M3/M4) | `rupoo-v0.5.0-aarch64-apple-darwin.tar.gz` |
-| 🍎 **macOS Intel** | `rupoo-v0.5.0-x86_64-apple-darwin.tar.gz` |
-| 🐧 **Linux x86_64** | `rupoo-v0.5.0-x86_64-unknown-linux-gnu.tar.gz` |
-| 🐧 **Linux ARM64** (树莓派、AWS Graviton) | `rupoo-v0.5.0-aarch64-unknown-linux-gnu.tar.gz` |
-| 🪟 **Windows x86_64** | `rupoo-v0.5.0-x86_64-pc-windows-msvc.zip` |
+| 🍎 **macOS Apple Silicon** (M1/M2/M3/M4) | `rupoo-v0.6.1-aarch64-apple-darwin.tar.gz` |
+| 🍎 **macOS Intel** | `rupoo-v0.6.1-x86_64-apple-darwin.tar.gz` |
+| 🐧 **Linux x86_64** | `rupoo-v0.6.1-x86_64-unknown-linux-gnu.tar.gz` |
+| 🐧 **Linux ARM64** (树莓派、AWS Graviton) | `rupoo-v0.6.1-aarch64-unknown-linux-gnu.tar.gz` |
+| 🪟 **Windows x86_64** | `rupoo-v0.6.1-x86_64-pc-windows-msvc.zip` |
 
 #### macOS
 
 ```bash
 # 将 <文件> 替换为你平台的压缩包
-tar xzf rupoo-v0.5.0-aarch64-apple-darwin.tar.gz
+tar xzf rupoo-v0.6.1-aarch64-apple-darwin.tar.gz
 mv rupoo /usr/local/bin/
 # 验证
 rupoo --help
@@ -112,22 +112,22 @@ rupoo --help
 
 ```bash
 # x86_64
-tar xzf rupoo-v0.5.0-x86_64-unknown-linux-gnu.tar.gz
+tar xzf rupoo-v0.6.1-x86_64-unknown-linux-gnu.tar.gz
 sudo mv rupoo /usr/local/bin/
 
 # ARM64（如树莓派）
-tar xzf rupoo-v0.5.0-aarch64-unknown-linux-gnu.tar.gz
+tar xzf rupoo-v0.6.1-aarch64-unknown-linux-gnu.tar.gz
 sudo mv rupoo /usr/local/bin/
 ```
 
 #### Windows
 
-1. 下载 `rupoo-v0.5.0-x86_64-pc-windows-msvc.zip`
+1. 下载 `rupoo-v0.6.1-x86_64-pc-windows-msvc.zip`
 2. 解压压缩包
 3. 将 `rupoo.exe` 移动到 `PATH` 环境变量中的目录（如 `C:\Windows\System32\` 或自定义路径）
 4. 打开新终端，运行 `rupoo --help`
 
-> 💡 或用 PowerShell：`Expand-Archive rupoo-v0.5.0-x86_64-pc-windows-msvc.zip -DestinationPath C:\Users\你的用户名\bin`
+> 💡 或用 PowerShell：`Expand-Archive rupoo-v0.6.1-x86_64-pc-windows-msvc.zip -DestinationPath C:\Users\你的用户名\bin`
 
 ### 从源码安装
 
@@ -236,6 +236,18 @@ v0.6.0 聚焦安全边界与代码重复两大技术债务，并补齐若干健�
 - **TUI 消息时间戳**：用户/系统/错误气泡与 Work 模式助手消息显示 `[HH:MM:SS]`。
 - 移除未使用的 `syntect` 死依赖。
 
+### Ratatui 人文关怀伴侣 TUI（默认渲染器）
+
+默认 REPL 现已通过 **ratatui** 渲染为单栏、即时通讯（IM）风格的聊天流 —— 表面极简，内里有人文。设置 `RUPOO_TUI=0`（或 `false`/`off`/`no`）可回退到经典纯终端输出。
+
+- **单栏聊天流** —— 向下生长的对话流，顶部一行细状态条 + 底部一行输入框。
+- **人文内联** —— AI 思考以柔和斜体块呈现，工具活动以内联 `⏺` 行展示，阶段提示直接出现在流内；没有独立面板。
+- **IM 风格滚动** —— `follow` 钉底最新消息；`↑`/`↓` 细粒度滚动、`PageUp`/`PageDown` 整页滚动、`Ctrl+P`/`Ctrl+N` 召回历史、鼠标滚轮滚动。
+- **实时运行状态面板** —— 右下角紧凑面板汇总正在运行的工具（`⏺ 读取文件 2 · 网络搜索 1`）；按 `]` 展开为迷你活动日志，工作流结束后自动冻结。
+- **可中断** —— `Esc` / `Ctrl-C` 温柔取消正在运行的一轮，不会退出程序。
+
+所有渲染行为均由 ratatui 快照测试覆盖（`cargo test --bin rupoo`）。
+
 ---
 
 ## 🎯 v0.4.0 新功能
@@ -293,13 +305,15 @@ v0.6.0 聚焦安全边界与代码重复两大技术债务，并补齐若干健�
 | 按键 | 操作 |
 |------|------|
 | `Enter` | 发送消息 |
-| `↑` / `↓` | 导航历史记录 |
+| `↑` / `↓` | 滚动聊天流（细粒度） |
+| `PageUp` / `PageDown` | 滚动聊天流（整页） |
+| `Ctrl+P` / `Ctrl+N` | 召回上一条 / 下一条输入历史 |
+| `]` | 切换运行状态面板 |
 | `Ctrl+R` | 增量搜索 |
-| `Ctrl+C` | 取消操作 |
+| `Ctrl+C` / `Esc` | 取消正在运行的操作 |
 | `Ctrl+D` | 退出 |
 | `Ctrl+L` | 清空屏幕 |
 | `Tab` | 自动补全命令 |
-| `Ctrl+N` | 新建会话 |
 
 ---
 

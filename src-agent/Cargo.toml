@@ -1,6 +1,6 @@
 [package]
 name = "rupoo"
-version = "0.6.0"
+version = "0.6.1"
 edition = "2021"
 authors = ["Steventsang18"]
 description = "AI-powered Terminal Assistant — native REPL with plan execution, memory, and MCP support"

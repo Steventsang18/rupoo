@@ -5,7 +5,7 @@
 Rupoo is a terminal-based AI assistant with a native REPL interface, featuring rendered code blocks, Markdown rendering, theme switching, and Claude Code–style tool call display — driven by a triple-mode agent engine (Chat + Plan + Loop).
 
 ```
-Version:   0.6.0          Language: Rust 2021
+Version:   0.6.1          Language: Rust 2021
 Lines:     ~48,000        Tests:    291 ✅
 Interface: Native REPL    LLM:      Anthropic / OpenAI / DeepSeek / Ollama
 DB:        SQLite (FTS5)  Memory:   Hybrid Search (FTS5 + Vector)
@@ -90,17 +90,17 @@ Download the archive for your platform from the [latest release](https://github.
 
 | Platform | Download |
 |----------|----------|
-| 🍎 **macOS Apple Silicon** (M1/M2/M3/M4) | `rupoo-v0.5.0-aarch64-apple-darwin.tar.gz` |
-| 🍎 **macOS Intel** | `rupoo-v0.5.0-x86_64-apple-darwin.tar.gz` |
-| 🐧 **Linux x86_64** | `rupoo-v0.5.0-x86_64-unknown-linux-gnu.tar.gz` |
-| 🐧 **Linux ARM64** (Raspberry Pi, AWS Graviton) | `rupoo-v0.5.0-aarch64-unknown-linux-gnu.tar.gz` |
-| 🪟 **Windows x86_64** | `rupoo-v0.5.0-x86_64-pc-windows-msvc.zip` |
+| 🍎 **macOS Apple Silicon** (M1/M2/M3/M4) | `rupoo-v0.6.1-aarch64-apple-darwin.tar.gz` |
+| 🍎 **macOS Intel** | `rupoo-v0.6.1-x86_64-apple-darwin.tar.gz` |
+| 🐧 **Linux x86_64** | `rupoo-v0.6.1-x86_64-unknown-linux-gnu.tar.gz` |
+| 🐧 **Linux ARM64** (Raspberry Pi, AWS Graviton) | `rupoo-v0.6.1-aarch64-unknown-linux-gnu.tar.gz` |
+| 🪟 **Windows x86_64** | `rupoo-v0.6.1-x86_64-pc-windows-msvc.zip` |
 
 #### macOS
 
 ```bash
 # Replace <file> with your platform's archive
-tar xzf rupoo-v0.5.0-aarch64-apple-darwin.tar.gz
+tar xzf rupoo-v0.6.1-aarch64-apple-darwin.tar.gz
 mv rupoo /usr/local/bin/
 # Verify
 rupoo --help
@@ -113,22 +113,22 @@ rupoo --help
 
 ```bash
 # x86_64
-tar xzf rupoo-v0.5.0-x86_64-unknown-linux-gnu.tar.gz
+tar xzf rupoo-v0.6.1-x86_64-unknown-linux-gnu.tar.gz
 sudo mv rupoo /usr/local/bin/
 
 # ARM64 (e.g. Raspberry Pi)
-tar xzf rupoo-v0.5.0-aarch64-unknown-linux-gnu.tar.gz
+tar xzf rupoo-v0.6.1-aarch64-unknown-linux-gnu.tar.gz
 sudo mv rupoo /usr/local/bin/
 ```
 
 #### Windows
 
-1. Download `rupoo-v0.5.0-x86_64-pc-windows-msvc.zip`
+1. Download `rupoo-v0.6.1-x86_64-pc-windows-msvc.zip`
 2. Extract the archive
 3. Move `rupoo.exe` to a directory in your `PATH` (e.g., `C:\Windows\System32\` or create a custom path)
 4. Open a new terminal and run `rupoo --help`
 
-> 💡 Or use PowerShell: `Expand-Archive rupoo-v0.5.0-x86_64-pc-windows-msvc.zip -DestinationPath C:\Users\YourName\bin`
+> 💡 Or use PowerShell: `Expand-Archive rupoo-v0.6.1-x86_64-pc-windows-msvc.zip -DestinationPath C:\Users\YourName\bin`
 
 ### Install from Source
 
@@ -238,6 +238,18 @@ v0.6.0 targets the two biggest technical debts — security boundaries and code 
 - **TUI message timestamps**: user/system/error bubbles and Work-mode assistant messages show `[HH:MM:SS]`.
 - Removed the unused `syntect` dead dependency.
 
+### Ratatui Humanistic Companion TUI (default renderer)
+
+The default REPL now renders through **ratatui** as a single-column, IM-style chat stream — minimal on the surface, human on the inside. Set `RUPOO_TUI=0` (or `false`/`off`/`no`) to fall back to the classic plain-terminal output.
+
+- **Single-column stream** — a downward-growing chat flow with a thin status bar on top and a one-line input at the bottom.
+- **Inline humanity** — AI thinking shows as a soft italic block, tool activity as inline `⏺` rows, and phase hints appear inside the stream; no separate panels.
+- **IM-style scrolling** — `follow` pins to the newest message; `↑`/`↓` fine scroll, `PageUp`/`PageDown` page scroll, `Ctrl+P`/`Ctrl+N` recall history, mouse wheel scrolls.
+- **Live run-status panel** — a compact bottom-right panel collates active tools (`⏺ 读取文件 2 · 网络搜索 1`); press `]` to expand into a mini activity log that freezes when the workflow ends.
+- **Interrupt-friendly** — `Esc` / `Ctrl-C` gracefully cancels a running turn without exiting.
+
+All renderer behavior is covered by ratatui snapshot tests (`cargo test --bin rupoo`).
+
 ---
 
 ## 🎯 New Features in v0.4.0
@@ -295,13 +307,15 @@ Combined Results (RRF ranking)
 | Key | Action |
 |-----|--------|
 | `Enter` | Send message |
-| `↑` / `↓` | Navigate history |
+| `↑` / `↓` | Scroll chat stream (fine) |
+| `PageUp` / `PageDown` | Scroll chat stream (page) |
+| `Ctrl+P` / `Ctrl+N` | Recall previous / next input history |
+| `]` | Toggle run-status panel |
 | `Ctrl+R` | Incremental search |
-| `Ctrl+C` | Cancel operation |
+| `Ctrl+C` / `Esc` | Cancel running operation |
 | `Ctrl+D` | Exit |
 | `Ctrl+L` | Clear screen |
 | `Tab` | Auto-complete commands |
-| `Ctrl+N` | New session |
 
 ---
 
