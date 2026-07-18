@@ -1,6 +1,7 @@
 use crate::cognitive::goal::AgentGoal;
 use crate::error::AgentResult;
 use crate::planning::{ExecutionPlan, PlanScore, Planner};
+use crate::task::think_step;
 use async_trait::async_trait;
 
 /// 规划器默认实现（桩，Task 2.2 填充）
@@ -10,20 +11,27 @@ pub struct PlannerImpl;
 impl Planner for PlannerImpl {
     async fn generate_alternatives(
         &self,
-        _goal: &AgentGoal,
-        _n: usize,
+        goal: &AgentGoal,
+        n: usize,
     ) -> AgentResult<Vec<ExecutionPlan>> {
-        Ok(Vec::new())
+        // 离线兜底：无 LLM 时无法拆解多方案，生成 n 个「先分析目标」的回退方案，
+        // 保证规划层可继续择优（真实多方案应由 LLM 在认知层产出并注入）。
+        let mut plans = Vec::with_capacity(n.max(1));
+        for k in 0..n.max(1) {
+            plans.push(ExecutionPlan::new(
+                goal.id.as_str(),
+                &format!("fallback-{}", k),
+                vec![think_step(&format!(
+                    "分析目标并制定执行步骤：{}",
+                    goal.primary_objective
+                ))],
+            ));
+        }
+        Ok(plans)
     }
 
-    async fn score(&self, _plan: &ExecutionPlan) -> AgentResult<PlanScore> {
-        Ok(PlanScore {
-            success_probability: 0.5,
-            resource_cost: 0.5,
-            risk_level: 0.5,
-            weighted_total: 0.5,
-            scoring_log: vec!["默认评分（桩实现）".to_string()],
-        })
+    async fn score(&self, plan: &ExecutionPlan) -> AgentResult<PlanScore> {
+        Ok(crate::planning::scorer::PlanScorer::new().score_plan(plan))
     }
 
     async fn select_best(

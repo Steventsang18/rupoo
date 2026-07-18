@@ -181,3 +181,65 @@ pub fn diff_check() -> serde_json::Value {
         "required": []
     })
 }
+
+// ---------------------------------------------------------------------------
+// File edit (str_replace)
+// ---------------------------------------------------------------------------
+
+pub fn file_edit() -> serde_json::Value {
+    serde_json::json!({
+        "type": "object",
+        "properties": {
+            "path": {
+                "type": "string",
+                "description": "Path to the file to edit"
+            },
+            "old_string": {
+                "type": "string",
+                "description": "Exact text to replace. Must match the file content exactly (including whitespace). Must be unique unless replace_all is true."
+            },
+            "new_string": {
+                "type": "string",
+                "description": "Replacement text"
+            },
+            "replace_all": {
+                "type": "boolean",
+                "description": "Replace all occurrences of old_string (default false). Required when old_string appears more than once."
+            }
+        },
+        "required": ["path", "old_string", "new_string"]
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Code search (local grep / ripgrep-like)
+// ---------------------------------------------------------------------------
+
+pub fn code_search() -> serde_json::Value {
+    serde_json::json!({
+        "type": "object",
+        "properties": {
+            "pattern": {
+                "type": "string",
+                "description": "Substring to search for in file contents (case-sensitive by default)"
+            },
+            "path": {
+                "type": "string",
+                "description": "Directory or file to search (defaults to current directory)"
+            },
+            "file_glob": {
+                "type": "string",
+                "description": "Only search files whose name matches this glob, e.g. '*.rs' (optional)"
+            },
+            "ignore_case": {
+                "type": "boolean",
+                "description": "Case-insensitive matching (default false)"
+            },
+            "max_results": {
+                "type": "integer",
+                "description": "Maximum number of matches to return (default 200)"
+            }
+        },
+        "required": ["pattern"]
+    })
+}

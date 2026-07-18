@@ -740,6 +740,9 @@ impl ReplSession {
             AgentToTui::LayoutModeHint(_) => {
                 // Already handled above
             }
+            AgentToTui::ContextUsage { .. } => {
+                // Context gauge is a ratatui-only feature; ignored on the legacy path.
+            }
             AgentToTui::StreamChunk { text } => match self.app.layout_mode {
                 LayoutMode::Chat => {
                     output::clear_thinking_summary();
@@ -1719,6 +1722,7 @@ pub fn run_tui_with_agent(
 
     let repo_clone = std::sync::Arc::clone(&repo);
     let handle_for_agent = rt_handle.clone();
+    let model_label_for_bridge = model_label.clone();
     std::thread::spawn(move || {
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             handle_for_agent.block_on(async move {
@@ -1732,6 +1736,7 @@ pub fn run_tui_with_agent(
                     tool_executor: std::sync::Arc::clone(&tool_executor),
                     approve_all,
                     conversation_history,
+                    model_label: model_label_for_bridge,
                     session_id: "default".to_string(),
                     intent_state: rupoo::signal::IntentState::new(),
                     cancelled: cancel_flag_bridge,

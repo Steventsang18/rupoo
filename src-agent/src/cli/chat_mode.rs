@@ -23,7 +23,7 @@ impl AgentUiBridge {
             let _ = self.ui_tx.send(AgentToTui::Message(ChatMessage::error(
                 "LLM not configured. Please set up your API key first.".to_string(),
             )));
-            let _ = self.ui_tx.send(AgentToTui::Idle);
+            let _ = self.send_idle();
             return;
         }
 
@@ -136,7 +136,7 @@ impl AgentUiBridge {
                     ),
                 )));
                 self.conversation_history.push_user(user_message);
-                let _ = self.ui_tx.send(AgentToTui::Idle);
+                let _ = self.send_idle();
                 return;
             }
         };
@@ -174,7 +174,7 @@ impl AgentUiBridge {
                         .send(AgentToTui::Message(ChatMessage::assistant(full_response)));
                 }
 
-                let _ = self.ui_tx.send(AgentToTui::Idle);
+                let _ = self.send_idle();
             }
             Err(e) => {
                 // Use user-friendly error message
@@ -214,7 +214,7 @@ impl AgentUiBridge {
                 self.conversation_history
                     .push_assistant(&format!("Error: {}", e));
 
-                let _ = self.ui_tx.send(AgentToTui::Idle);
+                let _ = self.send_idle();
             }
         }
     }

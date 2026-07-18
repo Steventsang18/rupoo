@@ -160,6 +160,11 @@ pub enum AgentToTui {
     Thinking,
     /// The agent is idle (no pending work).
     Idle,
+    /// Live context-window usage, as a percentage (0–100) of the configured
+    /// history token budget. Emitted by the bridge immediately before `Idle`
+    /// so the TUI footer can render a context gauge. `None`-equivalent data is
+    /// avoided: the bridge always clamps to `0..=100`.
+    ContextUsage { pct: u8 },
     /// Token usage counters updated.
     TokenUpdate { in_count: u64, out_count: u64 },
     /// The agent requires approval before executing a tool.

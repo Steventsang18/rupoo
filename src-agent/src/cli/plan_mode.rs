@@ -16,7 +16,7 @@ impl AgentUiBridge {
             let _ = self.ui_tx.send(AgentToTui::Message(ChatMessage::error(
                 "LLM not configured. Please set up your API key first.".to_string(),
             )));
-            let _ = self.ui_tx.send(AgentToTui::Idle);
+            let _ = self.send_idle();
             return;
         }
 
@@ -35,7 +35,7 @@ impl AgentUiBridge {
                 let _ = self.ui_tx.send(AgentToTui::Message(ChatMessage::error(
                     "LLM gateway not available".to_string(),
                 )));
-                let _ = self.ui_tx.send(AgentToTui::Idle);
+                let _ = self.send_idle();
                 return;
             }
         };
@@ -93,7 +93,7 @@ impl AgentUiBridge {
                             "Failed to save plan: {}",
                             e
                         ))));
-                    let _ = self.ui_tx.send(AgentToTui::Idle);
+                    let _ = self.send_idle();
                     return;
                 }
 
@@ -106,7 +106,7 @@ impl AgentUiBridge {
                         let _ = self.ui_tx.send(AgentToTui::Message(ChatMessage::assistant(
                             "Plan already completed".to_string(),
                         )));
-                        let _ = self.ui_tx.send(AgentToTui::Idle);
+                        let _ = self.send_idle();
                     }
                     Err(e) => {
                         let _ = self
@@ -115,7 +115,7 @@ impl AgentUiBridge {
                                 "Plan error: {}",
                                 e
                             ))));
-                        let _ = self.ui_tx.send(AgentToTui::Idle);
+                        let _ = self.send_idle();
                     }
                 }
             }
@@ -126,7 +126,7 @@ impl AgentUiBridge {
                         "Failed to generate plan: {}",
                         e
                     ))));
-                let _ = self.ui_tx.send(AgentToTui::Idle);
+                let _ = self.send_idle();
             }
         }
     }
@@ -177,7 +177,7 @@ impl AgentUiBridge {
                             let _ = self.ui_tx.send(AgentToTui::FileChanges { files: changes });
                         }
 
-                        let _ = self.ui_tx.send(AgentToTui::Idle);
+                        let _ = self.send_idle();
                         *self.pending_plan.lock().unwrap_or_else(|e| e.into_inner()) = None;
                         *self
                             .pending_step_index
@@ -198,7 +198,7 @@ impl AgentUiBridge {
                         let _ = self.ui_tx.send(AgentToTui::FileChanges { files: changes });
                     }
 
-                    let _ = self.ui_tx.send(AgentToTui::Idle);
+                    let _ = self.send_idle();
                     *self.pending_plan.lock().unwrap_or_else(|e| e.into_inner()) = None;
                     *self
                         .pending_step_index
@@ -212,7 +212,7 @@ impl AgentUiBridge {
                         .send(AgentToTui::Message(ChatMessage::assistant(format!(
                             "Failed: {e}"
                         ))));
-                    let _ = self.ui_tx.send(AgentToTui::Idle);
+                    let _ = self.send_idle();
                     *self.pending_plan.lock().unwrap_or_else(|e| e.into_inner()) = None;
                     *self
                         .pending_step_index
@@ -226,7 +226,7 @@ impl AgentUiBridge {
                         .send(AgentToTui::Message(ChatMessage::assistant(format!(
                             "Input needed: {p}"
                         ))));
-                    let _ = self.ui_tx.send(AgentToTui::Idle);
+                    let _ = self.send_idle();
                     *self.pending_plan.lock().unwrap_or_else(|e| e.into_inner()) = None;
                     *self
                         .pending_step_index
@@ -343,7 +343,7 @@ impl AgentUiBridge {
                         .send(AgentToTui::Message(ChatMessage::assistant(format!(
                             "Error: {e}"
                         ))));
-                    let _ = self.ui_tx.send(AgentToTui::Idle);
+                    let _ = self.send_idle();
                     *self.pending_plan.lock().unwrap_or_else(|e| e.into_inner()) = None;
                     *self
                         .pending_step_index

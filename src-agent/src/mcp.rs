@@ -364,11 +364,13 @@ mod tests {
     async fn test_list_tools() {
         let executor = McpToolExecutor::new();
         let tools = executor.list_tools().await;
-        assert_eq!(tools.len(), 9);
+        assert_eq!(tools.len(), 11);
         assert!(tools.contains(&"echo".into()));
         assert!(tools.contains(&"file_read".into()));
         assert!(tools.contains(&"file_write".into()));
+        assert!(tools.contains(&"file_edit".into()));
         assert!(tools.contains(&"list_directory".into()));
+        assert!(tools.contains(&"code_search".into()));
         assert!(tools.contains(&"web_search".into()));
         assert!(tools.contains(&"run_tests".into()));
         assert!(tools.contains(&"check_output".into()));

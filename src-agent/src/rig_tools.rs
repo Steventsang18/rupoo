@@ -5,7 +5,7 @@
 //! Note: rig-core's Tool trait uses `impl Future` return types (not
 //! #[async_trait]), so all methods use `async move { }` blocks.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
@@ -47,14 +47,24 @@ macro_rules! rupoo_tools {
                     $crate::rig_tools::FileWriteTool::with_jail(__root.clone())
                 );
                 $register!(
+                    "file_edit",
+                    $crate::rig_tools::FileEditTool::with_jail(__root.clone())
+                );
+                $register!(
                     "list_directory",
                     $crate::rig_tools::ListDirTool::with_jail(__root.clone())
+                );
+                $register!(
+                    "code_search",
+                    $crate::rig_tools::CodeSearchTool::with_jail(__root.clone())
                 );
             }
             None => {
                 $register!("file_read", $crate::rig_tools::FileReadTool::new());
                 $register!("file_write", $crate::rig_tools::FileWriteTool::new());
+                $register!("file_edit", $crate::rig_tools::FileEditTool::new());
                 $register!("list_directory", $crate::rig_tools::ListDirTool::new());
+                $register!("code_search", $crate::rig_tools::CodeSearchTool::new());
             }
         }
     }};
@@ -294,6 +304,149 @@ impl rig::tool::Tool for FileWriteTool {
 }
 
 // ---------------------------------------------------------------------------
+// File edit tool (str_replace)
+// ---------------------------------------------------------------------------
+
+#[derive(Deserialize)]
+pub struct FileEditArgs {
+    pub path: String,
+    pub old_string: String,
+    pub new_string: String,
+    #[serde(default)]
+    pub replace_all: Option<bool>,
+}
+
+#[derive(Serialize)]
+pub struct FileEditOutput {
+    pub success: bool,
+    pub replacements: usize,
+    pub diff: String,
+    pub error: Option<String>,
+}
+
+pub struct FileEditTool {
+    jail_root: Option<PathBuf>,
+}
+
+#[allow(clippy::manual_async_fn)]
+impl rig::tool::Tool for FileEditTool {
+    const NAME: &'static str = "file_edit";
+    type Error = ToolCallError;
+    type Args = FileEditArgs;
+    type Output = FileEditOutput;
+
+    fn name(&self) -> String {
+        "file_edit".into()
+    }
+
+    fn definition(
+        &self,
+        _prompt: String,
+    ) -> impl std::future::Future<Output = rig::completion::ToolDefinition>
+           + rig::wasm_compat::WasmCompatSend
+           + rig::wasm_compat::WasmCompatSync {
+        async move {
+            rig::completion::ToolDefinition {
+                name: "file_edit".into(),
+                description: "Make a precise local edit to an existing file by replacing an exact string (str_replace). Prefer this over rewriting whole files. Returns a diff preview of the change.".into(),
+                parameters: crate::tools::schema::file_edit(),
+            }
+        }
+    }
+
+    fn call(
+        &self,
+        args: FileEditArgs,
+    ) -> impl std::future::Future<Output = Result<FileEditOutput, Self::Error>>
+           + rig::wasm_compat::WasmCompatSend {
+        async move {
+            let safe_path = match resolve_path(&self.jail_root, &args.path) {
+                Ok(p) => p,
+                Err(e) => {
+                    return async move {
+                        Ok(FileEditOutput {
+                            success: false,
+                            replacements: 0,
+                            diff: String::new(),
+                            error: Some(e),
+                        })
+                    }
+                    .await
+                }
+            };
+
+            let current = match tokio::fs::read_to_string(&safe_path).await {
+                Ok(c) => c,
+                Err(e) => {
+                    return Ok(FileEditOutput {
+                        success: false,
+                        replacements: 0,
+                        diff: String::new(),
+                        error: Some(format!("cannot read '{}' for editing: {e}", args.path)),
+                    });
+                }
+            };
+
+            let count = current.matches(&args.old_string).count();
+
+            if count == 0 {
+                return Ok(FileEditOutput {
+                    success: false,
+                    replacements: 0,
+                    diff: String::new(),
+                    error: Some(
+                        "old_string not found in file. Make sure it matches exactly (including whitespace and line endings).".into(),
+                    ),
+                });
+            }
+
+            let replace_all = args.replace_all.unwrap_or(false);
+            if count > 1 && !replace_all {
+                return Ok(FileEditOutput {
+                    success: false,
+                    replacements: 0,
+                    diff: String::new(),
+                    error: Some(format!(
+                        "old_string is not unique: found {count} occurrences. Set replace_all=true to replace all, or make old_string more specific."
+                    )),
+                });
+            }
+
+            let new_content = if replace_all {
+                current.replace(&args.old_string, &args.new_string)
+            } else {
+                current.replacen(&args.old_string, &args.new_string, 1)
+            };
+
+            match tokio::fs::write(&safe_path, &new_content).await {
+                Ok(()) => {
+                    let diff = unified_diff(&current, &new_content);
+                    // Truncate at char boundary to avoid UTF-8 panic
+                    let diff = if diff.len() > 6000 {
+                        let end = diff.floor_char_boundary(6000);
+                        format!("{}...[truncated]", &diff[..end])
+                    } else {
+                        diff
+                    };
+                    Ok(FileEditOutput {
+                        success: true,
+                        replacements: count,
+                        diff,
+                        error: None,
+                    })
+                }
+                Err(e) => Ok(FileEditOutput {
+                    success: false,
+                    replacements: 0,
+                    diff: String::new(),
+                    error: Some(format!("cannot write '{}': {e}", args.path)),
+                }),
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // List directory tool
 // ---------------------------------------------------------------------------
 
@@ -389,6 +542,116 @@ impl rig::tool::Tool for ListDirTool {
                     error: Some(format!("cannot list '{}': {e}", args.path)),
                 }),
             }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Local code search tool (ripgrep-like, dependency-free)
+// ---------------------------------------------------------------------------
+
+#[derive(Deserialize)]
+pub struct CodeSearchArgs {
+    pub pattern: String,
+    pub path: Option<String>,
+    pub file_glob: Option<String>,
+    #[serde(default)]
+    pub ignore_case: Option<bool>,
+    pub max_results: Option<usize>,
+}
+
+#[derive(Serialize)]
+pub struct SearchMatch {
+    pub file: String,
+    pub line: usize,
+    pub text: String,
+}
+
+#[derive(Serialize)]
+pub struct CodeSearchOutput {
+    pub matches: Vec<SearchMatch>,
+    pub match_count: usize,
+    pub success: bool,
+    pub error: Option<String>,
+}
+
+pub struct CodeSearchTool {
+    jail_root: Option<PathBuf>,
+}
+
+#[allow(clippy::manual_async_fn)]
+impl rig::tool::Tool for CodeSearchTool {
+    const NAME: &'static str = "code_search";
+    type Error = ToolCallError;
+    type Args = CodeSearchArgs;
+    type Output = CodeSearchOutput;
+
+    fn name(&self) -> String {
+        "code_search".into()
+    }
+
+    fn definition(
+        &self,
+        _prompt: String,
+    ) -> impl std::future::Future<Output = rig::completion::ToolDefinition>
+           + rig::wasm_compat::WasmCompatSend
+           + rig::wasm_compat::WasmCompatSync {
+        async move {
+            rig::completion::ToolDefinition {
+                name: "code_search".into(),
+                description: "Search local files for a substring (like grep/ripgrep). Use to find definitions, references, or usages across the codebase without running a shell command. Skips .git/node_modules/target and binary files.".into(),
+                parameters: crate::tools::schema::code_search(),
+            }
+        }
+    }
+
+    fn call(
+        &self,
+        args: CodeSearchArgs,
+    ) -> impl std::future::Future<Output = Result<CodeSearchOutput, Self::Error>>
+           + rig::wasm_compat::WasmCompatSend {
+        async move {
+            let root_str = match resolve_path(&self.jail_root, args.path.as_deref().unwrap_or("."))
+            {
+                Ok(p) => p,
+                Err(e) => {
+                    return async move {
+                        Ok(CodeSearchOutput {
+                            matches: vec![],
+                            match_count: 0,
+                            success: false,
+                            error: Some(e),
+                        })
+                    }
+                    .await
+                }
+            };
+            let root = std::path::PathBuf::from(&root_str);
+            let ignore_case = args.ignore_case.unwrap_or(false);
+            let max_results = args.max_results.unwrap_or(200).max(1);
+            let glob = args.file_glob.as_deref();
+
+            let mut matches = Vec::new();
+            let err = search_in_path(
+                &root,
+                &root,
+                &args.pattern,
+                ignore_case,
+                glob,
+                max_results,
+                &mut matches,
+            )
+            .err()
+            .map(|e| e.to_string());
+
+            let success = err.is_none();
+            let match_count = matches.len();
+            Ok(CodeSearchOutput {
+                matches,
+                match_count,
+                success,
+                error: err,
+            })
         }
     }
 }
@@ -660,6 +923,217 @@ fn resolve_path(jail_root: &Option<PathBuf>, path: &str) -> Result<String, Strin
 }
 
 // ---------------------------------------------------------------------------
+// Helpers: local code search (dependency-free, grep-like)
+// ---------------------------------------------------------------------------
+
+/// Directories skipped during local code search to avoid noise / bloat.
+const SKIP_DIRS: &[&str] = &[
+    ".git",
+    "node_modules",
+    "target",
+    "dist",
+    ".venv",
+    "venv",
+    "vendor",
+    ".idea",
+    ".cache",
+    "build",
+    "out",
+];
+
+/// Recursively search `path` for `pattern`, collecting matches into `matches`.
+fn search_in_path(
+    root: &Path,
+    path: &Path,
+    pattern: &str,
+    ignore_case: bool,
+    glob: Option<&str>,
+    max_results: usize,
+    matches: &mut Vec<SearchMatch>,
+) -> std::io::Result<()> {
+    if matches.len() >= max_results {
+        return Ok(());
+    }
+    let meta = std::fs::metadata(path)?;
+    if meta.is_file() {
+        search_file(path, root, pattern, ignore_case, max_results, matches)?;
+        return Ok(());
+    }
+    let mut entries: Vec<_> = std::fs::read_dir(path)?.collect::<Result<_, _>>()?;
+    entries.sort_by_key(|a| a.file_name());
+    for entry in entries {
+        if matches.len() >= max_results {
+            break;
+        }
+        let ft = entry.file_type()?;
+        let name = entry.file_name().to_string_lossy().to_string();
+        if ft.is_dir() {
+            if SKIP_DIRS.contains(&name.as_str()) {
+                continue;
+            }
+            search_in_path(
+                root,
+                &entry.path(),
+                pattern,
+                ignore_case,
+                glob,
+                max_results,
+                matches,
+            )?;
+        } else if ft.is_file() {
+            if let Some(g) = glob {
+                if !glob_match(&name, g) {
+                    continue;
+                }
+            }
+            search_file(
+                &entry.path(),
+                root,
+                pattern,
+                ignore_case,
+                max_results,
+                matches,
+            )?;
+        }
+    }
+    Ok(())
+}
+
+/// Search a single file for `pattern`, appending matches to `matches`.
+fn search_file(
+    path: &Path,
+    root: &Path,
+    pattern: &str,
+    ignore_case: bool,
+    max_results: usize,
+    matches: &mut Vec<SearchMatch>,
+) -> std::io::Result<()> {
+    let meta = std::fs::metadata(path)?;
+    if meta.len() > 5_000_000 {
+        return Ok(());
+    }
+    let content = match std::fs::read_to_string(path) {
+        Ok(c) => c,
+        Err(_) => return Ok(()), // skip binary / non-utf8
+    };
+    let rel = path
+        .strip_prefix(root)
+        .unwrap_or(path)
+        .to_string_lossy()
+        .to_string();
+    let needle = if ignore_case {
+        pattern.to_lowercase()
+    } else {
+        pattern.to_string()
+    };
+    for (idx, line) in content.lines().enumerate() {
+        let hay = if ignore_case {
+            line.to_lowercase()
+        } else {
+            line.to_string()
+        };
+        if hay.contains(&needle) {
+            matches.push(SearchMatch {
+                file: rel.clone(),
+                line: idx + 1,
+                text: line.to_string(),
+            });
+            if matches.len() >= max_results {
+                break;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Simple glob matcher supporting `*` (any sequence) and `?` (any char).
+fn glob_match(name: &str, pat: &str) -> bool {
+    glob_match_impl(name.as_bytes(), pat.as_bytes())
+}
+
+fn glob_match_impl(name: &[u8], pat: &[u8]) -> bool {
+    let (n, p) = (name.len(), pat.len());
+    let mut i = 0;
+    let mut j = 0;
+    let mut star: Option<usize> = None;
+    let mut mark = 0;
+    while i < n {
+        if j < p && (pat[j] == b'?' || pat[j] == name[i]) {
+            i += 1;
+            j += 1;
+        } else if j < p && pat[j] == b'*' {
+            star = Some(j);
+            mark = i;
+            j += 1;
+        } else if let Some(s) = star {
+            j = s + 1;
+            mark += 1;
+            i = mark;
+        } else {
+            return false;
+        }
+    }
+    while j < p && pat[j] == b'*' {
+        j += 1;
+    }
+    j == p
+}
+
+/// Produce a simple line-level diff preview between `old` and `new`.
+/// Removed lines are prefixed `-`, added lines `+`. Sufficient for an
+/// agent to preview an edit (not a full unified-diff with context).
+fn unified_diff(old: &str, new: &str) -> String {
+    let a: Vec<&str> = old.split_inclusive('\n').collect();
+    let b: Vec<&str> = new.split_inclusive('\n').collect();
+    let n = a.len();
+    let m = b.len();
+    let mut dp = vec![vec![0usize; m + 1]; n + 1];
+    for i in (0..n).rev() {
+        for j in (0..m).rev() {
+            dp[i][j] = if a[i] == b[j] {
+                dp[i + 1][j + 1] + 1
+            } else {
+                dp[i + 1][j + 1].max(dp[i + 1][j]).max(dp[i][j + 1])
+            };
+        }
+    }
+    let mut out = String::from("--- a\n+++ b\n");
+    let (mut i, mut j) = (0, 0);
+    while i < n && j < m {
+        if a[i] == b[j] {
+            i += 1;
+            j += 1;
+        } else if dp[i + 1][j + 1] >= dp[i + 1][j] && dp[i + 1][j + 1] >= dp[i][j + 1] {
+            out.push('-');
+            out.push_str(a[i]);
+            out.push('+');
+            out.push_str(b[j]);
+            i += 1;
+            j += 1;
+        } else if dp[i + 1][j] >= dp[i][j + 1] {
+            out.push('-');
+            out.push_str(a[i]);
+            i += 1;
+        } else {
+            out.push('+');
+            out.push_str(b[j]);
+            j += 1;
+        }
+    }
+    while i < n {
+        out.push('-');
+        out.push_str(a[i]);
+        i += 1;
+    }
+    while j < m {
+        out.push('+');
+        out.push_str(b[j]);
+        j += 1;
+    }
+    out
+}
+
+// ---------------------------------------------------------------------------
 // Tool constructors
 // ---------------------------------------------------------------------------
 
@@ -706,6 +1180,38 @@ impl ListDirTool {
     }
 }
 impl Default for ListDirTool {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl FileEditTool {
+    pub fn new() -> Self {
+        Self { jail_root: None }
+    }
+    pub fn with_jail(root: PathBuf) -> Self {
+        Self {
+            jail_root: Some(root),
+        }
+    }
+}
+impl Default for FileEditTool {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl CodeSearchTool {
+    pub fn new() -> Self {
+        Self { jail_root: None }
+    }
+    pub fn with_jail(root: PathBuf) -> Self {
+        Self {
+            jail_root: Some(root),
+        }
+    }
+}
+impl Default for CodeSearchTool {
     fn default() -> Self {
         Self::new()
     }
@@ -817,5 +1323,158 @@ mod tests {
             .unwrap();
         assert!(!output.success);
         assert!(output.error.unwrap().contains("blocked"));
+    }
+
+    #[tokio::test]
+    async fn test_file_edit_str_replace() {
+        let dir = tempfile::tempdir().unwrap();
+        let tool = FileEditTool::with_jail(dir.path().to_path_buf());
+        std::fs::write(dir.path().join("sample.txt"), "hello world\nfoo bar\n").unwrap();
+        let out = tool
+            .call(FileEditArgs {
+                path: "sample.txt".into(),
+                old_string: "world".into(),
+                new_string: "rupoo".into(),
+                replace_all: None,
+            })
+            .await
+            .unwrap();
+        assert!(out.success);
+        assert_eq!(out.replacements, 1);
+        let after = std::fs::read_to_string(dir.path().join("sample.txt")).unwrap();
+        assert!(after.contains("hello rupoo"));
+        assert!(out.diff.contains('-') && out.diff.contains('+'));
+    }
+
+    #[tokio::test]
+    async fn test_file_edit_not_found() {
+        let dir = tempfile::tempdir().unwrap();
+        let tool = FileEditTool::with_jail(dir.path().to_path_buf());
+        std::fs::write(dir.path().join("sample.txt"), "hello world\n").unwrap();
+        let out = tool
+            .call(FileEditArgs {
+                path: "sample.txt".into(),
+                old_string: "not present".into(),
+                new_string: "x".into(),
+                replace_all: None,
+            })
+            .await
+            .unwrap();
+        assert!(!out.success);
+        assert!(out.error.unwrap().contains("not found"));
+    }
+
+    #[tokio::test]
+    async fn test_file_edit_not_unique_without_replace_all() {
+        let dir = tempfile::tempdir().unwrap();
+        let tool = FileEditTool::with_jail(dir.path().to_path_buf());
+        std::fs::write(dir.path().join("sample.txt"), "a a a\n").unwrap();
+        let out = tool
+            .call(FileEditArgs {
+                path: "sample.txt".into(),
+                old_string: "a".into(),
+                new_string: "b".into(),
+                replace_all: None,
+            })
+            .await
+            .unwrap();
+        assert!(!out.success);
+        assert!(out.error.unwrap().contains("not unique"));
+    }
+
+    #[tokio::test]
+    async fn test_file_edit_replace_all() {
+        let dir = tempfile::tempdir().unwrap();
+        let tool = FileEditTool::with_jail(dir.path().to_path_buf());
+        std::fs::write(dir.path().join("sample.txt"), "a a a\n").unwrap();
+        let out = tool
+            .call(FileEditArgs {
+                path: "sample.txt".into(),
+                old_string: "a".into(),
+                new_string: "b".into(),
+                replace_all: Some(true),
+            })
+            .await
+            .unwrap();
+        assert!(out.success);
+        assert_eq!(out.replacements, 3);
+        let after = std::fs::read_to_string(dir.path().join("sample.txt")).unwrap();
+        assert_eq!(after, "b b b\n");
+    }
+
+    #[tokio::test]
+    async fn test_code_search_finds_match() {
+        let dir = tempfile::tempdir().unwrap();
+        let tool = CodeSearchTool::with_jail(dir.path().to_path_buf());
+        std::fs::write(dir.path().join("a.rs"), "fn main() {}\nfn helper() {}\n").unwrap();
+        std::fs::write(dir.path().join("b.txt"), "nothing here\n").unwrap();
+        let out = tool
+            .call(CodeSearchArgs {
+                pattern: "fn ".into(),
+                path: Some(".".into()),
+                file_glob: None,
+                ignore_case: None,
+                max_results: None,
+            })
+            .await
+            .unwrap();
+        assert!(out.success);
+        assert_eq!(out.match_count, 2);
+        assert!(out.matches.iter().all(|m| m.file.ends_with("a.rs")));
+    }
+
+    #[tokio::test]
+    async fn test_code_search_glob_and_case() {
+        let dir = tempfile::tempdir().unwrap();
+        let tool = CodeSearchTool::with_jail(dir.path().to_path_buf());
+        std::fs::write(dir.path().join("a.rs"), "HELLO world\n").unwrap();
+        std::fs::write(dir.path().join("b.py"), "hello world\n").unwrap();
+        let out = tool
+            .call(CodeSearchArgs {
+                pattern: "hello".into(),
+                path: Some(".".into()),
+                file_glob: Some("*.rs".into()),
+                ignore_case: Some(true),
+                max_results: None,
+            })
+            .await
+            .unwrap();
+        assert!(out.success);
+        assert_eq!(out.match_count, 1);
+        assert!(out.matches[0].file.ends_with("a.rs"));
+    }
+
+    #[test]
+    fn test_glob_match_helper() {
+        assert!(glob_match("foo.rs", "*.rs"));
+        assert!(glob_match("src/foo.rs", "src/*.rs"));
+        assert!(!glob_match("foo.py", "*.rs"));
+        assert!(glob_match("any", "*"));
+        assert!(glob_match("abc", "a?c"));
+    }
+
+    #[test]
+    fn test_unified_diff_helper() {
+        let d = unified_diff("a\nb\nc\n", "a\nB\nc\n");
+        assert!(d.contains("-b"));
+        assert!(d.contains("+B"));
+    }
+
+    /// M6 regression: diff truncation must not panic on multi-byte UTF-8.
+    #[test]
+    fn test_diff_truncation_respects_char_boundary() {
+        // Build a diff > 6000 bytes containing multi-byte chars at the boundary.
+        let old = "a\n".repeat(4000); // 8000 bytes
+        let new_line = "你\n"; // 3-byte UTF-8 char
+        let new = format!("{}{}", "b\n".repeat(3000), new_line.repeat(1000));
+        let diff = unified_diff(&old, &new);
+        // Simulate the truncation logic from file_edit
+        if diff.len() > 6000 {
+            let end = diff.floor_char_boundary(6000);
+            let truncated = format!("{}...[truncated]", &diff[..end]);
+            // Must end with the marker and be valid UTF-8 (no panic)
+            assert!(truncated.ends_with("...[truncated]"));
+            assert!(truncated.len() <= 6000 + "...[truncated]".len());
+        }
     }
 }

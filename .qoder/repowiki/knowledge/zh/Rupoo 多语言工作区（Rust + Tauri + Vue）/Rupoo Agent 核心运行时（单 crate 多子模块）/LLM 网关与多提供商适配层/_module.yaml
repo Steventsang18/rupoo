@@ -1,0 +1,8 @@
+schema_version: 1
+module_path: agent_core/llm_gateway
+title: LLM 网关与多提供商适配层
+scope:
+    - src-agent/src/llm/
+source_files: []
+depends_on: []
+related_to: []

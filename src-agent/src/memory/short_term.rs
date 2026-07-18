@@ -3,7 +3,11 @@ use crate::memory::traits::MemoryStorage;
 use crate::task::MemoryEntry;
 use async_trait::async_trait;
 use std::collections::VecDeque;
-use std::sync::Mutex;
+// Choice: parking_lot::Mutex over std::sync::Mutex because:
+// - parking_lot::Mutex never poisons (no unwrap_or_else needed)
+// - Lock hold time is minimal (VecDeque ops only), never held across .await
+// - Better performance under contention (fair queuing, no syscalls on Linux)
+use parking_lot::Mutex;
 
 /// 短期记忆——会话内高速缓存
 pub struct ShortTermMemory {
@@ -23,7 +27,7 @@ impl ShortTermMemory {
 #[async_trait]
 impl MemoryStorage for ShortTermMemory {
     async fn store(&self, entry: MemoryEntry) -> AgentResult<()> {
-        let mut entries = self.entries.lock().unwrap();
+        let mut entries = self.entries.lock();
         if entries.len() >= self.capacity {
             entries.pop_front();
         }
@@ -32,7 +36,7 @@ impl MemoryStorage for ShortTermMemory {
     }
 
     async fn retrieve(&self, query: &str, limit: usize) -> AgentResult<Vec<MemoryEntry>> {
-        let entries = self.entries.lock().unwrap();
+        let entries = self.entries.lock();
         let query_lower = query.to_lowercase();
         let mut results: Vec<MemoryEntry> = entries
             .iter()
@@ -50,13 +54,13 @@ impl MemoryStorage for ShortTermMemory {
     }
 
     async fn delete(&self, id: &str) -> AgentResult<()> {
-        let mut entries = self.entries.lock().unwrap();
+        let mut entries = self.entries.lock();
         entries.retain(|e| e.id != id);
         Ok(())
     }
 
     async fn count(&self) -> AgentResult<usize> {
-        Ok(self.entries.lock().unwrap().len())
+        Ok(self.entries.lock().len())
     }
 }
 

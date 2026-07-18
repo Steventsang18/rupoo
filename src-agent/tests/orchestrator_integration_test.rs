@@ -185,6 +185,7 @@ async fn test_orchestrator_full_pipeline_succeeds() {
         Box::new(MockExecutionEngine),
         Arc::new(MockMemorySystem),
         Box::new(MockSupervisor),
+        Box::new(rupoo::execution::replanner::ReplannerImpl),
     );
 
     let result = orch.execute("test instruction for integration test").await;
@@ -206,6 +207,7 @@ async fn test_orchestrator_with_memory_system_bridge() {
         Box::new(MockExecutionEngine),
         memory,
         Box::new(MockSupervisor),
+        Box::new(rupoo::execution::replanner::ReplannerImpl),
     );
 
     let result = orch.execute("test with real bridge").await;
@@ -232,6 +234,7 @@ async fn test_orchestrator_supervisor_blocks_forbidden_action() {
         Box::new(MockExecutionEngine),
         Arc::new(MockMemorySystem),
         Box::new(BlockingSupervisor),
+        Box::new(rupoo::execution::replanner::ReplannerImpl),
     );
 
     let result = orch.execute("should be blocked").await;
@@ -274,6 +277,7 @@ async fn test_orchestrator_empty_plans_return_error() {
         Box::new(MockExecutionEngine),
         Arc::new(MockMemorySystem),
         Box::new(MockSupervisor),
+        Box::new(rupoo::execution::replanner::ReplannerImpl),
     );
 
     let result = orch.execute("should fail").await;

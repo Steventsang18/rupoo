@@ -261,6 +261,7 @@ impl Agent {
             Arc::clone(&repo),
             Arc::clone(&memory_cache),
             SafetyContext::default(),
+            Arc::clone(&tool_executor),
         )));
         let memory_system = std::sync::Arc::new(MemorySystemBridge::new(Arc::clone(&repo)));
         Self {

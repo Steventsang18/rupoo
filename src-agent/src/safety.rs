@@ -10,7 +10,7 @@
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
+use std::sync::{LazyLock, OnceLock};
 use std::time::{Duration, Instant};
 
 use lru::LruCache;
@@ -63,6 +63,70 @@ fn dns_cache() -> &'static std::sync::Mutex<LruCache<String, DnsCacheEntry>> {
     })
 }
 
+/// Cached default sets — built once, cloned on each `SafetyContext::default()`.
+/// This avoids re-allocating HashSets on every tool call (rig_tools creates a
+/// SafetyContext per invocation).
+static DEFAULT_FORBIDDEN: LazyLock<HashSet<String>> = LazyLock::new(|| {
+    [
+        "sudo", "su", "passwd", "mkfs", "fdisk", "dd", "format", "shutdown", "reboot", "halt",
+        "poweroff", "iptables", "ufw", "mount", "umount", "chown", "chmod", "chattr", "kill",
+        "killall", "pkill", "rm",
+    ]
+    .iter()
+    .map(|s| (*s).to_string())
+    .collect()
+});
+
+static DEFAULT_APPROVAL: LazyLock<HashSet<String>> = LazyLock::new(|| {
+    [
+        "delete_file",
+        "rm",
+        "remove",
+        "exec",
+        "run_command",
+        "bash",
+        "sh",
+        "zsh",
+        "dash",
+        "ksh",
+        "csh",
+        "fish",
+        "shell",
+        "sudo",
+        "reboot",
+        "shutdown",
+        "http_delete",
+        "http_post",
+        "python",
+        "python3",
+        "perl",
+        "ruby",
+        "node",
+        "lua",
+    ]
+    .iter()
+    .map(|s| (*s).to_string())
+    .collect()
+});
+
+static DEFAULT_AUTO_APPROVE: LazyLock<HashSet<String>> = LazyLock::new(|| {
+    [
+        "echo",
+        "file_read",
+        "list_directory",
+        "file_write",
+        "file_edit",
+        "code_search",
+        "run_tests",
+        "check_output",
+        "diff_check",
+        "web_search",
+    ]
+    .iter()
+    .map(|s| (*s).to_string())
+    .collect()
+});
+
 /// Security context that governs all system-level operations.
 ///
 /// Built-in safe defaults are used for all security settings.
@@ -87,55 +151,9 @@ pub struct SafetyContext {
 impl Default for SafetyContext {
     fn default() -> Self {
         Self {
-            forbidden_commands: [
-                "sudo", "su", "passwd", "mkfs", "fdisk", "dd", "format", "shutdown", "reboot",
-                "halt", "poweroff", "iptables", "ufw", "mount", "umount", "chown", "chmod",
-                "chattr", "kill", "killall", "pkill", "rm",
-            ]
-            .iter()
-            .map(|s| s.to_string())
-            .collect(),
-            approval_required_tools: [
-                "delete_file",
-                "rm",
-                "remove",
-                "exec",
-                "run_command",
-                "bash",
-                "sh",
-                "zsh",
-                "dash",
-                "ksh",
-                "csh",
-                "fish",
-                "shell",
-                "sudo",
-                "reboot",
-                "shutdown",
-                "http_delete",
-                "http_post",
-                "python",
-                "python3",
-                "perl",
-                "ruby",
-                "node",
-                "lua",
-            ]
-            .iter()
-            .map(|s| s.to_string())
-            .collect(),
-            auto_approve_tools: [
-                "echo",
-                "file_read",
-                "list_directory",
-                "run_tests",
-                "check_output",
-                "diff_check",
-                "web_search",
-            ]
-            .iter()
-            .map(|s| s.to_string())
-            .collect(),
+            forbidden_commands: DEFAULT_FORBIDDEN.clone(),
+            approval_required_tools: DEFAULT_APPROVAL.clone(),
+            auto_approve_tools: DEFAULT_AUTO_APPROVE.clone(),
             allowed_paths: vec![std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))],
             default_timeout: Duration::from_secs(30),
             browser_path: None,
@@ -742,5 +760,21 @@ mod tests {
         // Null byte injection should be blocked
         let null_byte = PathBuf::from("file\x00.txt");
         assert!(ctx.apply_file_jail(&null_byte).is_err());
+    }
+
+    /// M2/M3 regression: SafetyContext::default() must produce consistent sets
+    /// across multiple calls (backed by LazyLock singletons).
+    #[test]
+    fn test_default_safety_context_is_consistent() {
+        let a = SafetyContext::default();
+        let b = SafetyContext::default();
+        assert_eq!(a.forbidden_commands, b.forbidden_commands);
+        assert_eq!(a.approval_required_tools, b.approval_required_tools);
+        assert_eq!(a.auto_approve_tools, b.auto_approve_tools);
+        // Mutating one clone must not affect the other
+        let mut c = SafetyContext::default();
+        c.forbidden_commands.insert("custom_cmd".into());
+        let d = SafetyContext::default();
+        assert!(!d.forbidden_commands.contains("custom_cmd"));
     }
 }

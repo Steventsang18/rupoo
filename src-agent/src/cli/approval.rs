@@ -102,7 +102,7 @@ impl ApprovalExt for AgentUiBridge {
                 "No pending tool to approve.".to_string(),
             )));
         }
-        let _ = self.ui_tx.send(AgentToTui::Idle);
+        let _ = self.send_idle();
     }
 
     /// Handle user denial (DenyTool).
@@ -145,6 +145,6 @@ impl ApprovalExt for AgentUiBridge {
             // gracefully (agent decides how to proceed with a failed step).
             self.run_plan(&mut plan).await;
         }
-        let _ = self.ui_tx.send(AgentToTui::Idle);
+        let _ = self.send_idle();
     }
 }

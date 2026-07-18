@@ -4,11 +4,16 @@ use tracing::{info, warn};
 use crate::cognitive::goal::{AgentGoal, AuthLevel};
 use crate::cognitive::CognitiveEngine;
 use crate::error::{AgentError, AgentResult};
-use crate::execution::ExecutionEngine;
+use crate::execution::{
+    replanner::Replanner, DataDiscrepancy, DiscrepancySeverity, ExecutionEngine,
+};
 use crate::memory::MemorySystem;
 use crate::planning::{ExecutionPlan, Planner};
 use crate::supervisor::{Action, ExecutionMeta, Supervisor};
 use crate::task::Step;
+
+/// 重规划最大尝试次数，防止校验持续触发重规划导致死循环。
+const MAX_REPLAN_ATTEMPTS: u32 = 3;
 
 /// 五层编排器——认知→规划→执行→记忆→监督
 pub struct Orchestrator {
@@ -17,6 +22,7 @@ pub struct Orchestrator {
     pub execution: Box<dyn ExecutionEngine>,
     pub memory: Arc<dyn MemorySystem>,
     pub supervisor: Box<dyn Supervisor>,
+    pub replanner: Box<dyn Replanner>,
 }
 
 impl Orchestrator {
@@ -26,6 +32,7 @@ impl Orchestrator {
         execution: Box<dyn ExecutionEngine>,
         memory: Arc<dyn MemorySystem>,
         supervisor: Box<dyn Supervisor>,
+        replanner: Box<dyn Replanner>,
     ) -> Self {
         Self {
             cognitive,
@@ -33,6 +40,7 @@ impl Orchestrator {
             execution,
             memory,
             supervisor,
+            replanner,
         }
     }
 
@@ -94,6 +102,7 @@ impl Orchestrator {
         // ======== 第3层：执行层——带监督的逐步执行 ========
         let mut plan = best_plan.clone();
         let mut step_offset = 0;
+        let mut replan_attempts = 0;
 
         while step_offset < plan.steps.len() {
             let i = step_offset;
@@ -127,18 +136,42 @@ impl Orchestrator {
             if validation.trigger_replan {
                 warn!("[执行层] 步骤 {} 入参校验失败，触发重规划", i);
 
-                // 收集失败步骤信息后重规划
-                let revised = self.planner.generate_alternatives(&goal, 1).await?;
-
-                if let Some(new_plan) = revised.into_iter().next() {
-                    info!("[执行层] 重规划完成，新方案: {}", new_plan.name);
-                    plan = new_plan;
-                    step_offset = 0; // 从头执行新方案
-                    continue;
-                } else {
-                    warn!("[执行层] 重规划失败，跳过当前步骤继续");
+                if replan_attempts >= MAX_REPLAN_ATTEMPTS {
+                    warn!(
+                        "[执行层] 重规划次数达上限({})，跳过当前步骤继续",
+                        MAX_REPLAN_ATTEMPTS
+                    );
+                    replan_attempts += 1;
                     step_offset += 1;
                     continue;
+                }
+
+                // 由重规划器基于偏差产出修正方案
+                let discrepancy =
+                    validation
+                        .discrepancies
+                        .into_iter()
+                        .next()
+                        .unwrap_or_else(|| DataDiscrepancy {
+                            field: "step".to_string(),
+                            expected: serde_json::json!(null),
+                            actual: serde_json::json!(null),
+                            severity: DiscrepancySeverity::Critical,
+                        });
+                match self.replanner.revise(&plan, &discrepancy).await {
+                    Ok(new_plan) => {
+                        info!("[执行层] 重规划完成，新方案: {}", new_plan.name);
+                        plan = new_plan;
+                        replan_attempts += 1;
+                        step_offset = 0; // 从头执行新方案
+                        continue;
+                    }
+                    Err(e) => {
+                        warn!("[执行层] 重规划失败({})，跳过当前步骤继续", e);
+                        replan_attempts += 1;
+                        step_offset += 1;
+                        continue;
+                    }
                 }
             }
 
@@ -197,6 +230,7 @@ impl Orchestrator {
 mod tests {
     use super::*;
     use crate::cognitive::goal::AgentGoal;
+    use crate::execution::ValidationResult;
     use crate::memory::traits::MemoryStorage;
     use async_trait::async_trait;
 
@@ -235,11 +269,61 @@ mod tests {
         let execution = Box::new(crate::execution::validator::ExecutionEngineImpl);
         let memory = Arc::new(MockMemorySystem);
         let supervisor = Box::new(MockSupervisor);
+        let replanner = Box::new(crate::execution::replanner::ReplannerImpl);
 
-        let orch = Orchestrator::new(cognitive, planner, execution, memory, supervisor);
+        let orch = Orchestrator::new(cognitive, planner, execution, memory, supervisor, replanner);
         let result = orch.execute("测试指令").await;
-        // 因为规划器返回空方案，预计失败
-        assert!(result.is_err());
+        // 规划器现产出回退方案，执行层校验通过，整体应能跑完（不报错）。
+        assert!(
+            result.is_ok(),
+            "orchestrator 应能完成回退方案执行: {:?}",
+            result.err()
+        );
+    }
+
+    /// 执行引擎 mock——入参校验始终返回 Critical 偏差，触发重规划。
+    struct MockExecutionTriggerReplan;
+    #[async_trait]
+    impl ExecutionEngine for MockExecutionTriggerReplan {
+        async fn validate_input(
+            &self,
+            _tool: &str,
+            _params: &serde_json::Value,
+        ) -> AgentResult<ValidationResult> {
+            Ok(ValidationResult::with_discrepancy(
+                "step",
+                serde_json::json!("expected"),
+                serde_json::json!("actual"),
+                DiscrepancySeverity::Critical,
+            ))
+        }
+        async fn validate_output(
+            &self,
+            _tool: &str,
+            _result: &str,
+            _expected: Option<&str>,
+        ) -> AgentResult<ValidationResult> {
+            Ok(ValidationResult::passed())
+        }
+    }
+
+    #[tokio::test]
+    async fn test_orchestrator_replans_on_critical_validation() {
+        let cognitive = Box::new(MockCognitive);
+        let planner = Box::new(crate::planning::planner::PlannerImpl);
+        let execution = Box::new(MockExecutionTriggerReplan);
+        let memory = Arc::new(MockMemorySystem);
+        let supervisor = Box::new(MockSupervisor);
+        let replanner = Box::new(crate::execution::replanner::ReplannerImpl);
+
+        let orch = Orchestrator::new(cognitive, planner, execution, memory, supervisor, replanner);
+        let result = orch.execute("测试指令").await;
+        // 每次校验都触发 Critical 重规划，达上限后跳过并正常结束（不死循环）。
+        assert!(
+            result.is_ok(),
+            "orchestrator 应在重规划上限后正常结束: {:?}",
+            result.err()
+        );
     }
 
     /// 模拟三层记忆系统

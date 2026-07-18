@@ -364,6 +364,9 @@ impl RupooApp {
             }
             AgentToTui::Thinking => self.set_thinking(),
             AgentToTui::Idle => self.set_idle(),
+            AgentToTui::ContextUsage { .. } => {
+                // Context gauge is a ratatui-only feature; ignored on the legacy path.
+            }
             AgentToTui::TokenUpdate {
                 in_count,
                 out_count,

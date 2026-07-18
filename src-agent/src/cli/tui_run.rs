@@ -777,6 +777,58 @@ mod tests {
     }
 
     #[test]
+    fn context_usage_event_reaches_footer_gauge() {
+        // Regression guard for S2: the `ContextUsage` event must flow through the
+        // bridge's `send_idle()` into the TUI so the per-turn footer shows a live
+        // gauge. Earlier the chat/plan/approval paths sent `Idle` WITHOUT
+        // `ContextUsage`, so `ctx_pct` stayed `None` and the gauge was invisible.
+        let mut session = make_session();
+        session.app.render_mode = app::RenderMode::Ratatui;
+        let backend = TestBackend::new(80, 16);
+        let mut term = Terminal::new(backend).unwrap();
+
+        session.submit_message("fix the bug");
+        let events = vec![
+            AgentToTui::Thinking,
+            AgentToTui::StreamChunk {
+                text: "done".to_string(),
+            },
+            AgentToTui::Message(ChatMessage::assistant("done".to_string())),
+            AgentToTui::ContextUsage { pct: 64 },
+            AgentToTui::Idle,
+        ];
+        for e in events {
+            session.pump_agent_event(&mut term, e).unwrap();
+        }
+
+        // The footer TokenStat must carry the live pct pushed by ContextUsage.
+        let footer = session
+            .chat_view
+            .items
+            .iter()
+            .rev()
+            .find_map(|i| match i {
+                StreamItem::TokenStat(t) => Some(t),
+                _ => None,
+            })
+            .expect("token footer should be present");
+        assert_eq!(
+            footer.ctx_pct,
+            Some(64),
+            "ContextUsage event lost before footer (gauge would be invisible)"
+        );
+
+        let buf: String = term
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|c| c.symbol())
+            .collect();
+        assert!(buf.contains("64%"), "context gauge not rendered: {buf}");
+    }
+
+    #[test]
     fn ratatui_user_message_not_duplicated() {
         // The bridge echoes the user turn as Message(User); the input path
         // already committed it, so on_agent_event_tui must skip it.

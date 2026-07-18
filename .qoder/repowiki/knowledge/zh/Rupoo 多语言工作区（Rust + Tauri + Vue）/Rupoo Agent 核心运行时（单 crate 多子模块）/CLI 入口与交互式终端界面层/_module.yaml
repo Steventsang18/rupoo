@@ -1,0 +1,10 @@
+schema_version: 1
+module_path: agent_core/cli_runtime
+title: CLI 入口与交互式终端界面层
+scope:
+    - src-agent/src/cli/
+    - src-agent/src/main.rs
+    - src-agent/src/main_cli.rs
+source_files: []
+depends_on: []
+related_to: []

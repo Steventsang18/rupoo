@@ -305,12 +305,24 @@ impl MemoryStore {
         };
 
         // Combine results using RRF
-        let combined = self.combine_results_rrf(&fts_results, &vector_results, limit);
+        let (mut combined, vector_only_ids) =
+            self.combine_results_rrf(&fts_results, &vector_results, limit);
+
+        // Fetch vector-only entries from DB (IDs present in vector results but not FTS)
+        for id in &vector_only_ids {
+            if combined.len() >= limit {
+                break;
+            }
+            if let Some(entry) = self.repo.get_memory(id).await? {
+                combined.push(entry);
+            }
+        }
 
         debug!(
             fts_count = fts_results.len(),
             vector_count = vector_results.len(),
             combined_count = combined.len(),
+            vector_only_fetched = vector_only_ids.len(),
             "hybrid search completed"
         );
 
@@ -318,12 +330,17 @@ impl MemoryStore {
     }
 
     /// Combine FTS and vector results using Reciprocal Rank Fusion.
+    ///
+    /// Returns a tuple of:
+    /// - Resolved `MemoryEntry` items (those found in `fts_results`)
+    /// - Vector-only IDs (present in `vector_results` but not in `fts_results`),
+    ///   which the caller should fetch from the DB to complete the result set.
     fn combine_results_rrf(
         &self,
         fts_results: &[MemoryEntry],
         vector_results: &[crate::vector_store::SearchResult],
         limit: usize,
-    ) -> Vec<MemoryEntry> {
+    ) -> (Vec<MemoryEntry>, Vec<String>) {
         let k = self.config.rrf_k;
         let mut scores: HashMap<String, f32> = HashMap::new();
 
@@ -343,20 +360,24 @@ impl MemoryStore {
         let mut sorted_ids: Vec<_> = scores.into_iter().collect();
         sorted_ids.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
 
-        // Fetch full entries
-        let mut results: Vec<MemoryEntry> = Vec::new();
-        let fts_map: HashMap<String, MemoryEntry> = fts_results
-            .iter()
-            .map(|e| (e.id.clone(), e.clone()))
-            .collect();
+        // Build FTS lookup map
+        let fts_map: HashMap<&str, &MemoryEntry> =
+            fts_results.iter().map(|e| (e.id.as_str(), e)).collect();
+
+        // Resolve entries: FTS hits are resolved; vector-only IDs are collected for DB fetch
+        let mut resolved: Vec<MemoryEntry> = Vec::new();
+        let mut vector_only_ids: Vec<String> = Vec::new();
 
         for (id, _score) in sorted_ids.into_iter().take(limit) {
-            if let Some(entry) = fts_map.get(&id) {
-                results.push(entry.clone());
+            if let Some(entry) = fts_map.get(id.as_str()) {
+                resolved.push((*entry).clone());
+            } else {
+                // This ID exists only in vector results — caller must fetch from DB
+                vector_only_ids.push(id);
             }
         }
 
-        results
+        (resolved, vector_only_ids)
     }
 
     /// Get the most recent memories.
@@ -390,6 +411,18 @@ impl MemoryStore {
     /// Check if hybrid search is enabled.
     pub fn is_hybrid_enabled(&self) -> bool {
         self.config.enable_vector_search && self.vector_store.is_some()
+    }
+
+    /// Delete a memory entry by its content_id.
+    ///
+    /// # Preconditions
+    /// - `id` must be a valid content_id returned by [`remember`] or [`remember_from`].
+    ///
+    /// # Postconditions
+    /// - The memory entry is removed from the database.
+    /// - If no matching entry exists, a warning is logged but no error is returned.
+    pub async fn delete(&self, id: &str) -> AgentResult<()> {
+        self.repo.delete_memory(id).await
     }
 }
 
@@ -465,5 +498,41 @@ mod tests {
     async fn test_fts_only_config() {
         let config = HybridSearchConfig::fts_only();
         assert!(!config.enable_vector_search);
+    }
+
+    /// H3 regression: vector-only IDs must not be silently dropped by RRF.
+    #[test]
+    fn test_combine_results_rrf_includes_vector_only_ids() {
+        let (_, store) = setup();
+
+        let fts_results = vec![MemoryEntry {
+            id: "fts-1".into(),
+            content: "fts match".into(),
+            tags: vec![],
+            source: "test".into(),
+            created_at: "2025-01-01".into(),
+            updated_at: "2025-01-01".into(),
+        }];
+
+        let vector_results = vec![
+            crate::vector_store::SearchResult::new("fts-1".into(), 0.9),
+            // This ID exists only in vector results — must NOT be dropped
+            crate::vector_store::SearchResult::new("vec-only-1".into(), 0.8),
+        ];
+
+        let (resolved, vector_only_ids) =
+            store.combine_results_rrf(&fts_results, &vector_results, 10);
+
+        // FTS entry should be resolved
+        assert_eq!(resolved.len(), 1, "FTS entry should be resolved");
+        assert_eq!(resolved[0].id, "fts-1");
+
+        // Vector-only ID should be reported for DB fetch, not silently dropped
+        assert_eq!(
+            vector_only_ids.len(),
+            1,
+            "vector-only ID must be returned for DB fetch"
+        );
+        assert_eq!(vector_only_ids[0], "vec-only-1");
     }
 }

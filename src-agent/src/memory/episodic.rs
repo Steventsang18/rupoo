@@ -10,7 +10,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use tracing::{info, warn};
+use tracing::info;
 
 use crate::db::TaskRepo;
 use crate::embedding::EmbeddingService;
@@ -97,10 +97,8 @@ impl MemoryStorage for EpisodicMemory {
     }
 
     async fn delete(&self, id: &str) -> AgentResult<()> {
-        warn!(
-            memory_id = %id,
-            "episodic memory delete — delete not exposed via MemoryStore"
-        );
+        self.store.delete(id).await?;
+        info!(memory_id = %id, "episodic memory deleted");
         Ok(())
     }
 
@@ -190,5 +188,44 @@ mod tests {
         let memory = EpisodicMemory::new(test_repo());
         let results = memory.retrieve("完全不存在的内容", 5).await.unwrap();
         assert!(results.is_empty());
+    }
+
+    /// H2 regression: delete must actually remove the entry, not silently no-op.
+    #[tokio::test]
+    async fn test_episodic_delete_actually_removes() {
+        let memory = EpisodicMemory::new(test_repo());
+        assert_eq!(memory.count().await.unwrap(), 0);
+
+        let entry = sample_entry("ep-del", "Unique memory to be deleted", vec!["test"]);
+        memory.store(entry).await.unwrap();
+        assert_eq!(memory.count().await.unwrap(), 1);
+
+        // Retrieve to get the auto-generated content_id
+        let results = memory
+            .retrieve("Unique memory to be deleted", 5)
+            .await
+            .unwrap();
+        assert!(!results.is_empty(), "should find just-stored memory");
+        let stored_id = results[0].id.clone();
+
+        // Delete by content_id
+        memory.delete(&stored_id).await.unwrap();
+
+        // Count must decrease — this was the bug: delete was a no-op
+        assert_eq!(
+            memory.count().await.unwrap(),
+            0,
+            "count should be 0 after delete"
+        );
+
+        // Search should return empty
+        let results = memory
+            .retrieve("Unique memory to be deleted", 5)
+            .await
+            .unwrap();
+        assert!(
+            results.is_empty(),
+            "deleted memory should not be retrievable"
+        );
     }
 }

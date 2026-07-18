@@ -1,4 +1,5 @@
 // src-agent/src/supervisor/circuit_breaker.rs
+use std::collections::VecDeque;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -49,8 +50,9 @@ struct BreakerInner {
     failure_count: u32,
     last_state_change: Instant,
     half_open_requests: u32,
-    /// 滑动窗口：每秒调用计数器
-    call_timestamps: Vec<Instant>,
+    /// Sliding window: per-call timestamps (front = oldest).
+    /// Choice: VecDeque over Vec because pop_front is O(1) for eviction.
+    call_timestamps: VecDeque<Instant>,
 }
 
 /// 熔断器——防止系统雪崩
@@ -68,20 +70,28 @@ impl CircuitBreaker {
                 failure_count: 0,
                 last_state_change: Instant::now(),
                 half_open_requests: 0,
-                call_timestamps: Vec::new(),
+                call_timestamps: VecDeque::new(),
             })),
+        }
+    }
+
+    /// Evict timestamps older than 1 second from the front of the deque.
+    fn evict_stale(inner: &mut BreakerInner) {
+        let now = Instant::now();
+        while let Some(front) = inner.call_timestamps.front() {
+            if now.duration_since(*front) >= Duration::from_secs(1) {
+                inner.call_timestamps.pop_front();
+            } else {
+                break;
+            }
         }
     }
 
     /// 检查是否允许通过
     pub fn check(&self) -> AgentResult<()> {
         let mut inner = self.inner.lock();
-
-        // 清理超过 1 秒的时间戳
+        Self::evict_stale(&mut inner);
         let now = Instant::now();
-        inner
-            .call_timestamps
-            .retain(|t| now.duration_since(*t) < Duration::from_secs(1));
 
         // 频率限制
         if inner.call_timestamps.len() as u64 >= self.config.max_rate_per_sec {
@@ -90,7 +100,7 @@ impl CircuitBreaker {
                 retry_after_secs: 1,
             });
         }
-        inner.call_timestamps.push(now);
+        inner.call_timestamps.push_back(now);
 
         match inner.state {
             BreakerState::Closed => Ok(()),
@@ -129,6 +139,7 @@ impl CircuitBreaker {
     /// 记录一次成功——重置失败计数
     pub fn record_success(&self) {
         let mut inner = self.inner.lock();
+        Self::evict_stale(&mut inner);
         inner.failure_count = 0;
         if inner.state == BreakerState::HalfOpen {
             inner.state = BreakerState::Closed;
@@ -140,6 +151,7 @@ impl CircuitBreaker {
     /// 记录一次失败——可能触发熔断
     pub fn record_failure(&self) {
         let mut inner = self.inner.lock();
+        Self::evict_stale(&mut inner);
         inner.failure_count += 1;
 
         match inner.state {

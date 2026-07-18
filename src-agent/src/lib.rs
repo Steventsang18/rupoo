@@ -1,4 +1,5 @@
 pub mod agent;
+pub mod bench;
 pub mod build_engine;
 pub mod channel;
 pub mod cognitive;

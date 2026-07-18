@@ -33,6 +33,11 @@ pub(super) struct AgentUiBridge {
     pub(super) approve_all: bool,
     /// Conversation history for multi-turn Chat Mode.
     pub(super) conversation_history: rupoo::llm::ConversationHistory,
+    /// Currently configured model label (e.g. "anthropic/claude-sonnet-4"),
+    /// used by the `/context` diagnostic (Phase C). Mirrors the TUI's
+    /// `model_label`; kept here so the bridge can report it without round-tripping
+    /// through the UI channel. Seeds from startup config, refreshed on `/model`.
+    pub(super) model_label: String,
     /// Session ID for persisting conversation history.
     pub(super) session_id: String,
     /// Intent state for token-efficient history compression.
@@ -42,6 +47,25 @@ pub(super) struct AgentUiBridge {
 }
 
 impl AgentUiBridge {
+    /// Emit the live context-usage percentage (computed from the conversation
+    /// history budget) followed by `Idle`. Centralizing this keeps every
+    /// "turn finished" exit consistent so the TUI footer gauge is always fresh.
+    pub(super) fn send_idle(&self) -> Result<(), crossbeam_channel::SendError<AgentToTui>> {
+        let pct = self.context_usage_pct();
+        self.ui_tx.send(AgentToTui::ContextUsage { pct })?;
+        self.ui_tx.send(AgentToTui::Idle)
+    }
+
+    /// Current context-window usage as a percentage of the history token budget.
+    pub(super) fn context_usage_pct(&self) -> u8 {
+        let budget = self.conversation_history.token_budget();
+        if budget == 0 {
+            return 0;
+        }
+        let est = self.conversation_history.estimated_tokens();
+        (((est * 100) / budget) as u8).clamp(0, 100)
+    }
+
     pub(super) async fn run(mut self) {
         loop {
             match self
@@ -101,6 +125,8 @@ impl AgentUiBridge {
             self.handle_clear().await;
         } else if text == "/status" {
             self.handle_status().await;
+        } else if text == "/context" {
+            self.handle_context().await;
         } else if text.starts_with("/deep") {
             self.handle_deep(text).await;
         } else if text == "/help" || text == "/?" {
@@ -157,7 +183,7 @@ impl AgentUiBridge {
                     ))) {
                         tracing::warn!("failed to send UI event: {}", e);
                     }
-                    if let Err(e) = self.ui_tx.send(AgentToTui::Idle) {
+                    if let Err(e) = self.send_idle() {
                         tracing::warn!("failed to send UI event: {}", e);
                     }
                 }
@@ -171,7 +197,7 @@ impl AgentUiBridge {
                     {
                         tracing::warn!("failed to send UI event: {}", e);
                     }
-                    if let Err(e) = self.ui_tx.send(AgentToTui::Idle) {
+                    if let Err(e) = self.send_idle() {
                         tracing::warn!("failed to send UI event: {}", e);
                     }
                 }
@@ -226,6 +252,7 @@ impl AgentUiBridge {
                     }) {
                         tracing::warn!("failed to send UI event: {}", e);
                     }
+                    self.model_label = label.clone();
                 }
                 Err(e) => {
                     if let Err(e) =
@@ -240,7 +267,7 @@ impl AgentUiBridge {
                 }
             }
         }
-        if let Err(e) = self.ui_tx.send(AgentToTui::Idle) {
+        if let Err(e) = self.send_idle() {
             tracing::warn!("failed to send UI event: {}", e);
         }
     }
@@ -261,7 +288,7 @@ impl AgentUiBridge {
         ))) {
             tracing::warn!("failed to send UI event: {}", e);
         }
-        if let Err(e) = self.ui_tx.send(AgentToTui::Idle) {
+        if let Err(e) = self.send_idle() {
             tracing::warn!("failed to send UI event: {}", e);
         }
     }
@@ -286,7 +313,32 @@ impl AgentUiBridge {
         {
             tracing::warn!("failed to send UI event: {}", e);
         }
-        if let Err(e) = self.ui_tx.send(AgentToTui::Idle) {
+        if let Err(e) = self.send_idle() {
+            tracing::warn!("failed to send UI event: {}", e);
+        }
+    }
+
+    /// Handle /context command (Phase C, §6.3) — print a context-usage diagnosis
+    /// so the user can see why the window is (or isn't) near its limit.
+    async fn handle_context(&self) {
+        let est = self.conversation_history.estimated_tokens();
+        let budget = self.conversation_history.token_budget();
+        let turns = self.conversation_history.len();
+        let real_window = crate::cli::tui_view::model_context_window(&self.model_label);
+        let report = crate::cli::tui_view::build_context_report(
+            est,
+            budget,
+            turns,
+            &self.model_label,
+            real_window,
+        );
+        if let Err(e) = self
+            .ui_tx
+            .send(AgentToTui::Message(ChatMessage::system(report)))
+        {
+            tracing::warn!("failed to send UI event: {}", e);
+        }
+        if let Err(e) = self.send_idle() {
             tracing::warn!("failed to send UI event: {}", e);
         }
     }
@@ -307,6 +359,7 @@ Available commands:
   /deep [on/off]        — Enable/disable deep search (hybrid FTS5 + vector)
   /clear                — Clear conversation history
   /status               — Show current session status
+  /context              — Show context-window usage diagnosis
   /help                 — Show this help message
   Ctrl+C               — Cancel current generation (press twice to quit)";
         if let Err(e) = self
@@ -315,7 +368,7 @@ Available commands:
         {
             tracing::warn!("failed to send UI event: {}", e);
         }
-        if let Err(e) = self.ui_tx.send(AgentToTui::Idle) {
+        if let Err(e) = self.send_idle() {
             tracing::warn!("failed to send UI event: {}", e);
         }
     }
@@ -402,6 +455,7 @@ Available commands:
             // Treat as a goal to start a new loop — spawn in background
             let goal = input.trim_matches('"').trim().to_string();
             let ui_tx = self.ui_tx.clone();
+            let ctx_pct = self.context_usage_pct();
 
             // Extract shared resources from parent agent for the background task
             let engine = self.agent.loop_engine.clone();
@@ -429,6 +483,7 @@ Available commands:
                         let _ = ui_tx.send(AgentToTui::Message(ChatMessage::error(
                             "Loop engine not initialized".into(),
                         )));
+                        let _ = ui_tx.send(AgentToTui::ContextUsage { pct: ctx_pct });
                         let _ = ui_tx.send(AgentToTui::Idle);
                         return;
                     }
@@ -463,6 +518,7 @@ Available commands:
                         let _ = ui_tx.send(AgentToTui::Message(ChatMessage::error(msg)));
                     }
                 }
+                let _ = ui_tx.send(AgentToTui::ContextUsage { pct: ctx_pct });
                 let _ = ui_tx.send(AgentToTui::Idle);
             });
         }
@@ -614,7 +670,7 @@ Available commands:
         {
             tracing::warn!("failed to send UI event: {}", e);
         }
-        if let Err(e) = self.ui_tx.send(AgentToTui::Idle) {
+        if let Err(e) = self.send_idle() {
             tracing::warn!("failed to send UI event: {}", e);
         }
     }
@@ -626,7 +682,7 @@ Available commands:
         {
             tracing::warn!("failed to send UI event: {}", e);
         }
-        if let Err(e) = self.ui_tx.send(AgentToTui::Idle) {
+        if let Err(e) = self.send_idle() {
             tracing::warn!("failed to send UI event: {}", e);
         }
     }
@@ -766,7 +822,7 @@ Available commands:
                 }
             }
         }
-        if let Err(e) = self.ui_tx.send(AgentToTui::Idle) {
+        if let Err(e) = self.send_idle() {
             tracing::warn!("failed to send UI event: {}", e);
         }
     }
@@ -832,7 +888,7 @@ Available commands:
                 }
             }
         }
-        if let Err(e) = self.ui_tx.send(AgentToTui::Idle) {
+        if let Err(e) = self.send_idle() {
             tracing::warn!("failed to send UI event: {}", e);
         }
     }

@@ -1,0 +1,43 @@
+name: Terminal-Bench (weekly)
+
+# P1：将 rupoo 接入 Terminal-Bench 能力评测（报告 §5.2 / §5.3）。
+# 每周日跑一次，得到可量化的 agent 能力水位并防回归。
+# 需要 LLM API Key 与一个已构建的 rupoo 二进制（本 workflow 负责构建）。
+
+on:
+  schedule:
+    - cron: '0 3 * * 0' # 每周日 03:00 UTC
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  bench:
+    name: Terminal-Bench sweep
+    runs-on: ubuntu-latest
+    if: ${{ github.repository_owner == 'Steventsang18' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: stable
+
+      - name: Build rupoo
+        run: cargo build --release --bin rupoo
+
+      - name: Fetch Terminal-Bench tasks (optional)
+        run: |
+          if [ ! -d terminal-bench/tasks ]; then
+            git clone --depth 1 https://github.com/anthropics/terminal-bench.git terminal-bench || true
+          fi
+
+      - name: Run harness
+        env:
+          RUPOO_BENCH: "1"
+          RUPOO_BENCH_BIN: "./target/release/rupoo"
+          RUPOO_BENCH_TASKS: "./terminal-bench/tasks"
+          RUPOO_LLM_API_KEY: ${{ secrets.RUPOO_LLM_API_KEY }}
+        run: cargo test -p rupoo --test terminal_bench -- --ignored --nocapture

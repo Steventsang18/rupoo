@@ -14,9 +14,11 @@ use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
 use uuid::Uuid;
 
+use crate::agent::ToolExecutor;
 use crate::db::TaskRepo;
 use crate::error::{AgentError, AgentResult};
 use crate::llm::{LlmGateway, TokenUsage};
+use crate::task::{PlanStatus, Step, StepStatus};
 
 // ---------------------------------------------------------------------------
 // Loop configuration
@@ -514,15 +516,31 @@ pub struct LoopEngine {
     #[allow(dead_code)]
     safety: SafetyContext,
     cancel_flag: Arc<AtomicBool>,
+    /// Tool executor for dispatching ToolCall steps in child loops.
+    /// Injected via `new()` to avoid circular Agent<->LoopEngine reference.
+    tool_executor: Arc<dyn ToolExecutor>,
 }
 
 impl LoopEngine {
-    pub fn new(repo: Arc<TaskRepo>, memory: Arc<MemoryCache>, safety: SafetyContext) -> Self {
+    /// Create a new LoopEngine.
+    ///
+    /// # Preconditions
+    /// - `tool_executor` must be a valid `Arc<dyn ToolExecutor>` implementation.
+    ///
+    /// # Postconditions
+    /// - The engine is ready to execute adaptive loops including child loop step dispatch.
+    pub fn new(
+        repo: Arc<TaskRepo>,
+        memory: Arc<MemoryCache>,
+        safety: SafetyContext,
+        tool_executor: Arc<dyn ToolExecutor>,
+    ) -> Self {
         Self {
             repo,
             memory,
             safety,
             cancel_flag: Arc::new(AtomicBool::new(false)),
+            tool_executor,
         }
     }
 
@@ -1615,12 +1633,20 @@ Suggested approach: {next_action}"#,
         Ok(loop_data)
     }
 
-    /// Execute plan steps without an Agent reference (for child loops).
+    /// Execute plan steps for child loops via the injected ToolExecutor.
+    ///
+    /// # Preconditions
+    /// - `plan` must be loaded from the database and contain at least one step.
+    ///
+    /// # Postconditions
+    /// - On success, all steps are marked Completed and plan status is Completed.
+    /// - On cancellation, returns Err(AgentError::Other("cancelled")).
+    /// - ToolCall steps are dispatched via `tool_executor.execute_tool()`.
+    /// - Non-tool steps (Think, Finish) are handled inline.
+    ///
+    /// # Panics
+    /// - Does not panic; all errors are propagated via AgentResult.
     async fn execute_plan_inner(&self, plan: &mut crate::task::Plan) -> AgentResult<()> {
-        warn!("execute_plan_inner: 占位符实现——子循环步骤标记为 Completed 但不实际执行。将在未来版本中委托给 Agent::run_next_step()。");
-
-        use crate::task::PlanStatus;
-
         if plan.status == PlanStatus::Pending || plan.status == PlanStatus::Running {
             plan.status = PlanStatus::Running;
         }
@@ -1632,14 +1658,73 @@ Suggested approach: {next_action}"#,
                 return Err(AgentError::Other("cancelled".into()));
             }
 
-            // For child loops, we simulate step execution by marking steps completed
-            // since we don't have a tool executor reference here.
-            // In a full implementation, each step would be dispatched to the executor.
             let current = plan.current_step_index;
-            if current < plan.steps.len() {
-                let step = &mut plan.steps[current];
-                step.set_status(crate::task::StepStatus::Completed);
+            if current >= plan.steps.len() {
+                break;
             }
+
+            // Clone step data to avoid borrow conflict with plan mutation
+            let step = plan.steps[current].clone();
+
+            match step {
+                Step::ToolCall {
+                    tool_name, params, ..
+                } => {
+                    // Mark as running
+                    plan.steps[current].set_status(StepStatus::Running);
+
+                    match self.tool_executor.execute_tool(&tool_name, params).await {
+                        Ok(result) => {
+                            if result.is_success() {
+                                plan.steps[current].set_status(StepStatus::Completed);
+                            } else {
+                                let msg = result.content();
+                                warn!(
+                                    tool = %tool_name,
+                                    step = current,
+                                    error = %msg,
+                                    "tool call returned error in child loop"
+                                );
+                                plan.steps[current].set_status(StepStatus::Failed);
+                            }
+                        }
+                        Err(e) => {
+                            warn!(
+                                tool = %tool_name,
+                                step = current,
+                                error = %e,
+                                "tool execution failed in child loop"
+                            );
+                            plan.steps[current].set_status(StepStatus::Failed);
+                            return Err(e);
+                        }
+                    }
+                }
+
+                Step::Think { .. } => {
+                    // Think steps are LLM reasoning — mark completed inline
+                    plan.steps[current].set_status(StepStatus::Completed);
+                }
+
+                Step::Finish { .. } => {
+                    plan.steps[current].set_status(StepStatus::Completed);
+                    plan.current_step_index += 1;
+                    plan.status = PlanStatus::Completed;
+                    return Ok(());
+                }
+
+                // WaitForInput, Exec, HttpRequest, BrowserAction:
+                // not applicable in child loop context — mark completed with warning
+                _ => {
+                    warn!(
+                        step_type = ?std::mem::discriminant(&step),
+                        step = current,
+                        "non-tool step in child loop — marking completed without execution"
+                    );
+                    plan.steps[current].set_status(StepStatus::Completed);
+                }
+            }
+
             plan.current_step_index += 1;
         }
 
@@ -1972,5 +2057,61 @@ mod tests {
         };
         let status = tracker.check(None, Some(50));
         assert!(matches!(status, BudgetStatus::TimeExceeded { .. }));
+    }
+
+    // ── H1 regression: execute_plan_inner must call tool_executor ──
+
+    use crate::task::{tool_call_step, McpToolResult, Plan};
+    use std::sync::atomic::AtomicUsize;
+
+    /// ToolExecutor that counts invocations and records tool names.
+    struct TrackingToolExecutor {
+        call_count: AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::agent::ToolExecutor for TrackingToolExecutor {
+        async fn execute_tool(
+            &self,
+            tool_name: &str,
+            _params: serde_json::Value,
+        ) -> AgentResult<McpToolResult> {
+            self.call_count.fetch_add(1, Ordering::SeqCst);
+            Ok(McpToolResult::Success {
+                content: format!("executed {tool_name}"),
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn test_execute_plan_inner_calls_tool_executor() {
+        let repo = Arc::new(crate::db::TaskRepo::new(":memory:").expect("in-memory repo"));
+        let memory = Arc::new(crate::memory_cache::MemoryCache::new(Arc::clone(&repo), 8));
+        let executor = Arc::new(TrackingToolExecutor {
+            call_count: AtomicUsize::new(0),
+        });
+        let engine = LoopEngine::new(
+            Arc::clone(&repo),
+            memory,
+            crate::safety::SafetyContext::default(),
+            Arc::clone(&executor) as Arc<dyn crate::agent::ToolExecutor>,
+        );
+
+        let steps = vec![
+            tool_call_step("read_file", serde_json::json!({"path": "/tmp/a"})),
+            tool_call_step("write_file", serde_json::json!({"path": "/tmp/b"})),
+        ];
+        let mut plan = Plan::new("child-plan", steps);
+
+        let result = engine.execute_plan_inner(&mut plan).await;
+        assert!(result.is_ok(), "execute_plan_inner should succeed");
+
+        // The key assertion: tool_executor was actually called (not just marking steps completed)
+        assert_eq!(
+            executor.call_count.load(Ordering::SeqCst),
+            2,
+            "tool_executor must be called for each ToolCall step — was the placeholder re-introduced?"
+        );
+        assert_eq!(plan.status, PlanStatus::Completed);
     }
 }

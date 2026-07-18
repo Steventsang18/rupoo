@@ -8,7 +8,7 @@
 use std::sync::{Arc, Mutex};
 
 use serde::{Deserialize, Serialize};
-use tracing::{error, info};
+use tracing::info;
 
 use crate::error::{AgentError, AgentResult};
 
@@ -212,6 +212,20 @@ impl TaskRepo {
             -- Conversation histories: index for updated_at
             CREATE INDEX IF NOT EXISTS idx_conversations_updated
                 ON conversation_histories(updated_at DESC);
+
+            -- Audit events (supervisor subsystem)
+            CREATE TABLE IF NOT EXISTS audit_events (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                event_type  TEXT NOT NULL,
+                result      TEXT NOT NULL,
+                timestamp   TEXT NOT NULL,
+                payload_json TEXT NOT NULL
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_audit_events_type
+                ON audit_events(event_type, timestamp DESC);
+            CREATE INDEX IF NOT EXISTS idx_audit_events_result
+                ON audit_events(result, timestamp DESC);
             ",
         )?;
         info!(db_path, "database initialized");
@@ -248,9 +262,13 @@ impl TaskRepo {
         T: Send + 'static,
     {
         let conn = Arc::clone(&self.conn);
+        let db_path = self.db_path.clone();
         tokio::task::spawn_blocking(move || {
             let guard = conn.lock().unwrap_or_else(|poisoned| {
-                error!("mutex poisoned, recovering");
+                tracing::warn!(
+                    db = %db_path,
+                    "SQLite write mutex poisoned — another thread panicked while holding it; recovering"
+                );
                 poisoned.into_inner()
             });
             f(&guard)

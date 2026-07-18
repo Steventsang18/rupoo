@@ -168,6 +168,15 @@ impl Phase {
     }
 }
 
+/// Carries the per-turn token footer plus an optional live context gauge.
+/// `stats` is the "⏱ … · Σ… in / Σ… out" line; `ctx_pct` (when set) renders a
+/// small `Cxt ▰▰▱▱▱ NN%` gauge colored by usage severity.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TokenStat {
+    pub stats: String,
+    pub ctx_pct: Option<u8>,
+}
+
 /// One inline element of the conversation stream.
 #[derive(Debug, Clone, PartialEq)]
 pub enum StreamItem {
@@ -195,12 +204,88 @@ pub enum StreamItem {
     System(String),
     Error(String),
     /// Subtle per-turn token-usage footer shown after an assistant reply.
-    TokenStat(String),
+    /// Wraps `TokenStat` so the inline context gauge can be colored separately.
+    TokenStat(TokenStat),
     /// Compact one-line summary of the tool tasks performed in a turn, replacing
     /// the individual inline `⏺ tool … ✓ done` rows so the stream stays focused
     /// on the actual conversation (decision 2026-07-16: filter/collapse redundant
     /// "done" entries). "核心结果或状态摘要" — keeps only the status summary.
     Summary(String),
+    /// Soft, non-modal inline note shown when the context window usage crosses
+    /// the warning threshold (Phase B of the context-usage indicator). Reuses the
+    /// calm inline-block styling — no new UI control, no layout line added.
+    ContextHint(String),
+}
+
+/// Context-usage percentage (of the history token budget) above which a soft
+/// inline management hint is pushed into the stream (Phase B). Mirror of the
+/// red-threshold color band in `ctx_level` (§4.3 / §4.4 of the design doc).
+pub const CONTEXT_WARN_THRESHOLD: u8 = 85;
+/// The soft hint text pushed when usage exceeds `CONTEXT_WARN_THRESHOLD`.
+pub const CONTEXT_HINT_MSG: &str = "上下文接近上限，建议 /clear 或把关键信息存入 /memory";
+
+/// Phase C (§6.1): best-effort lookup of a model's real context-window size
+/// (in tokens) from its label. The CLI path has no provider-supplied window
+/// today, so this is a small static table keyed by case-insensitive
+/// substring. Returns `None` when unknown — callers must fall back to the
+/// soft token budget and never treat the value as authoritative.
+pub fn model_context_window(label: &str) -> Option<u32> {
+    let l = label.to_ascii_lowercase();
+    let table: &[(&str, u32)] = &[
+        ("claude", 200_000),
+        ("gpt-4o", 128_000),
+        ("gpt-4", 128_000),
+        ("o1", 200_000),
+        ("gpt-3.5", 16_385),
+        ("gemini", 1_000_000),
+        ("deepseek", 64_000),
+        ("qwen", 32_768),
+        ("llama", 8_192),
+        ("mistral", 32_000),
+        ("yi-", 200_000),
+        ("glm", 128_000),
+    ];
+    table
+        .iter()
+        .find(|(key, _)| l.contains(key))
+        .map(|(_, window)| *window)
+}
+
+/// Phase C (§6.3): build the `/context` diagnostic report. Pure function so
+/// the formatting is unit-testable without constructing the bridge.
+///
+/// `estimated_tokens`/`budget` are the CLI history estimate (≈ chars/2) and
+/// its soft token budget; `real_window` (if any) is the model-context-window
+/// lookup above, shown only as informational context.
+pub fn build_context_report(
+    estimated_tokens: usize,
+    budget: usize,
+    turns: usize,
+    model: &str,
+    real_window: Option<u32>,
+) -> String {
+    let pct = (estimated_tokens * 100)
+        .checked_div(budget)
+        .unwrap_or(0)
+        .clamp(0, 100);
+    let mut lines = vec![
+        "上下文诊断 (Context Diagnosis):".to_string(),
+        format!(
+            "  估算占用: {} / {} tokens （约 {}% 的软预算）",
+            estimated_tokens, budget, pct
+        ),
+        format!("  轮次消息: {} 条", turns),
+    ];
+    if model.is_empty() {
+        lines.push("  模型: 未配置 / 未知".to_string());
+    } else {
+        lines.push(format!("  模型: {}", model));
+        if let Some(w) = real_window {
+            lines.push(format!("  模型窗口(查表): {} tokens", w));
+        }
+    }
+    lines.push("  提示: 占用偏高时可用 /clear 清空历史，或把关键信息存入 /memory".to_string());
+    lines.join("\n")
 }
 
 /// One entry in the bottom status panel's live-activity ring. Carries only
@@ -251,6 +336,10 @@ pub struct ChatView {
     /// surfaced in the footer as the "Σ total".
     pub token_in_total: u64,
     pub token_out_total: u64,
+    /// Latest context-window usage (0–100% of the history token budget),
+    /// mirrored from the bridge via `AgentToTui::ContextUsage`. Surfaced in the
+    /// per-turn token footer as a small gauge (`Cxt ▰▰▱▱▱ NN%`).
+    pub ctx_usage_pct: Option<u8>,
     /// Cursor column within `input` (byte index), for the inline input editor.
     pub cursor: usize,
     /// Monotonic animation frame counter, advanced by the event loop to drive
@@ -296,6 +385,7 @@ impl Default for ChatView {
             guide: None,
             token_in_total: 0,
             token_out_total: 0,
+            ctx_usage_pct: None,
             cursor: 0,
             anim_frame: 0,
             hint_index: 0,
@@ -349,12 +439,42 @@ impl ChatView {
     /// assistant reply was produced this turn.
     pub fn push_token_footer(&mut self, duration_secs: f64) {
         if self.assistant_emitted {
-            self.items.push(StreamItem::TokenStat(format!(
+            let stats = format!(
                 "⏱ {:.1}s · Σ{} in / Σ{} out",
                 duration_secs,
                 fmt_tokens(self.token_in_total),
                 fmt_tokens(self.token_out_total),
-            )));
+            );
+            self.items.push(StreamItem::TokenStat(TokenStat {
+                stats,
+                ctx_pct: self.ctx_usage_pct,
+            }));
+            // Phase B: when the context window is near its limit, gently nudge
+            // the user toward managing it. Non-modal, appended right after the
+            // footer so the flow reads: answer → footer → soft hint.
+            if self.ctx_usage_pct > Some(CONTEXT_WARN_THRESHOLD) {
+                self.items
+                    .push(StreamItem::ContextHint(CONTEXT_HINT_MSG.to_string()));
+            }
+        }
+    }
+
+    /// Build the 5-cell mini gauge for a context-usage percentage. Each cell is
+    /// 20%; filled cells use `▰`, empty use `▱`.
+    fn ctx_gauge(pct: u8) -> String {
+        let filled = ((pct as f32 / 20.0).round() as usize).clamp(0, 5);
+        format!("{}{}", "▰".repeat(filled), "▱".repeat(5 - filled))
+    }
+
+    /// Map a context-usage percentage to a color + warning flag.
+    /// <60% calm sage green, 60–85% warm amber, >85% red (with a warning glyph).
+    fn ctx_level(pct: u8) -> (Color, bool) {
+        if pct > 85 {
+            (Color::Red, true)
+        } else if pct >= 60 {
+            (HINT_ACCENT_COLOR, false)
+        } else {
+            (Color::Rgb(150, 170, 150), false)
         }
     }
 
@@ -509,13 +629,19 @@ impl ChatView {
                         )));
                     }
                 }
-                StreamItem::TokenStat(text) => {
-                    for l in text.lines() {
-                        lines.push(Line::from(Span::styled(
-                            l.to_string(),
-                            Style::default().fg(Color::DarkGray),
-                        )));
+                StreamItem::TokenStat(t) => {
+                    let mut spans = vec![Span::styled(
+                        t.stats.clone(),
+                        Style::default().fg(Color::DarkGray),
+                    )];
+                    if let Some(pct) = t.ctx_pct {
+                        spans.push(Span::raw(" "));
+                        let (color, warn) = Self::ctx_level(pct);
+                        let prefix = if warn { "⚠ " } else { "" };
+                        let label = format!("Cxt {}{} {}%", prefix, Self::ctx_gauge(pct), pct);
+                        spans.push(Span::styled(label, Style::default().fg(color)));
                     }
+                    lines.push(Line::from(spans));
                 }
                 StreamItem::Summary(text) => {
                     // Compact end-of-turn status summary that replaces the
@@ -529,6 +655,27 @@ impl ChatView {
                                 .fg(Color::Rgb(120, 150, 120))
                                 .add_modifier(Modifier::DIM),
                         )));
+                    }
+                }
+                StreamItem::ContextHint(text) => {
+                    // Soft, non-modal nudge (Phase B). Calm amber, dimmed, with a
+                    // small marker so it reads as a gentle suggestion rather than
+                    // an error — reuses the existing inline-block styling.
+                    for l in text.lines() {
+                        lines.push(Line::from(vec![
+                            Span::styled(
+                                "⚠ ",
+                                Style::default()
+                                    .fg(Color::Rgb(195, 155, 110))
+                                    .add_modifier(Modifier::DIM),
+                            ),
+                            Span::styled(
+                                l.to_string(),
+                                Style::default()
+                                    .fg(Color::Rgb(195, 155, 110))
+                                    .add_modifier(Modifier::DIM),
+                            ),
+                        ]));
                     }
                 }
             }
@@ -1177,6 +1324,10 @@ pub fn apply_event(view: &mut ChatView, msg: &AgentToTui) -> ApplyOutcome {
         } => {
             view.token_in_total = view.token_in_total.saturating_add(*in_count);
             view.token_out_total = view.token_out_total.saturating_add(*out_count);
+            ApplyOutcome::Continue
+        }
+        AgentToTui::ContextUsage { pct } => {
+            view.ctx_usage_pct = Some(*pct);
             ApplyOutcome::Continue
         }
         // Mode/plan/data events: not part of the core humanistic stream.
@@ -2309,7 +2460,7 @@ mod tests {
             .items
             .iter()
             .find_map(|i| match i {
-                StreamItem::TokenStat(s) => Some(s.clone()),
+                StreamItem::TokenStat(t) => Some(t.stats.clone()),
                 _ => None,
             })
             .expect("token footer should be pushed");
@@ -2351,7 +2502,7 @@ mod tests {
             .items
             .iter()
             .find_map(|i| match i {
-                StreamItem::TokenStat(s) => Some(s.clone()),
+                StreamItem::TokenStat(t) => Some(t.stats.clone()),
                 _ => None,
             })
             .expect("token footer should be pushed");
@@ -2359,6 +2510,193 @@ mod tests {
         assert!(
             footer.contains("Σ300 out"),
             "cumulative out wrong: {footer}"
+        );
+    }
+
+    #[test]
+    fn token_footer_carries_context_gauge() {
+        let mut view = ChatView::default();
+        view.pending_assistant = "hello".into();
+        view.finalize_assistant();
+        view.token_in_total = 1200;
+        view.token_out_total = 800;
+        view.ctx_usage_pct = Some(42);
+        view.push_token_footer(3.4);
+        let t = view
+            .items
+            .iter()
+            .find_map(|i| match i {
+                StreamItem::TokenStat(t) => Some(t),
+                _ => None,
+            })
+            .expect("token footer should be pushed");
+        assert_eq!(t.ctx_pct, Some(42), "context pct not carried into footer");
+        assert!(t.stats.contains("3.4s"), "duration missing: {}", t.stats);
+    }
+
+    #[test]
+    fn token_footer_context_over_limit_marks_red() {
+        let mut view = ChatView::default();
+        view.pending_assistant = "hi".into();
+        view.finalize_assistant();
+        view.ctx_usage_pct = Some(88);
+        view.push_token_footer(1.0);
+        let t = view
+            .items
+            .iter()
+            .find_map(|i| match i {
+                StreamItem::TokenStat(t) => Some(t),
+                _ => None,
+            })
+            .expect("token footer should be pushed");
+        assert_eq!(t.ctx_pct, Some(88));
+        // The gauge helper must flag this as a red warning.
+        let (color, warn) = ChatView::ctx_level(88);
+        assert_eq!(color, ratatui::style::Color::Red);
+        assert!(warn, "over-limit usage must warn");
+    }
+
+    #[test]
+    fn ctx_gauge_and_level() {
+        // Gauge: 5 cells, one per 20% (integer boundaries, no half-rounding).
+        assert_eq!(ChatView::ctx_gauge(0), "▱▱▱▱▱");
+        assert_eq!(ChatView::ctx_gauge(20), "▰▱▱▱▱");
+        assert_eq!(ChatView::ctx_gauge(40), "▰▰▱▱▱");
+        assert_eq!(ChatView::ctx_gauge(60), "▰▰▰▱▱");
+        assert_eq!(ChatView::ctx_gauge(80), "▰▰▰▰▱");
+        assert_eq!(ChatView::ctx_gauge(100), "▰▰▰▰▰");
+        // Level colors: <60% sage green, 60–85% amber, >85% red.
+        assert_eq!(
+            ChatView::ctx_level(30).0,
+            ratatui::style::Color::Rgb(150, 170, 150)
+        );
+        assert!(!ChatView::ctx_level(30).1);
+        assert_eq!(ChatView::ctx_level(70).0, HINT_ACCENT_COLOR);
+        assert!(!ChatView::ctx_level(70).1);
+        assert_eq!(ChatView::ctx_level(88).0, ratatui::style::Color::Red);
+        assert!(ChatView::ctx_level(88).1);
+    }
+
+    #[test]
+    fn context_gauge_rendered_in_token_footer() {
+        let mut view = ChatView::default();
+        view.items.push(StreamItem::TokenStat(TokenStat {
+            stats: "⏱ 3.4s · Σ1.2k in / Σ800 out".into(),
+            ctx_pct: Some(88),
+        }));
+        let backend = TestBackend::new(80, 10);
+        let mut term = Terminal::new(backend).unwrap();
+        term.draw(|f| render_frame(f, &mut view)).unwrap();
+        let s = buffer_text(&term);
+        assert!(s.contains("Cxt"), "context gauge label missing: {s}");
+        assert!(s.contains("88%"), "context pct missing: {s}");
+    }
+
+    #[test]
+    fn context_hint_pushed_when_over_threshold() {
+        // Phase B: a soft inline hint appears after the footer once usage
+        // crosses CONTEXT_WARN_THRESHOLD.
+        let mut view = ChatView::default();
+        view.pending_assistant = "done".into();
+        view.finalize_assistant();
+        view.ctx_usage_pct = Some(92);
+        view.push_token_footer(1.0);
+        let hint = view
+            .items
+            .iter()
+            .find_map(|i| match i {
+                StreamItem::ContextHint(t) => Some(t),
+                _ => None,
+            })
+            .expect("context hint should be pushed above threshold");
+        assert_eq!(hint, CONTEXT_HINT_MSG);
+    }
+
+    #[test]
+    fn no_context_hint_when_below_threshold() {
+        let mut view = ChatView::default();
+        view.pending_assistant = "done".into();
+        view.finalize_assistant();
+        view.ctx_usage_pct = Some(42);
+        view.push_token_footer(1.0);
+        assert!(
+            !view
+                .items
+                .iter()
+                .any(|i| matches!(i, StreamItem::ContextHint(_))),
+            "no hint below threshold"
+        );
+    }
+
+    #[test]
+    fn context_hint_rendered_inline() {
+        let mut view = ChatView::default();
+        view.items
+            .push(StreamItem::ContextHint(CONTEXT_HINT_MSG.to_string()));
+        let backend = TestBackend::new(80, 10);
+        let mut term = Terminal::new(backend).unwrap();
+        term.draw(|f| render_frame(f, &mut view)).unwrap();
+        let s = buffer_text(&term);
+        assert!(s.contains("/clear"), "hint should mention /clear: {s}");
+        assert!(s.contains("memory"), "hint should mention /memory: {s}");
+    }
+
+    #[test]
+    fn model_context_window_known_and_unknown() {
+        // Phase C (§6.1): a few well-known families resolve to a window; an
+        // unrecognized label returns None so callers fall back to the budget.
+        assert_eq!(
+            model_context_window("anthropic/claude-sonnet-4"),
+            Some(200_000)
+        );
+        assert_eq!(model_context_window("openai/gpt-4o"), Some(128_000));
+        assert_eq!(
+            model_context_window("google/gemini-1.5-pro"),
+            Some(1_000_000)
+        );
+        assert_eq!(model_context_window("deepseek/deepseek-chat"), Some(64_000));
+        assert_eq!(model_context_window("some-unknown-model"), None);
+        // Case-insensitive + substring match.
+        assert_eq!(model_context_window("Claude-3-5-Sonnet"), Some(200_000));
+    }
+
+    #[test]
+    fn build_context_report_contains_sections() {
+        // Phase C (§6.3): the diagnostic surfaces the estimate, budget %, turns,
+        // model, and the management hint. Pure-function so it's testable here.
+        let report = build_context_report(
+            30_000,
+            60_000,
+            12,
+            "anthropic/claude-sonnet-4",
+            Some(200_000),
+        );
+        assert!(report.contains("上下文诊断"), "title missing: {report}");
+        assert!(
+            report.contains("30000 / 60000"),
+            "estimate missing: {report}"
+        );
+        assert!(report.contains("50%"), "budget pct missing: {report}");
+        assert!(report.contains("12 条"), "turns missing: {report}");
+        assert!(
+            report.contains("claude-sonnet-4"),
+            "model missing: {report}"
+        );
+        assert!(report.contains("200000"), "real window missing: {report}");
+        assert!(
+            report.contains("/clear"),
+            "management hint missing: {report}"
+        );
+
+        // Unknown model: no real-window line, but still reports budget usage.
+        let unknown = build_context_report(1_000, 60_000, 2, "", None);
+        assert!(
+            unknown.contains("未配置"),
+            "unknown model not noted: {unknown}"
+        );
+        assert!(
+            !unknown.contains("模型窗口"),
+            "should not show window for unknown"
         );
     }
 }

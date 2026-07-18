@@ -1,0 +1,8 @@
+schema_version: 1
+module_path: tauri_desktop
+title: Rupoo Tauri 桌面应用壳层
+scope:
+    - src-tauri/
+source_files: []
+depends_on: []
+related_to: []
