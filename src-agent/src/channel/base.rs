@@ -82,7 +82,7 @@ impl SessionManager {
     pub fn new(max_sessions: usize) -> Self {
         Self {
             sessions: Mutex::new(LruCache::new(
-                NonZeroUsize::new(max_sessions.max(1)).unwrap(),
+                NonZeroUsize::new(max_sessions.max(1)).unwrap_or(std::num::NonZeroUsize::MIN),
             )),
             repo: None,
         }
@@ -110,7 +110,10 @@ impl SessionManager {
     ) -> crate::llm::ConversationHistory {
         // Fast path: sender 已缓存 — 单次加锁内 clone + push，O(n) 深拷贝。
         {
-            let mut cache = self.sessions.lock().unwrap();
+            let mut cache = self
+                .sessions
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
             if let Some(session) = cache.get_mut(sender) {
                 let mut fresh = session.clone();
                 fresh.push_user(text);
@@ -127,7 +130,10 @@ impl SessionManager {
             None
         };
 
-        let mut cache = self.sessions.lock().unwrap();
+        let mut cache = self
+            .sessions
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let history = match loaded {
             Some(mut h) => {
                 h = h.with_token_budget(MAX_HISTORY_TOKENS);
@@ -150,7 +156,10 @@ impl SessionManager {
     pub async fn push_response(&self, sender: &str, response: &str, channel: &str) {
         // 作用域内加锁：push 后直接 clone（ConversationHistory 已实现 Clone，O(n)）。
         let clone: Option<crate::llm::ConversationHistory> = {
-            let mut cache = self.sessions.lock().unwrap();
+            let mut cache = self
+                .sessions
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
             if let Some(session) = cache.get_mut(sender) {
                 session.push_assistant(response);
                 Some(session.clone())
@@ -171,7 +180,10 @@ impl SessionManager {
     /// 清除某个发送者的会话并删除持久化数据。
     pub async fn clear_session(&self, sender: &str, channel: &str) {
         {
-            let mut cache = self.sessions.lock().unwrap();
+            let mut cache = self
+                .sessions
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
             cache.pop(sender);
         } // lock released here
         if let Some(ref repo) = self.repo {

@@ -1,6 +1,6 @@
 [package]
 name = "rupoo-tauri"
-version = "0.5.0"
+version = "0.6.3"
 edition = "2021"
 description = "Tauri desktop app for rupoo AI agent"
 

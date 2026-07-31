@@ -60,22 +60,40 @@ impl EmbeddingService {
     /// - Ollama: nomic-embed-text (768 dimensions)
     pub fn new(config: &LlmConfig, http_client: &Arc<reqwest::Client>) -> AgentResult<Self> {
         match &config.provider {
-            LlmProvider::OpenAI => {
+            LlmProvider::OpenAI | LlmProvider::DeepSeek | LlmProvider::Gemini => {
                 let api_key = config.api_key.clone()
                     .ok_or_else(|| AgentError::Config(
-                        "OpenAI embedding requires an API key. Set it via: rupoo config set api_key.openai <key>".into()
+                        format!("{} embedding requires an API key. Set it via: rupoo config set api_key.{} <key>",
+                            config.provider, config.provider)
                     ))?;
 
-                // Use text-embedding-3-small by default (good balance of quality and cost)
-                let model = config
-                    .embedding_model
-                    .clone()
-                    .unwrap_or_else(|| "text-embedding-3-small".to_string());
-
-                let dimension = Self::get_openai_dimension(&model);
+                let (model, dimension, provider_name) = match &config.provider {
+                    LlmProvider::OpenAI | LlmProvider::DeepSeek => (
+                        config
+                            .embedding_model
+                            .clone()
+                            .unwrap_or_else(|| "text-embedding-3-small".to_string()),
+                        Self::get_openai_dimension(
+                            config
+                                .embedding_model
+                                .as_deref()
+                                .unwrap_or("text-embedding-3-small"),
+                        ),
+                        "openai",
+                    ),
+                    LlmProvider::Gemini => (
+                        config
+                            .embedding_model
+                            .clone()
+                            .unwrap_or_else(|| "text-embedding-004".to_string()),
+                        768, // text-embedding-004
+                        "gemini",
+                    ),
+                    _ => unreachable!(),
+                };
 
                 info!(
-                    provider = "openai",
+                    provider = provider_name,
                     model = %model,
                     dimension = dimension,
                     "embedding service initialized"
@@ -83,7 +101,7 @@ impl EmbeddingService {
 
                 Ok(Self {
                     dimension,
-                    provider: "openai".to_string(),
+                    provider: provider_name.to_string(),
                     http_client: Arc::clone(http_client),
                     api_key: Some(api_key),
                     base_url: config.base_url.clone(),
@@ -179,6 +197,7 @@ impl EmbeddingService {
 
         let embedding = match self.provider.as_str() {
             "openai" => self.embed_openai(text).await?,
+            "gemini" => self.embed_gemini(text).await?,
             "ollama" => self.embed_ollama(text).await?,
             "anthropic-fallback" => self.embed_fallback(text).await?,
             _ => {
@@ -287,6 +306,58 @@ impl EmbeddingService {
         let embedding = json["embedding"]
             .as_array()
             .ok_or_else(|| AgentError::Llm("Invalid Ollama embedding response".into()))?
+            .iter()
+            .filter_map(|v| v.as_f64().map(|f| f as f32))
+            .collect();
+
+        Ok(embedding)
+    }
+
+    /// Generate embedding using Gemini API
+    async fn embed_gemini(&self, text: &str) -> AgentResult<Vec<f32>> {
+        let api_key = self
+            .api_key
+            .as_ref()
+            .ok_or_else(|| AgentError::Config("Gemini API key not set".into()))?;
+
+        let url = format!(
+            "https://generativelanguage.googleapis.com/v1beta/models/{}:embedContent?key={}",
+            self.model, api_key
+        );
+
+        let request = serde_json::json!({
+            "model": format!("models/{}", self.model),
+            "content": {
+                "parts": [{ "text": text }]
+            }
+        });
+
+        let response = self
+            .http_client
+            .post(&url)
+            .json(&request)
+            .send()
+            .await
+            .map_err(|e| AgentError::Llm(format!("Gemini embedding request failed: {}", e)))?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            return Err(AgentError::Llm(format!(
+                "Gemini embedding failed: {} - {}",
+                status, body
+            )));
+        }
+
+        let json: serde_json::Value = response
+            .json()
+            .await
+            .map_err(|e| AgentError::Llm(format!("Failed to parse Gemini response: {}", e)))?;
+
+        // Extract embedding from response
+        let embedding = json["embedding"]["values"]
+            .as_array()
+            .ok_or_else(|| AgentError::Llm("Invalid Gemini embedding response".into()))?
             .iter()
             .filter_map(|v| v.as_f64().map(|f| f as f32))
             .collect();

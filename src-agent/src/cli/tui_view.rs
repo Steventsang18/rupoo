@@ -25,7 +25,7 @@ use ratatui::{
     widgets::{Block, Borders, Paragraph, Wrap},
     Frame,
 };
-use rupoo::{AgentToTui, MessageRole, ToolPhase};
+use rupoo::{AgentToTui, Density, MessageRole, ToolPhase};
 use std::collections::VecDeque;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
@@ -108,9 +108,21 @@ pub fn kind_label(name: &str) -> String {
         .unwrap_or_else(|| name.to_string())
 }
 
-/// Breathing-pulse glyphs cycled while the agent is working, to convey live
-/// activity without a hard spinner.
-const PULSE: &[&str] = &["●", "◍", "○", "◍"];
+/// Status-word heartbeat period, in animation frames. `ANIM_MS` (120ms) per
+/// frame → 12 frames ≈ 1.44s per beat. Deliberately slow so the dot "breathes"
+/// instead of flickering (replaces the old 120ms pulse).
+pub const HEARTBEAT_FRAMES: u64 = 12;
+
+/// Calm, single-word agent states shown in the bottom-right status cell.
+pub const STATUS_WORDS: &[&str] = &[
+    "Idle",
+    "Thinking",
+    "Reading",
+    "Writing",
+    "Running",
+    "Generating",
+    "Reviewing",
+];
 
 /// State for the first-launch "使用指南" (getting-started) overlay.
 #[derive(Debug, Clone)]
@@ -151,19 +163,6 @@ impl Phase {
             Phase::Planning => "planning",
             Phase::Acting => "acting",
             Phase::Verifying => "verifying",
-        }
-    }
-
-    /// Friendly, English status sentence shown next to the pulse while the
-    /// agent is busy — reassures the user about what is happening right now
-    /// (replaces the terse `label()` in the status bar).
-    fn status_text(self) -> &'static str {
-        match self {
-            Phase::Idle => "",
-            Phase::Understanding => "Organizing response…",
-            Phase::Planning => "Planning the approach…",
-            Phase::Acting => "Searching for relevant information…",
-            Phase::Verifying => "Reviewing the answer…",
         }
     }
 }
@@ -351,9 +350,10 @@ pub struct ChatView {
     /// Live running-activity ring for the bottom status panel. Holds recent
     /// tool calls (name + state) only — no paths. Capped at `STATUS_RING_CAP`.
     pub status_ring: VecDeque<StatusEvent>,
-    /// Whether the bottom status panel is expanded (mini-log) vs collapsed
-    /// (single-line summary). Defaults to collapsed.
-    pub status_expanded: bool,
+    /// Whether the "运行纪要" (activity) overlay is open. Toggled by `]` /
+    /// `Shift+A` / `/activity`. When open, a calm snapshot of recent tool
+    /// activity is drawn on top (static — no blinking, no auto-scroll).
+    pub activity_overlay: bool,
     /// Whether the expanded mini-log auto-follows the newest activity (live
     /// scroll). When a workflow run ends (`Idle`) this is cleared so the panel
     /// freezes at the last item instead of keeping scroll-jumping — the user
@@ -365,6 +365,11 @@ pub struct ChatView {
     /// Cached rect of the panel's right (activity) cell, set each paint; the
     /// mouse handler uses it to detect clicks on the panel.
     pub status_panel_rect: Rect,
+    /// Most recent tool name dispatched while in the `Acting` phase, used to
+    /// refine the bottom-right status word (Reading / Writing / Running).
+    pub last_tool: Option<String>,
+    /// TUI 排版密度（由 `/ui density` 控制）。
+    pub density: Density,
 }
 
 impl Default for ChatView {
@@ -390,10 +395,12 @@ impl Default for ChatView {
             anim_frame: 0,
             hint_index: 0,
             status_ring: VecDeque::with_capacity(STATUS_RING_CAP),
-            status_expanded: false,
+            activity_overlay: false,
             status_follow: true,
             status_scroll: 0,
             status_panel_rect: Rect::default(),
+            last_tool: None,
+            density: Density::Comfortable,
         }
     }
 }
@@ -518,8 +525,22 @@ impl ChatView {
 
     /// Render the full set of items into terminal `Line`s (pre-wrapping).
     fn to_lines(&self) -> Vec<Line<'static>> {
+        let comfortable = self.density == Density::Comfortable;
+        let assistant_color = if comfortable {
+            Color::Rgb(225, 230, 235) // brighter near-white in comfortable mode
+        } else {
+            Color::Gray
+        };
         let mut lines = Vec::new();
+        let mut started = false;
         for item in &self.items {
+            // Comfortable density inserts a blank line between conversation
+            // turns (user / thinking starts) for calmer, more readable spacing.
+            let is_turn_start = matches!(item, StreamItem::User(_) | StreamItem::Thinking { .. });
+            if comfortable && started && is_turn_start {
+                lines.push(Line::from(""));
+            }
+            started = true;
             match item {
                 StreamItem::User(text) => {
                     // Chat-bubble style (WeChat/Feishu): the user's own messages
@@ -545,7 +566,10 @@ impl ChatView {
                 }
                 StreamItem::Assistant(text) => {
                     for l in text.lines() {
-                        lines.push(Line::from(Span::raw(l.to_string())));
+                        lines.push(Line::from(Span::styled(
+                            l.to_string(),
+                            Style::default().fg(assistant_color),
+                        )));
                     }
                 }
                 StreamItem::Thinking {
@@ -827,7 +851,9 @@ fn wrap_to_ranges(text: &str, width: usize) -> Vec<(usize, usize)> {
                     row_w += 1 + ww;
                 }
                 Some(_) => {
-                    ranges.push((row_start.take().unwrap(), row_end));
+                    if let Some(start) = row_start.take() {
+                        ranges.push((start, row_end));
+                    }
                     row_start = Some(ws_off);
                     row_end = we_off;
                     row_w = ww;
@@ -931,14 +957,10 @@ pub fn render_frame(f: &mut Frame, view: &mut ChatView) {
     let max_input_rows = (area.height.saturating_sub(3)).max(1).min(hard_cap) as usize;
     let input_block_rows = input_rows.min(max_input_rows);
 
-    // Bottom status panel: collapsed = 1 line, expanded = up to 3 lines. Never
-    // steal the chat's 1-line floor or the input block (chat stays Min(1)).
-    let avail_for_hint = (area.height as i32 - 2 - input_block_rows as i32).clamp(1, 3);
-    let hint_rows: u16 = if view.status_expanded {
-        avail_for_hint as u16
-    } else {
-        1
-    };
+    // Bottom status cell is always a single calm line (the status word). The
+    // detailed activity log, when needed, is an on-demand overlay — never a
+    // permanently-reserved multi-row panel that steals space from the chat.
+    let hint_rows: u16 = 1;
 
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -950,20 +972,9 @@ pub fn render_frame(f: &mut Frame, view: &mut ChatView) {
         ])
         .split(area);
 
-    // Top status bar: brand + tagline (left) | model + phase (right).
-    let phase_span = match view.phase {
-        Phase::Idle => Span::styled("●", Style::default().fg(Color::DarkGray)),
-        p => {
-            // Breathing pulse + a reassuring English status sentence so the
-            // user never stares at a dead "waiting" state.
-            let pulse = PULSE[view.anim_frame as usize % PULSE.len()];
-            let status = p.status_text();
-            Span::styled(
-                format!("{pulse} {status}"),
-                Style::default().fg(Color::Cyan),
-            )
-        }
-    };
+    // Top status bar: brand + tagline (left) | model (right).
+    // The running status is intentionally NOT shown here — it lives in the
+    // bottom-right single status word to avoid redundant, blinking prompts.
     let model_span = if view.model_label.is_empty() {
         Span::styled("no model", Style::default().fg(Color::DarkGray))
     } else {
@@ -974,7 +985,7 @@ pub fn render_frame(f: &mut Frame, view: &mut ChatView) {
             Style::default().fg(Color::DarkGray),
         )
     };
-    let right = Line::from(vec![model_span, Span::raw(" "), phase_span]);
+    let right = Line::from(vec![model_span]);
     let left = Line::from(vec![
         Span::styled(
             BRAND_GLYPH,
@@ -1069,12 +1080,14 @@ pub fn render_frame(f: &mut Frame, view: &mut ChatView) {
     let input_para = Paragraph::new(input_lines).scroll((input_scroll as u16, 0));
     f.render_widget(input_para, chunks[2]);
 
-    // Bottom bar: left = quiet rotating tip; right = live status panel. The bar
-    // splits horizontally, mirroring the top status bar's left/right layout.
-    let panel_w = (area.width / 2).max(1);
+    // Bottom bar: left = quiet rotating tip; right = single status word. The bar
+    // splits horizontally, mirroring the top status bar's left/right layout. The
+    // status cell is deliberately narrow (fixed width) so the left tip keeps the
+    // majority of the bar.
+    let panel_w = (area.width as usize / 3).clamp(10, 22);
     let hbar = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([Constraint::Min(0), Constraint::Length(panel_w)])
+        .constraints([Constraint::Min(0), Constraint::Length(panel_w as u16)])
         .split(chunks[3]);
     let tip = HINT_TIPS[view.hint_index % HINT_TIPS.len()];
     let (label, rest) = tip.split_once(": ").unwrap_or((tip, ""));
@@ -1089,9 +1102,16 @@ pub fn render_frame(f: &mut Frame, view: &mut ChatView) {
         ));
     }
     f.render_widget(Paragraph::new(Line::from(hint_spans)), hbar[0]);
-    // Record the panel's right cell for the mouse click hit-test, then paint it.
+    // Record the panel's right cell for the mouse click hit-test, then paint the
+    // single status word.
     view.status_panel_rect = hbar[1];
-    render_status_panel(f, &*view, hbar[1]);
+    render_status_word(f, view, hbar[1]);
+
+    // "运行纪要" overlay (toggled by `]` / `Shift+A` / `/activity`): a calm
+    // snapshot of recent tool activity, drawn on top of everything when open.
+    if view.activity_overlay {
+        render_activity_overlay(f, view);
+    }
 
     // First-launch getting-started overlay (drawn on top of everything).
     if let Some(guide) = &view.guide {
@@ -1104,71 +1124,158 @@ pub fn render_frame(f: &mut Frame, view: &mut ChatView) {
     f.set_cursor_position((chunks[2].x.saturating_add(cursor_col as u16), cur_y));
 }
 
-/// Render the bottom status panel's right cell: a collapsed one-line summary of
-/// running activities, or (when expanded) a `▾` header plus a recent-activity
-/// mini-log. Path-free by design — only the tool name + state are shown.
-fn render_status_panel(f: &mut Frame, view: &ChatView, area: Rect) {
-    let mut lines: Vec<Line> = Vec::new();
-    if !view.status_expanded {
-        // Collapsed: count currently-running activities by tool name.
-        let mut counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
-        for e in &view.status_ring {
-            if matches!(e.state, ToolState::Running) {
-                *counts.entry(e.name.clone()).or_insert(0) += 1;
-            }
-        }
-        if counts.is_empty() {
-            lines.push(Line::from(Span::styled(
-                "✓ 就绪",
-                Style::default().fg(Color::DarkGray),
-            )));
-        } else {
-            let summary = counts
-                .iter()
-                .map(|(n, c)| format!("{} {}", kind_label(n), c))
-                .collect::<Vec<_>>()
-                .join(" · ");
-            lines.push(Line::from(Span::styled(
-                format!("⏺ {summary}"),
-                Style::default().fg(Color::Cyan),
-            )));
-        }
-    } else {
-        // Expanded: header + the recent activity log (newest at the bottom).
-        lines.push(Line::from(Span::styled(
-            format!("▾ 运行活动 ({})", view.status_ring.len()),
-            Style::default().fg(Color::Cyan),
-        )));
-        for e in &view.status_ring {
-            let (glyph, color) = match e.state {
-                ToolState::Running => ("⏺", Color::Yellow),
-                ToolState::Done(_) => ("✓", Color::Green),
-                ToolState::Failed => ("✗", Color::Red),
-            };
-            lines.push(Line::from(Span::styled(
-                format!("{} {}", glyph, kind_label(&e.name)),
-                Style::default().fg(color),
-            )));
-        }
+pub fn status_word(view: &ChatView) -> &'static str {
+    if view.phase == Phase::Idle {
+        return "Idle";
     }
-    let total = lines.len();
-    let visible = area.height as usize;
-    // Expanded log: while `status_follow` is set the panel live-follows the
-    // newest line (auto-scroll). Once the workflow ends (`Idle`) or the user
-    // scrolls manually, `status_follow` is cleared and the panel freezes at the
-    // user's scroll position (or the last item when `status_scroll == 0`) — no
-    // more auto-scrolling churn.
-    let offset = if view.status_expanded {
-        let bottom = total.saturating_sub(visible) as u16;
-        if view.status_follow {
-            bottom
-        } else {
-            bottom.saturating_sub(view.status_scroll)
-        }
-    } else {
-        0
+    // While assistant text is actively streaming we are Generating, regardless
+    // of the high-level phase (which may still read Understanding/Acting).
+    if !view.pending_assistant.is_empty() {
+        return "Generating";
+    }
+    match view.phase {
+        Phase::Idle => "Idle",
+        Phase::Understanding | Phase::Planning => "Thinking",
+        Phase::Verifying => "Reviewing",
+        Phase::Acting => tool_status_word(view.last_tool.as_deref()),
+    }
+}
+
+/// Refine the `Acting` status word from the most recent tool name.
+fn tool_status_word(tool: Option<&str>) -> &'static str {
+    let n = match tool {
+        Some(n) => n,
+        None => return "Writing",
     };
-    f.render_widget(Paragraph::new(lines).scroll((offset, 0)), area);
+    let l = n.to_ascii_lowercase();
+    if l.contains("read")
+        || l.contains("glob")
+        || l.contains("grep")
+        || l.contains("web")
+        || l.contains("search")
+        || l.contains("fetch")
+    {
+        "Reading"
+    } else if l.contains("write")
+        || l.contains("edit")
+        || l.contains("patch")
+        || l.contains("delete")
+        || l.contains("rm")
+        || l.contains("remove")
+    {
+        "Writing"
+    } else if l.contains("bash")
+        || l.contains("exec")
+        || l.contains("run")
+        || l.contains("shell")
+        || l.contains("sh")
+        || l.contains("python")
+        || l.contains("node")
+        || l.contains("command")
+    {
+        "Running"
+    } else {
+        "Writing"
+    }
+}
+
+/// Foreground color for each status word — calm, low-saturation.
+fn status_text_color(word: &str) -> Color {
+    match word {
+        "Idle" => Color::DarkGray,
+        "Thinking" => Color::Rgb(120, 150, 210), // soft blue
+        "Reading" => Color::Rgb(200, 160, 90),   // amber
+        "Writing" => Color::Rgb(120, 190, 130),  // green
+        "Running" => Color::Rgb(210, 180, 110),  // yellow
+        "Generating" => Color::Rgb(180, 150, 210), // violet
+        "Reviewing" => Color::Rgb(110, 190, 200), // cyan
+        _ => Color::DarkGray,
+    }
+}
+
+/// Darken an Rgb color by ~40% for the "off" half of the slow heartbeat.
+fn dim(c: Color) -> Color {
+    match c {
+        Color::Rgb(r, g, b) => Color::Rgb(
+            (r as u16 * 6 / 10) as u8,
+            (g as u16 * 6 / 10) as u8,
+            (b as u16 * 6 / 10) as u8,
+        ),
+        other => other,
+    }
+}
+
+/// Render the single status word in the bottom-right cell. A small dot
+/// "breathes" at `HEARTBEAT_FRAMES` (~1.5s) so the state feels alive without
+/// flickering; `Idle` is a static grey dot.
+fn render_status_word(f: &mut Frame, view: &ChatView, area: Rect) {
+    let word = status_word(view);
+    let beat = (view.anim_frame / HEARTBEAT_FRAMES).is_multiple_of(2);
+    let color = if word == "Idle" {
+        Color::DarkGray
+    } else if beat {
+        status_text_color(word)
+    } else {
+        dim(status_text_color(word))
+    };
+    let line = Line::from(vec![
+        Span::styled("●", Style::default().fg(color)),
+        Span::raw(" "),
+        Span::styled(word, Style::default().fg(status_text_color(word))),
+    ]);
+    f.render_widget(Paragraph::new(line).alignment(Alignment::Right), area);
+}
+
+/// "运行纪要" overlay: a calm, static snapshot of recent tool activity. Drawn
+/// on top of the chat when `view.activity_overlay` is set. No auto-scroll, no
+/// blinking — the user opens it on demand (`]` / `Shift+A` / `/activity`) and
+/// closes it with `Esc`. Shows the last N entries as `glyph name  duration`.
+fn render_activity_overlay(f: &mut Frame, view: &ChatView) {
+    let n = view.status_ring.len().min(12);
+    let recent: Vec<&StatusEvent> = view.status_ring.iter().rev().take(n).collect();
+    let rows = recent.len().saturating_add(2) as u16; // header + entries
+    let max_h = (f.area().height.saturating_sub(3)).min(rows).min(14);
+    let max_w = (f.area().width.saturating_sub(4)).min(48);
+    if max_h < 3 || max_w < 12 {
+        return; // terminal too small to draw a useful overlay
+    }
+    let area = Rect {
+        x: f.area().width.saturating_sub(max_w + 1),
+        y: f.area().height.saturating_sub(max_h + 1),
+        width: max_w,
+        height: max_h,
+    };
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::DarkGray))
+        .title(" 运行纪要 (最近活动) — Esc 关闭 ");
+    let mut lines: Vec<Line> = Vec::new();
+    // If the list overflows, show the newest `max_h - 2` entries.
+    let visible = (max_h as usize).saturating_sub(2);
+    let start = recent.len().saturating_sub(visible);
+    for e in &recent[start..] {
+        let (glyph, color, dur) = match e.state {
+            ToolState::Running => ("⏺", Color::Yellow, "running".to_string()),
+            ToolState::Done(secs) => (
+                "✓",
+                Color::Green,
+                if secs > 0.0 {
+                    format!("{secs:.1}s")
+                } else {
+                    "-".to_string()
+                },
+            ),
+            ToolState::Failed => ("✗", Color::Red, "-".to_string()),
+        };
+        lines.push(Line::from(vec![
+            Span::styled(format!("{glyph} "), Style::default().fg(color)),
+            Span::styled(kind_label(&e.name), Style::default().fg(Color::Gray)),
+            Span::raw(format!("  {dur}")),
+        ]));
+    }
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+    f.render_widget(Paragraph::new(lines), inner);
 }
 
 /// Outcome of applying one agent event to the view.
@@ -1219,6 +1326,7 @@ pub fn apply_event(view: &mut ChatView, msg: &AgentToTui) -> ApplyOutcome {
                 ToolPhase::Calling => {
                     let id = view.next_id();
                     view.open_tool_id = Some(id);
+                    view.last_tool = Some(tool_name.clone());
                     view.items.push(StreamItem::Tool {
                         id,
                         name: tool_name.clone(),
@@ -1308,6 +1416,7 @@ pub fn apply_event(view: &mut ChatView, msg: &AgentToTui) -> ApplyOutcome {
             view.phase = Phase::Idle;
             view.phase_detail = None;
             view.open_tool_id = None;
+            view.last_tool = None;
             // Issue 2: fold this turn's inline tool "done" rows into one summary
             // so the stream keeps only the core result / status, not the noise.
             view.collapse_tool_rows();
@@ -2142,7 +2251,7 @@ mod tests {
     #[test]
     fn status_panel_freezes_at_last_item_after_idle() {
         let mut view = ChatView::default();
-        view.status_expanded = true;
+        view.activity_overlay = true;
         assert!(view.status_follow, "fresh panel follows");
         apply_event(
             &mut view,
@@ -2158,7 +2267,7 @@ mod tests {
             "panel must freeze after the workflow ends"
         );
         assert!(
-            view.status_expanded,
+            view.activity_overlay,
             "panel stays expanded, frozen at the last item"
         );
     }
@@ -2201,21 +2310,23 @@ mod tests {
         assert!(!s.contains("RUPOO"), "brand must be cased 'Rupoo'");
     }
 
-    /// During an active phase the status bar must show a pulsing indicator plus
-    /// a reassuring English status sentence, not a dead "waiting" state.
+    /// During an active phase the top bar shows only the model; the running
+    /// state lives in the bottom-right single status word ("Thinking"). The old
+    /// blinking pulse + English status sentence must be gone.
     #[test]
-    fn status_bar_shows_pulsing_status_during_active_phase() {
+    fn status_bar_shows_status_word_not_pulse() {
         let mut view = ChatView::default();
         view.model_label = "claude-sonnet-4".into();
         view.phase = Phase::Understanding;
-        view.anim_frame = 1; // pick a non-trivial pulse frame
+        view.anim_frame = 1;
         let backend = TestBackend::new(100, 6);
         let mut term = Terminal::new(backend).unwrap();
         term.draw(|f| render_frame(f, &mut view)).unwrap();
         let s = buffer_text(&term);
+        assert!(s.contains("Thinking"), "status word missing: {s}");
         assert!(
-            s.contains("Organizing response"),
-            "active status sentence missing: {s}"
+            !s.contains("Organizing response"),
+            "old pulse sentence must be gone: {s}"
         );
         assert!(s.contains("Rupoo"), "brand missing: {s}");
         assert!(s.contains("claude-sonnet-4"), "model missing: {s}");
@@ -2247,10 +2358,11 @@ mod tests {
         );
     }
 
-    /// The bottom status panel collapses by default to a one-line summary of
-    /// currently-running activities (path-free), driven by the status ring.
+    /// With the `Acting` phase + read/web tools, the bottom-right status word
+    /// refines to a single calm word ("Reading") — not the old blinking
+    /// multi-tool summary ("⏺ 读取文件2 · 网络搜索1").
     #[test]
-    fn status_panel_collapsed_shows_running_summary() {
+    fn status_panel_collapsed_shows_status_word() {
         let mut view = ChatView::default();
         apply_event(
             &mut view,
@@ -2276,30 +2388,31 @@ mod tests {
         let backend = TestBackend::new(100, 6);
         let mut term = Terminal::new(backend).unwrap();
         term.draw(|f| render_frame(f, &mut view)).unwrap();
-        // CJK glyphs occupy two cells (second cell is a space placeholder), so
-        // strip whitespace before substring checks.
         let compact: String = buffer_text(&term)
             .chars()
             .filter(|c| !c.is_whitespace())
             .collect();
-        assert!(compact.contains('⏺'), "running marker missing: {compact}");
         assert!(
-            compact.contains("读取文件2"),
-            "read_file x2 not summarized: {compact}"
+            compact.contains("Reading"),
+            "status word should be Reading: {compact}"
         );
         assert!(
-            compact.contains("网络搜索1"),
-            "web_search x1 not summarized: {compact}"
+            !compact.contains("读取文件2"),
+            "old multi-tool summary must be gone: {compact}"
+        );
+        assert!(
+            !compact.contains("网络搜索1"),
+            "old multi-tool summary must be gone: {compact}"
         );
     }
 
-    /// Expanded, the panel lists recent activities (newest at the bottom) with a
-    /// header — still path-free. The panel caps at 3 rows, so two events keep
-    /// the header on screen.
+    /// With the activity overlay open, a calm snapshot of recent tool activity
+    /// is drawn on top — not the old blinking "▾ 运行活动 (N)" header. The
+    /// bottom-right still shows the single status word.
     #[test]
-    fn status_panel_expanded_lists_activities() {
+    fn activity_overlay_lists_recent_tools() {
         let mut view = ChatView::default();
-        view.status_expanded = true;
+        view.activity_overlay = true;
         apply_event(
             &mut view,
             &AgentToTui::ToolStatus {
@@ -2322,16 +2435,20 @@ mod tests {
             .filter(|c| !c.is_whitespace())
             .collect();
         assert!(
-            compact.contains("运行活动(2)"),
-            "header+count missing: {compact}"
-        );
-        assert!(
             compact.contains("读取文件"),
-            "read_file not listed: {compact}"
+            "tool name missing in overlay: {compact}"
         );
         assert!(
             compact.contains('✓'),
             "completed tool should show done glyph: {compact}"
+        );
+        assert!(
+            compact.contains("Reading"),
+            "status word missing: {compact}"
+        );
+        assert!(
+            !compact.contains("运行活动(2)"),
+            "old header must be gone: {compact}"
         );
     }
 
@@ -2342,12 +2459,90 @@ mod tests {
         assert_eq!(kind_label("read_file"), "读取文件");
     }
 
-    /// Expanding on a tiny terminal must not panic and still paints the panel
-    /// (chat + input floors are preserved).
+    /// The bottom-right status word maps phase + last tool + streaming state
+    /// onto a single calm vocabulary (Idle/Thinking/Reading/Writing/Running/
+    /// Generating/Reviewing).
     #[test]
-    fn status_panel_expanded_on_tiny_terminal_no_panic() {
+    fn status_word_maps_idle_thinking_reading_writing_running() {
         let mut view = ChatView::default();
-        view.status_expanded = true;
+        assert_eq!(status_word(&view), "Idle");
+        view.phase = Phase::Understanding;
+        assert_eq!(status_word(&view), "Thinking");
+        view.phase = Phase::Planning;
+        assert_eq!(status_word(&view), "Thinking");
+        view.phase = Phase::Acting;
+        view.last_tool = Some("read_file".into());
+        assert_eq!(status_word(&view), "Reading");
+        view.last_tool = Some("write_file".into());
+        assert_eq!(status_word(&view), "Writing");
+        view.last_tool = Some("bash".into());
+        assert_eq!(status_word(&view), "Running");
+        // Streaming assistant text → Generating regardless of the high phase.
+        view.phase = Phase::Verifying;
+        view.pending_assistant = "hello".into();
+        assert_eq!(status_word(&view), "Generating");
+        view.pending_assistant.clear();
+        assert_eq!(status_word(&view), "Reviewing");
+    }
+
+    /// Comfortable density inserts a blank line between conversation turns;
+    /// Compact keeps the stream tight (no extra spacing).
+    #[test]
+    fn comfortable_density_inserts_blank_line_between_turns() {
+        let mut view = ChatView::default();
+        view.density = Density::Comfortable;
+        view.items.push(StreamItem::User("hi".into()));
+        view.items.push(StreamItem::Assistant("hello there".into()));
+        view.items.push(StreamItem::User("again".into()));
+        let lines = view.to_lines();
+        let blank = lines
+            .iter()
+            .filter(|l| l.spans.iter().all(|s| s.content.is_empty()))
+            .count();
+        assert!(blank >= 1, "comfortable mode should add spacing: {blank}");
+
+        let mut compact = ChatView::default();
+        compact.density = Density::Compact;
+        compact.items.push(StreamItem::User("hi".into()));
+        compact
+            .items
+            .push(StreamItem::Assistant("hello there".into()));
+        compact.items.push(StreamItem::User("again".into()));
+        let clines = compact.to_lines();
+        let cblank = clines
+            .iter()
+            .filter(|l| l.spans.iter().all(|s| s.content.is_empty()))
+            .count();
+        assert_eq!(cblank, 0, "compact mode should not add spacing");
+    }
+
+    #[test]
+    fn activity_overlay_opens_and_lists_tools() {
+        let mut view = ChatView::default();
+        view.activity_overlay = true;
+        apply_event(
+            &mut view,
+            &AgentToTui::ToolStatus {
+                tool_name: "edit_file".into(),
+                phase: ToolPhase::Completed,
+            },
+        );
+        let backend = TestBackend::new(80, 10);
+        let mut term = Terminal::new(backend).unwrap();
+        term.draw(|f| render_frame(f, &mut view)).unwrap();
+        let s = buffer_text(&term);
+        assert!(
+            s.contains("edit_file") || s.contains("编辑文件"),
+            "overlay should list the tool: {s}"
+        );
+    }
+
+    /// Opening the overlay on a tiny terminal must not panic; the status word
+    /// still renders and the old blinking header is gone.
+    #[test]
+    fn activity_overlay_on_tiny_terminal_no_panic() {
+        let mut view = ChatView::default();
+        view.activity_overlay = true;
         view.input = "hello".into();
         apply_event(
             &mut view,
@@ -2358,14 +2553,18 @@ mod tests {
         );
         let backend = TestBackend::new(40, 6);
         let mut term = Terminal::new(backend).unwrap();
-        term.draw(|f| render_frame(f, &mut view)).unwrap();
+        term.draw(|f| render_frame(f, &mut view)).unwrap(); // must not panic
         let compact: String = buffer_text(&term)
             .chars()
             .filter(|c| !c.is_whitespace())
             .collect();
         assert!(
-            compact.contains("运行活动"),
-            "panel still renders expanded: {compact}"
+            compact.contains("Reading"),
+            "status word missing: {compact}"
+        );
+        assert!(
+            !compact.contains("运行活动"),
+            "old header must be gone: {compact}"
         );
     }
 

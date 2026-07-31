@@ -11,10 +11,11 @@
 use std::fs::OpenOptions;
 use std::io::{self, Write};
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use tracing::warn;
-use tracing_subscriber::EnvFilter;
+use tracing_subscriber::prelude::*;
+use tracing_subscriber::{reload, EnvFilter};
 
 /// Field names that should be redacted in all log output.
 const SENSITIVE_FIELDS: &[&str] = &[
@@ -98,11 +99,46 @@ impl<W: Write + 'static> tracing_subscriber::fmt::MakeWriter<'_> for RedactingWr
     }
 }
 
+/// Runtime handle for adjusting the log level of the live subscriber.
+///
+/// Obtained from [`init_logging`] (or [`level_controller`] afterwards) and
+/// used by the config hot-reload watcher to apply `[logging] level` live.
+#[derive(Clone)]
+pub struct LogLevelController {
+    handle: reload::Handle<EnvFilter, tracing_subscriber::Registry>,
+}
+
+impl LogLevelController {
+    /// Switch the global log level, keeping the `RUST_LOG` base filter.
+    /// Returns false if `level` is not a valid tracing level.
+    pub fn set_level(&self, level: &str) -> bool {
+        let directive = match level.parse() {
+            Ok(d) => d,
+            Err(_) => return false,
+        };
+        let filter = EnvFilter::from_default_env().add_directive(directive);
+        self.handle.reload(filter).is_ok()
+    }
+}
+
+/// Controller of the process-wide log level, if logging was initialised.
+static LEVEL_CTRL: OnceLock<LogLevelController> = OnceLock::new();
+
+/// Return the live log-level controller, if any.
+///
+/// `None` before [`init_logging`] runs — callers (e.g. the config watcher)
+/// should treat that as "hot-reload unavailable".
+pub fn level_controller() -> Option<&'static LogLevelController> {
+    LEVEL_CTRL.get()
+}
+
 /// Initialise the tracing subscriber.
 ///
 /// When `verbose` is false (default) logs go to a file only.
 /// When `verbose` is true logs ≥ DEBUG are additionally shown on stderr.
-pub fn init_logging(verbose: bool) {
+///
+/// Returns a controller that can switch the level at runtime.
+pub fn init_logging(verbose: bool) -> LogLevelController {
     let log_dir = data_dir();
     std::fs::create_dir_all(&log_dir).ok();
     let log_path = log_dir.join("rupoo.log");
@@ -125,33 +161,17 @@ pub fn init_logging(verbose: bool) {
         }
     }
 
-    let log_to_stderr = |verbose: bool| {
-        let builder = tracing_subscriber::fmt()
-            .with_ansi(false)
-            .with_target(true)
-            .with_thread_ids(true);
-        if verbose {
-            builder
-                .with_env_filter(
-                    EnvFilter::from_default_env().add_directive(
-                        "debug"
-                            .parse()
-                            .unwrap_or_else(|_| tracing::Level::DEBUG.into()),
-                    ),
-                )
-                .init();
-        } else {
-            builder
-                .with_env_filter(
-                    EnvFilter::from_default_env().add_directive(
-                        "info"
-                            .parse()
-                            .unwrap_or_else(|_| tracing::Level::INFO.into()),
-                    ),
-                )
-                .init();
-        }
-    };
+    // Base filter honouring RUST_LOG, with a built-in floor at `verbose`.
+    let default_level = if verbose { "debug" } else { "info" };
+    let base = EnvFilter::from_default_env().add_directive(
+        default_level
+            .parse()
+            .unwrap_or_else(|_| tracing::Level::INFO.into()),
+    );
+    let (filter, handle): (
+        reload::Layer<EnvFilter, tracing_subscriber::Registry>,
+        reload::Handle<EnvFilter, tracing_subscriber::Registry>,
+    ) = reload::Layer::new(base);
 
     match OpenOptions::new()
         .create(true)
@@ -162,33 +182,18 @@ pub fn init_logging(verbose: bool) {
         Ok(file) => {
             let file_writer = Arc::new(Mutex::new(file));
             let redacting = RedactingWriter::new(file_writer);
-            let builder = tracing_subscriber::fmt()
-                .with_writer(redacting)
-                .with_ansi(false)
-                .with_target(true)
-                .with_thread_ids(true);
-
+            tracing_subscriber::registry()
+                .with(filter)
+                .with(
+                    tracing_subscriber::fmt::layer()
+                        .with_writer(redacting)
+                        .with_ansi(false)
+                        .with_target(true)
+                        .with_thread_ids(true),
+                )
+                .init();
             if verbose {
-                builder
-                    .with_env_filter(
-                        EnvFilter::from_default_env().add_directive(
-                            "debug"
-                                .parse()
-                                .unwrap_or_else(|_| tracing::Level::DEBUG.into()),
-                        ),
-                    )
-                    .init();
                 eprintln!("[rupoo] verbose logging enabled");
-            } else {
-                builder
-                    .with_env_filter(
-                        EnvFilter::from_default_env().add_directive(
-                            "info"
-                                .parse()
-                                .unwrap_or_else(|_| tracing::Level::INFO.into()),
-                        ),
-                    )
-                    .init();
             }
         }
         Err(e) => {
@@ -196,9 +201,21 @@ pub fn init_logging(verbose: bool) {
                 "[rupoo] warning: cannot create log file at {}: {e}, logging to stderr only",
                 log_path.display()
             );
-            log_to_stderr(verbose);
+            tracing_subscriber::registry()
+                .with(filter)
+                .with(
+                    tracing_subscriber::fmt::layer()
+                        .with_ansi(false)
+                        .with_target(true)
+                        .with_thread_ids(true),
+                )
+                .init();
         }
     }
+
+    let ctrl = LogLevelController { handle };
+    let _ = LEVEL_CTRL.set(ctrl.clone());
+    ctrl
 }
 
 /// Return the data directory — see [`rupoo::rupoo_home()`].
@@ -216,8 +233,15 @@ pub fn data_dir() -> PathBuf {
 
     #[cfg(not(target_os = "windows"))]
     {
-        rupoo::rupoo_home()
+        crate::rupoo_home()
     }
+}
+
+/// Return the data directory as a `String`, or `Err` if the path is not valid UTF-8.
+/// Used by the global panic hook to write crash logs without allocating a `PathBuf`.
+pub fn data_dir_str() -> Result<String, std::path::PathBuf> {
+    let dir = data_dir();
+    dir.into_os_string().into_string().map_err(|_| data_dir())
 }
 
 #[cfg(test)]

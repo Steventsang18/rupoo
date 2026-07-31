@@ -8,8 +8,10 @@ use tracing::{info, warn};
 use crate::error::{AgentError, AgentResult};
 use crate::llm::history::{ConversationHistory, LlmChatMessage};
 use crate::llm::providers::{
-    build_anthropic_agent, build_anthropic_agent_streaming, build_ollama_agent,
-    build_ollama_agent_streaming, build_openai_agent, build_openai_agent_streaming,
+    build_anthropic_agent, build_anthropic_agent_streaming, build_deepseek_agent,
+    build_deepseek_agent_streaming, build_gemini_agent, build_gemini_agent_streaming,
+    build_ollama_agent, build_ollama_agent_streaming, build_openai_agent,
+    build_openai_agent_streaming,
 };
 use crate::llm::{AgentEvent, LlmConfig, LlmProvider, TokenUsage};
 
@@ -164,6 +166,42 @@ impl LlmGateway {
             match &self.config.provider {
                 LlmProvider::Anthropic => {
                     let agent = build_anthropic_agent(
+                        &self.config,
+                        preamble,
+                        jail_root.as_deref(),
+                        &self.http_client,
+                    )?;
+                    let response = agent
+                        .prompt(&prompt)
+                        .extended_details()
+                        .await
+                        .map_err(|e| AgentError::Llm(format!("LLM request failed: {e}")))?;
+                    (
+                        response.output,
+                        response.total_usage.input_tokens,
+                        response.total_usage.output_tokens,
+                    )
+                }
+                LlmProvider::DeepSeek => {
+                    let agent = build_deepseek_agent(
+                        &self.config,
+                        preamble,
+                        jail_root.as_deref(),
+                        &self.http_client,
+                    )?;
+                    let response = agent
+                        .prompt(&prompt)
+                        .extended_details()
+                        .await
+                        .map_err(|e| AgentError::Llm(format!("LLM request failed: {e}")))?;
+                    (
+                        response.output,
+                        response.total_usage.input_tokens,
+                        response.total_usage.output_tokens,
+                    )
+                }
+                LlmProvider::Gemini => {
+                    let agent = build_gemini_agent(
                         &self.config,
                         preamble,
                         jail_root.as_deref(),
@@ -343,6 +381,28 @@ impl LlmGateway {
                     &self.http_client,
                 )?;
                 self.chat_stream_generic("Anthropic", agent, messages, max_turns, &mut on_event)
+                    .await
+            }
+            LlmProvider::DeepSeek => {
+                let agent = build_deepseek_agent_streaming(
+                    &self.config,
+                    &preamble,
+                    self.jail_root.as_deref(),
+                    safe_mode,
+                    &self.http_client,
+                )?;
+                self.chat_stream_generic("DeepSeek", agent, messages, max_turns, &mut on_event)
+                    .await
+            }
+            LlmProvider::Gemini => {
+                let agent = build_gemini_agent_streaming(
+                    &self.config,
+                    &preamble,
+                    self.jail_root.as_deref(),
+                    safe_mode,
+                    &self.http_client,
+                )?;
+                self.chat_stream_generic("Gemini", agent, messages, max_turns, &mut on_event)
                     .await
             }
             LlmProvider::OpenAI => {
@@ -592,6 +652,38 @@ impl LlmGateway {
                     jail_root.as_deref(),
                     &self.http_client,
                 )?;
+                let response = agent
+                    .prompt(&prompt_text)
+                    .extended_details()
+                    .await
+                    .map_err(|e| AgentError::Llm(format!("LLM request failed: {e}")))?;
+                (
+                    response.output,
+                    response.total_usage.input_tokens,
+                    response.total_usage.output_tokens,
+                )
+            }
+            LlmProvider::DeepSeek => {
+                let agent = build_deepseek_agent(
+                    &self.config,
+                    "",
+                    jail_root.as_deref(),
+                    &self.http_client,
+                )?;
+                let response = agent
+                    .prompt(&prompt_text)
+                    .extended_details()
+                    .await
+                    .map_err(|e| AgentError::Llm(format!("LLM request failed: {e}")))?;
+                (
+                    response.output,
+                    response.total_usage.input_tokens,
+                    response.total_usage.output_tokens,
+                )
+            }
+            LlmProvider::Gemini => {
+                let agent =
+                    build_gemini_agent(&self.config, "", jail_root.as_deref(), &self.http_client)?;
                 let response = agent
                     .prompt(&prompt_text)
                     .extended_details()

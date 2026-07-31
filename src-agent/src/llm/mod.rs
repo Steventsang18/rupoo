@@ -108,6 +108,8 @@ pub struct LlmConfig {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum LlmProvider {
     Anthropic,
+    DeepSeek,
+    Gemini,
     OpenAI,
     Ollama,
 }
@@ -116,6 +118,8 @@ impl std::fmt::Display for LlmProvider {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             LlmProvider::Anthropic => write!(f, "anthropic"),
+            LlmProvider::DeepSeek => write!(f, "deepseek"),
+            LlmProvider::Gemini => write!(f, "gemini"),
             LlmProvider::OpenAI => write!(f, "openai"),
             LlmProvider::Ollama => write!(f, "ollama"),
         }
@@ -127,6 +131,11 @@ impl LlmConfig {
     pub fn new(provider: LlmProvider, api_key: Option<String>) -> Self {
         let (model, base_url) = match &provider {
             LlmProvider::Anthropic => ("claude-sonnet-4-20250514".into(), None),
+            LlmProvider::DeepSeek => (
+                "deepseek-chat".into(),
+                Some("https://api.deepseek.com".into()),
+            ),
+            LlmProvider::Gemini => ("gemini-2.5-flash".into(), None),
             LlmProvider::OpenAI => ("gpt-4o".into(), None),
             LlmProvider::Ollama => ("llama3.2".into(), Some("http://localhost:11434".into())),
         };

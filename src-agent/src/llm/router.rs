@@ -253,7 +253,21 @@ impl LlmRouter {
     }
 
     /// Send a chat request with automatic routing, fallback, and retry.
+    ///
+    /// Wraps [`Self::chat_impl`] to record round-trip latency metrics.
     pub async fn chat(
+        &self,
+        messages: &[crate::llm::history::LlmChatMessage],
+        intent: Option<&IntentState>,
+    ) -> AgentResult<(String, TokenUsage)> {
+        let started = std::time::Instant::now();
+        let result = self.chat_impl(messages, intent).await;
+        crate::telemetry::record_llm_call_duration(started.elapsed().as_secs_f64());
+        result
+    }
+
+    /// Core chat routing: provider selection, fallback chain, retry.
+    async fn chat_impl(
         &self,
         messages: &[crate::llm::history::LlmChatMessage],
         intent: Option<&IntentState>,

@@ -1,8 +1,0 @@
-schema_version: 1
-module_path: agent_core/channel_integrations
-title: IM 渠道集成层（飞书/钉钉）
-scope:
-    - src-agent/src/channel/
-source_files: []
-depends_on: []
-related_to: []

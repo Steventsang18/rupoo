@@ -187,10 +187,11 @@ impl ConversationHistory {
         // window. Multi-turn accumulation is handled by the loop above.
         if current_chars > budget_chars && !non_system.is_empty() {
             let excess = current_chars - budget_chars;
-            let last = non_system.last_mut().unwrap();
-            if last.content.len() > excess {
-                let keep = last.content.len() - excess;
-                last.content.truncate(keep);
+            if let Some(last) = non_system.last_mut() {
+                if last.content.len() > excess {
+                    let keep = last.content.len() - excess;
+                    last.content.truncate(keep);
+                }
             }
         }
 

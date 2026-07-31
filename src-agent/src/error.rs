@@ -1,36 +1,50 @@
+use miette::Diagnostic;
 use thiserror::Error;
 
-#[derive(Error, Debug)]
+#[derive(Error, Debug, Diagnostic)]
 pub enum AgentError {
     #[error("Database error: {0}")]
+    #[diagnostic(code(rupoo::E001), help("检查数据库文件权限和磁盘空间"))]
     Database(#[from] rusqlite::Error),
 
     #[error("Serialization error: {0}")]
+    #[diagnostic(code(rupoo::E002), help("数据结构格式异常，检查输入 JSON/YAML 格式"))]
     Serialization(#[from] serde_json::Error),
 
     #[error("Plan not found: {0}")]
+    #[diagnostic(
+        code(rupoo::E003),
+        help("执行计划可能已过期或被删除，使用 /session list 查看")
+    )]
     PlanNotFound(String),
 
     #[error("Invalid step index: {0}")]
+    #[diagnostic(code(rupoo::E004), help("内部步骤索引错误，请重启任务"))]
     InvalidStepIndex(usize),
 
     #[error("Agent already running for plan: {0}")]
+    #[diagnostic(code(rupoo::E005), help("等待当前任务完成，或使用 /session kill 终止"))]
     AlreadyRunning(String),
 
     #[error("MCP error: {0}")]
+    #[diagnostic(code(rupoo::E006), help("检查 MCP 服务端状态和配置"))]
     Mcp(String),
 
     #[error("IO error: {0}")]
+    #[diagnostic(code(rupoo::E007), help("检查文件路径、权限和磁盘空间"))]
     Io(#[from] std::io::Error),
 
     #[error("Join error: {0}")]
+    #[diagnostic(code(rupoo::E008), help("异步任务被取消或 panic，检查日志详情"))]
     Join(String),
 
     // --- LLM-related errors ---
     #[error("LLM error: {0}")]
+    #[diagnostic(code(rupoo::E009), help("AI 服务返回错误，检查 API 配额和网络连接"))]
     Llm(String),
 
     #[error("LLM request failed")]
+    #[diagnostic(code(rupoo::E010), help("AI 请求失败，检查 provider 配置和网络"))]
     LlmRequest {
         #[source]
         source: Option<Box<dyn std::error::Error + Send + Sync>>,
@@ -38,15 +52,24 @@ pub enum AgentError {
     },
 
     #[error("LLM rate limited")]
+    #[diagnostic(code(rupoo::E011), help("请求过于频繁，等待限制解除后重试"))]
     LlmRateLimited {
         retry_after: Option<u64>,
         provider: String,
     },
 
     #[error("LLM model not found: {model}")]
+    #[diagnostic(
+        code(rupoo::E012),
+        help("检查模型名称拼写，或确认 provider 支持该模型")
+    )]
     LlmModelNotFound { model: String, provider: String },
 
     #[error("LLM authentication failed: {provider}")]
+    #[diagnostic(
+        code(rupoo::E013),
+        help("检查 API 密钥是否正确/有效，使用 /config set 更新")
+    )]
     LlmAuthFailed {
         provider: String,
         #[source]
@@ -55,15 +78,18 @@ pub enum AgentError {
 
     // --- Configuration errors ---
     #[error("Config error: {0}")]
+    #[diagnostic(code(rupoo::E014), help("配置文件格式错误，检查 config.toml 语法"))]
     Config(String),
 
     #[error("Missing required config: {key}")]
+    #[diagnostic(code(rupoo::E015), help("在 config.toml 中添加缺失的配置项"))]
     MissingConfig {
         key: String,
         section: Option<String>,
     },
 
     #[error("Invalid config value: {key} = {value}")]
+    #[diagnostic(code(rupoo::E016), help("根据错误提示修正配置项的值"))]
     InvalidConfig {
         key: String,
         value: String,
@@ -72,26 +98,39 @@ pub enum AgentError {
 
     // --- Git errors ---
     #[error("Git error: {0}")]
+    #[diagnostic(code(rupoo::E017), help("Git 操作失败，检查仓库状态和权限"))]
     Git(String),
 
     #[error("Not a git repository: {path}")]
+    #[diagnostic(
+        code(rupoo::E018),
+        help("在 Git 仓库目录内运行，或使用 git init 初始化")
+    )]
     NotGitRepository { path: String },
 
     // --- Browser errors ---
     #[error("Browser error: {0}")]
+    #[diagnostic(
+        code(rupoo::E019),
+        help("浏览器操作失败，检查 Chrome/Firefox 是否可用")
+    )]
     Browser(String),
 
     #[error("Browser not found")]
+    #[diagnostic(code(rupoo::E020), help("安装 Chrome 或 Firefox 浏览器"))]
     BrowserNotFound,
 
     // --- Network errors ---
     #[error("Network error: {0}")]
+    #[diagnostic(code(rupoo::E021), help("检查网络连接和代理设置"))]
     Network(String),
 
     #[error("Connection timeout")]
+    #[diagnostic(code(rupoo::E022), help("网络超时，稍后重试或检查目标服务状态"))]
     ConnectionTimeout,
 
     #[error("DNS resolution failed: {host}")]
+    #[diagnostic(code(rupoo::E023), help("检查 DNS 配置，或尝试更换 DNS 服务器"))]
     DnsResolutionFailed {
         host: String,
         #[source]
@@ -100,28 +139,38 @@ pub enum AgentError {
 
     // --- Safety errors ---
     #[error("Safety error: {0}")]
+    #[diagnostic(code(rupoo::E024), help("操作违反安全策略，如有需要请联系管理员"))]
     Safety(String),
 
     #[error("Path traversal detected: {path} is outside jail root {jail_root}")]
+    #[diagnostic(code(rupoo::E025), help("禁止访问沙箱外的路径"))]
     PathTraversal { path: String, jail_root: String },
 
     #[error("Forbidden command: {command}")]
+    #[diagnostic(code(rupoo::E026), help("该命令已被安全策略禁止执行"))]
     ForbiddenCommand {
         command: String,
         reason: Option<String>,
     },
 
     #[error("SSRF blocked: {host} resolves to private IP")]
+    #[diagnostic(code(rupoo::E027), help("网络请求被 SSRF 防护拦截，禁止访问内网地址"))]
     SsrfBlocked { host: String, ip: String },
 
     // --- Skill errors ---
     #[error("Skill error: {0}")]
+    #[diagnostic(code(rupoo::E028), help("skill 执行异常，检查 skill 定义和依赖"))]
     Skill(String),
 
     #[error("Skill not found: {name}")]
+    #[diagnostic(
+        code(rupoo::E029),
+        help("确认 skill 名称正确，使用 /skills list 查看已安装")
+    )]
     SkillNotFound { name: String },
 
     #[error("Skill loading failed: {name}")]
+    #[diagnostic(code(rupoo::E030), help("skill 文件损坏或格式错误，尝试重新安装"))]
     SkillLoadFailed {
         name: String,
         #[source]
@@ -130,12 +179,18 @@ pub enum AgentError {
 
     // --- Tool errors ---
     #[error("Tool error: {0}")]
+    #[diagnostic(code(rupoo::E031), help("工具执行异常，检查工具配置和环境"))]
     Tool(String),
 
     #[error("Tool not found: {name}")]
+    #[diagnostic(
+        code(rupoo::E032),
+        help("确认工具名称正确，使用 /tools list 查看已安装")
+    )]
     ToolNotFound { name: String },
 
     #[error("Tool execution failed: {name}")]
+    #[diagnostic(code(rupoo::E033), help("工具执行出错，检查输入参数和目标环境"))]
     ToolExecutionFailed {
         name: String,
         #[source]
@@ -143,9 +198,11 @@ pub enum AgentError {
     },
 
     #[error("Tool timeout: {name}")]
+    #[diagnostic(code(rupoo::E034), help("工具执行超时，增加超时时间或简化任务"))]
     ToolTimeout { name: String, timeout_secs: u64 },
 
     #[error("Tool requires approval: {name}")]
+    #[diagnostic(code(rupoo::E035), help("该工具需要用户授权后执行"))]
     ToolRequiresApproval {
         name: String,
         params: serde_json::Value,
@@ -153,25 +210,31 @@ pub enum AgentError {
 
     // --- Tray errors ---
     #[error("Tray error: {0}")]
+    #[diagnostic(code(rupoo::E036), help("系统托盘功能异常，检查桌面环境支持"))]
     Tray(String),
 
     // --- Memory errors ---
     #[error("Memory feature is disabled")]
+    #[diagnostic(code(rupoo::E037), help("使用 /memory on 命令启用记忆功能"))]
     MemoryDisabled,
 
     #[error("Memory error: {0}")]
+    #[diagnostic(code(rupoo::E038), help("记忆系统操作失败，检查数据库状态"))]
     Memory(String),
 
     // --- Secret errors ---
     #[error("Keyring error: {0}")]
+    #[diagnostic(code(rupoo::E039), help("密钥环操作失败，检查系统密钥管理服务"))]
     Keyring(String),
 
     // --- Supervisor errors ---
     #[error("Low confidence: {confidence} (threshold: {threshold})")]
+    #[diagnostic(code(rupoo::E040), help("AI 推理置信度过低，请提供更明确的指令"))]
     LowConfidence { confidence: f64, threshold: f64 },
 
     // --- Circuit breaker ---
     #[error("Circuit breaker is open: {reason}")]
+    #[diagnostic(code(rupoo::E041), help("系统熔断保护已触发，等待冷却后自动恢复"))]
     CircuitBreakerOpen {
         reason: String,
         retry_after_secs: u64,
@@ -179,6 +242,7 @@ pub enum AgentError {
 
     // --- Other errors ---
     #[error("{0}")]
+    #[diagnostic(code(rupoo::E042), help("未知错误，查看日志获取详细信息"))]
     Other(String),
 }
 

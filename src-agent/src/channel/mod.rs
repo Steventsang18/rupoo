@@ -14,13 +14,14 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::time::sleep;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 use crate::build_engine;
 use crate::channel::base::ChannelRuntime;
 use crate::channel::dingtalk::DingTalkChannel;
 use crate::channel::feishu::FeishuChannel;
 use crate::config::RupooConfig;
+use crate::ops_server::{spawn_ops_server, OpsServerConfig};
 
 // ── Constants ────────────────────────────────────────────────────────
 
@@ -143,6 +144,36 @@ pub async fn run_channel_daemon(config_override: Option<RupooConfig>) -> Result<
         info!("no dingtalk channel configured, skipping");
     }
 
+    // Ops server: /healthz + /metrics for process supervisors.
+    // Optional by design — a bind failure must never take down the daemon.
+    let _ = crate::telemetry::init();
+    let ops_handle = if config.server.enabled {
+        spawn_ops_server(OpsServerConfig {
+            listen: config.server.listen.clone(),
+            max_concurrency: config.server.max_concurrency,
+        })
+        .await
+    } else {
+        info!("ops server disabled by config");
+        None
+    };
+
+    // Config hot-reload: watches config.toml and applies `[logging] level`
+    // live. Optional by design — a watch failure must not stop the daemon.
+    if let Some(path) = config.source_path.clone() {
+        if let Some(level_ctrl) = crate::tracing_setup::level_controller() {
+            match crate::config_watch::ConfigWatcher::start(path) {
+                Ok(watcher) => {
+                    tokio::spawn(watcher.run(level_ctrl.clone()));
+                }
+                Err(e) => warn!(
+                    error = %e,
+                    "config hot-reload disabled: cannot watch config.toml"
+                ),
+            }
+        }
+    }
+
     // Wait for shutdown signal
 
     tokio::spawn(async move {
@@ -170,6 +201,9 @@ pub async fn run_channel_daemon(config_override: Option<RupooConfig>) -> Result<
     while !shutdown.load(Ordering::SeqCst) {
         tokio::time::sleep(Duration::from_secs(1)).await;
     }
+    if let Some(handle) = ops_handle {
+        handle.abort();
+    }
     info!("all channels stopped");
     Ok(())
 }
@@ -195,6 +229,7 @@ async fn run_supervised_feishu(channel: FeishuChannel, shutdown: Arc<AtomicBool>
             }
             Err(e) => {
                 error!(error = %e, "feishu channel: connection error");
+                crate::telemetry::record_channel_error("feishu");
 
                 // Check for unrecoverable errors
                 let err_str = e.to_string().to_lowercase();
@@ -238,6 +273,7 @@ async fn run_supervised_dingtalk(channel: DingTalkChannel, shutdown: Arc<AtomicB
             }
             Err(e) => {
                 error!(error = %e, "dingtalk channel: connection error");
+                crate::telemetry::record_channel_error("dingtalk");
                 if e.to_string().contains("401") || e.to_string().contains("unauthorized") {
                     error!("dingtalk channel: unrecoverable auth error");
                     std::future::pending::<()>().await;

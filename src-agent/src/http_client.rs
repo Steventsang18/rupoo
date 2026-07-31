@@ -12,6 +12,8 @@ pub static HTTP_CLIENT: once_cell::sync::Lazy<Arc<Client>> = once_cell::sync::La
             .tcp_keepalive(Duration::from_secs(60))
             .connect_timeout(Duration::from_secs(10))
             .build()
-            .expect("HTTP client build failed"),
+            .expect(
+                "Failed to build HTTP client — likely missing TLS backend (install OpenSSL/rustls)",
+            ),
     )
 });

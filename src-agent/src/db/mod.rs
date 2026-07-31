@@ -20,78 +20,26 @@ pub mod loops;
 pub mod plans;
 pub mod settings;
 
-// Re-export for convenience
-// PlanSummary is defined directly in this module — do not re-export from plans.rs
-
 // ---------------------------------------------------------------------------
-// TaskRepo - Core database repository
+// Schema migrations
 // ---------------------------------------------------------------------------
 
-pub struct TaskRepo {
-    /// Write connection with mutex protection.
-    conn: Arc<Mutex<rusqlite::Connection>>,
-    /// Database path for spawning read connections.
-    db_path: String,
-}
+/// Current database schema version (stored in SQLite `PRAGMA user_version`).
+///
+/// Every release that changes the schema MUST bump this constant and append
+/// a matching migration to [`MIGRATIONS`]. Old databases are upgraded
+/// automatically and transactionally on first open.
+pub const SCHEMA_VERSION: i64 = 1;
 
-// ---------------------------------------------------------------------------
-// PlanSummary (lightweight, no full Plan deserialization)
-// ---------------------------------------------------------------------------
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PlanSummary {
-    pub id: String,
-    pub name: String,
-    pub current_step_index: usize,
-    pub total_steps: usize,
-    pub status: String,
-    pub created_at: String,
-    pub updated_at: String,
-}
-
-impl TaskRepo {
-    /// Open (or create) the database at `db_path` and ensure tables exist.
-    ///
-    /// For file-based databases (not `:memory:`), restricts file permissions
-    /// to owner-only (0o600 on Unix) to protect stored API keys and settings.
-    ///
-    /// Uses WAL mode for better concurrent read performance:
-    /// - Write operations use the main connection with mutex protection
-    /// - Read operations use a separate read-only connection for concurrent access
-    pub fn new(db_path: &str) -> AgentResult<Self> {
-        // Restrict file permissions before opening — protects stored API keys
-        if db_path != ":memory:" {
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                let path = std::path::Path::new(db_path);
-                if path.exists() {
-                    let perms = std::fs::Permissions::from_mode(0o600);
-                    std::fs::set_permissions(path, perms)?;
-                }
-            }
-        }
-
-        let conn = rusqlite::Connection::open(db_path)?;
-        // Enable WAL mode for better concurrent read performance
-        // Additional PRAGMA optimizations for better performance:
-        // - synchronous=NORMAL: balances safety and performance
-        // - cache_size=64000: increase page cache to 64MB (each page is ~4KB)
-        // - temp_store=MEMORY: use memory for temporary tables
-        // - journal_size_limit=104857600: limit WAL file size to 100MB
-        // - mmap_size=30000000000: enable memory-mapped I/O for large databases
-        conn.execute_batch(
-            "PRAGMA journal_mode=WAL;
-             PRAGMA busy_timeout=5000;
-             PRAGMA synchronous=NORMAL;
-             PRAGMA cache_size=-64000;
-             PRAGMA temp_store=MEMORY;
-             PRAGMA journal_size_limit=104857600;
-             PRAGMA mmap_size=30000000000;
-             PRAGMA foreign_keys=ON;",
-        )?;
-        conn.execute_batch(
-            "
+/// Ordered list of schema migrations. `MIGRATIONS[i]` upgrades the database
+/// from version `i` to version `i + 1`.
+///
+/// Migration 1 is the historical full-schema DDL. It uses `IF NOT EXISTS`
+/// everywhere so that databases created before versioning (v0.6.3 and older)
+/// upgrade cleanly without touching existing data.
+const MIGRATIONS: &[&str] = &[
+    // ── Migration 1: initial schema (plans, checkpoints, loops, cron, …) ──
+    r#"
             CREATE TABLE IF NOT EXISTS plans (
                 id          TEXT PRIMARY KEY,
                 name        TEXT NOT NULL,
@@ -226,8 +174,103 @@ impl TaskRepo {
                 ON audit_events(event_type, timestamp DESC);
             CREATE INDEX IF NOT EXISTS idx_audit_events_result
                 ON audit_events(result, timestamp DESC);
-            ",
+            "#,
+];
+
+/// Apply all pending migrations to `conn`, atomically per migration, and
+/// record the new schema version in `PRAGMA user_version`.
+///
+/// A database whose version is NEWER than this build is rejected: the user
+/// must upgrade rupoo first (downgrading would risk data loss).
+fn apply_migrations(conn: &rusqlite::Connection) -> AgentResult<()> {
+    let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+    if version > SCHEMA_VERSION {
+        return Err(AgentError::Other(format!(
+            "database schema v{version} is newer than rupoo supports (v{SCHEMA_VERSION}); upgrade rupoo first"
+        )));
+    }
+    for (i, sql) in MIGRATIONS.iter().enumerate().skip(version as usize) {
+        let target = (i + 1) as i64;
+        let tx = conn.unchecked_transaction()?;
+        tx.execute_batch(sql)?;
+        tx.execute_batch(&format!("PRAGMA user_version = {target};"))?;
+        tx.commit()?;
+        info!(schema_version = target, "database migration applied");
+    }
+    Ok(())
+}
+
+// Re-export for convenience
+// PlanSummary is defined directly in this module — do not re-export from plans.rs
+
+// ---------------------------------------------------------------------------
+// TaskRepo - Core database repository
+// ---------------------------------------------------------------------------
+
+pub struct TaskRepo {
+    /// Write connection with mutex protection.
+    conn: Arc<Mutex<rusqlite::Connection>>,
+    /// Database path for spawning read connections.
+    db_path: String,
+}
+
+// ---------------------------------------------------------------------------
+// PlanSummary (lightweight, no full Plan deserialization)
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PlanSummary {
+    pub id: String,
+    pub name: String,
+    pub current_step_index: usize,
+    pub total_steps: usize,
+    pub status: String,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+impl TaskRepo {
+    /// Open (or create) the database at `db_path` and ensure tables exist.
+    ///
+    /// For file-based databases (not `:memory:`), restricts file permissions
+    /// to owner-only (0o600 on Unix) to protect stored API keys and settings.
+    ///
+    /// Uses WAL mode for better concurrent read performance:
+    /// - Write operations use the main connection with mutex protection
+    /// - Read operations use a separate read-only connection for concurrent access
+    pub fn new(db_path: &str) -> AgentResult<Self> {
+        // Restrict file permissions before opening — protects stored API keys
+        if db_path != ":memory:" {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let path = std::path::Path::new(db_path);
+                if path.exists() {
+                    let perms = std::fs::Permissions::from_mode(0o600);
+                    std::fs::set_permissions(path, perms)?;
+                }
+            }
+        }
+
+        let conn = rusqlite::Connection::open(db_path)?;
+        // Enable WAL mode for better concurrent read performance
+        // Additional PRAGMA optimizations for better performance:
+        // - synchronous=NORMAL: balances safety and performance
+        // - cache_size=64000: increase page cache to 64MB (each page is ~4KB)
+        // - temp_store=MEMORY: use memory for temporary tables
+        // - journal_size_limit=104857600: limit WAL file size to 100MB
+        // - mmap_size=30000000000: enable memory-mapped I/O for large databases
+        conn.execute_batch(
+            "PRAGMA journal_mode=WAL;
+             PRAGMA busy_timeout=5000;
+             PRAGMA synchronous=NORMAL;
+             PRAGMA cache_size=-64000;
+             PRAGMA temp_store=MEMORY;
+             PRAGMA journal_size_limit=104857600;
+             PRAGMA mmap_size=30000000000;
+             PRAGMA foreign_keys=ON;",
         )?;
+        apply_migrations(&conn)?;
         info!(db_path, "database initialized");
 
         // For in-memory DB, we just open a new connection (they share memory)
@@ -321,5 +364,64 @@ mod tests {
     /// Create an in-memory TaskRepo for testing.
     pub(super) fn repo() -> TaskRepo {
         TaskRepo::new(":memory:").unwrap()
+    }
+
+    fn schema_version(repo: &TaskRepo) -> i64 {
+        let conn = repo.conn.lock().unwrap();
+        conn.query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap()
+    }
+
+    #[test]
+    fn fresh_db_reaches_latest_schema_version() {
+        assert_eq!(schema_version(&repo()), SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn reopening_existing_db_is_idempotent() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("t.db");
+        let p = path.to_str().unwrap();
+
+        // First open runs migration 1; re-opens must be no-ops.
+        TaskRepo::new(p).unwrap();
+        TaskRepo::new(p).unwrap();
+        let repo = TaskRepo::new(p).unwrap();
+        assert_eq!(schema_version(&repo), SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn legacy_db_without_version_upgrades_to_latest() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("legacy.db");
+
+        // Simulate a pre-versioning database: full schema already created by
+        // the old `CREATE TABLE IF NOT EXISTS` bootstrap, user_version = 0.
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        conn.execute_batch(MIGRATIONS[0]).unwrap();
+        let version: i64 = conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(version, 0, "legacy db must start unversioned");
+        drop(conn);
+
+        let repo = TaskRepo::new(path.to_str().unwrap()).unwrap();
+        assert_eq!(schema_version(&repo), SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn newer_schema_is_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("future.db");
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        conn.pragma_update(None, "user_version", SCHEMA_VERSION + 1)
+            .unwrap();
+        drop(conn);
+
+        let err = match TaskRepo::new(path.to_str().unwrap()) {
+            Ok(_) => panic!("expected schema rejection"),
+            Err(e) => e,
+        };
+        assert!(err.to_string().contains("newer"), "got: {err}");
     }
 }

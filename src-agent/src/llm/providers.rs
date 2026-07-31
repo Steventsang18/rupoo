@@ -93,6 +93,51 @@ pub fn build_openai_agent(
     Ok(builder.build())
 }
 
+pub fn build_deepseek_agent(
+    config: &LlmConfig,
+    preamble: &str,
+    jail_root: Option<&std::path::Path>,
+    http_client: &Arc<reqwest::Client>,
+) -> AgentResult<rig::agent::Agent<rig::providers::openai::completion::CompletionModel>> {
+    use rig::agent::AgentBuilder;
+
+    let api_key = config.api_key.as_deref().ok_or_else(|| {
+        AgentError::Config(
+            "DeepSeek requires an API key. Set it via: rupoo config set api_key.deepseek <key>"
+                .into(),
+        )
+    })?;
+    let base_url = config
+        .base_url
+        .as_deref()
+        .unwrap_or("https://api.deepseek.com");
+    let client = <rig::providers::openai::client::Client<reqwest::Client>>::builder()
+        .api_key(api_key)
+        .base_url(base_url)
+        .http_client((**http_client).clone())
+        .build()
+        .map_err(|e| AgentError::Llm(format!("DeepSeek client init failed: {e}")))?;
+    let model = rig::providers::openai::completion::CompletionModel::new(
+        client.completions_api(),
+        &config.model,
+    );
+
+    let builder = AgentBuilder::new(model)
+        .preamble(preamble)
+        .temperature(config.temperature)
+        .max_tokens(config.max_tokens as u64)
+        .default_max_turns(DEFAULT_MAX_TURNS)
+        .tools(crate::rig_tools::build_boxed_tools(
+            jail_root.map(|p| p.to_path_buf()),
+        ))
+        // DeepSeek: disable thinking mode to avoid reasoning_content issues
+        .additional_params(serde_json::json!({
+            "thinking": {"type": "disabled"}
+        }));
+
+    Ok(builder.build())
+}
+
 pub fn build_ollama_agent(
     config: &LlmConfig,
     preamble: &str,
@@ -125,7 +170,37 @@ pub fn build_ollama_agent(
     Ok(builder.build())
 }
 
-/// Helper to finish building a streaming agent: apply common settings, register tools, build.
+pub fn build_gemini_agent(
+    config: &LlmConfig,
+    preamble: &str,
+    jail_root: Option<&std::path::Path>,
+    http_client: &Arc<reqwest::Client>,
+) -> AgentResult<rig::agent::Agent<rig::providers::gemini::CompletionModel>> {
+    use rig::agent::AgentBuilder;
+
+    let api_key = config.api_key.as_deref().ok_or_else(|| {
+        AgentError::Config(
+            "Gemini requires an API key. Set it via: rupoo config set api_key.gemini <key>".into(),
+        )
+    })?;
+    let client = <rig::providers::gemini::Client<reqwest::Client>>::builder()
+        .api_key(api_key.to_string())
+        .http_client((**http_client).clone())
+        .build()
+        .map_err(|e| AgentError::Llm(format!("Gemini client init failed: {e}")))?;
+    let model = rig::providers::gemini::CompletionModel::new(client, &config.model);
+
+    let builder = AgentBuilder::new(model)
+        .preamble(preamble)
+        .temperature(config.temperature)
+        .max_tokens(config.max_tokens as u64)
+        .default_max_turns(DEFAULT_MAX_TURNS)
+        .tools(crate::rig_tools::build_boxed_tools(
+            jail_root.map(|p| p.to_path_buf()),
+        ));
+
+    Ok(builder.build())
+}
 fn finish_streaming_agent<M: rig::completion::CompletionModel>(
     builder: rig::agent::AgentBuilder<M>,
     preamble: &str,
@@ -230,7 +305,78 @@ pub fn build_openai_agent_streaming(
     finish_streaming_agent(builder, preamble, config, jail_root, safe_mode)
 }
 
-/// Streaming agent for Ollama with safe_mode.
+/// Streaming agent for DeepSeek with safe_mode.
+/// Uses the OpenAI-compatible API with thinking mode disabled.
+pub fn build_deepseek_agent_streaming(
+    config: &LlmConfig,
+    preamble: &str,
+    jail_root: Option<&std::path::Path>,
+    safe_mode: bool,
+    http_client: &Arc<reqwest::Client>,
+) -> AgentResult<rig::agent::Agent<rig::providers::openai::completion::CompletionModel>> {
+    use rig::agent::AgentBuilder;
+
+    let api_key = config.api_key.as_deref().ok_or_else(|| {
+        AgentError::Config(
+            "DeepSeek requires an API key. Set it via: rupoo config set api_key.deepseek <key>"
+                .into(),
+        )
+    })?;
+    let base_url = config
+        .base_url
+        .as_deref()
+        .unwrap_or("https://api.deepseek.com");
+    let client = <rig::providers::openai::client::Client<reqwest::Client>>::builder()
+        .api_key(api_key)
+        .base_url(base_url)
+        .http_client((**http_client).clone())
+        .build()
+        .map_err(|e| AgentError::Llm(format!("DeepSeek client init failed: {e}")))?;
+    let model = rig::providers::openai::completion::CompletionModel::new(
+        client.completions_api(),
+        &config.model,
+    );
+
+    // DeepSeek: disable thinking mode to avoid reasoning_content issues
+    let builder = AgentBuilder::new(model).additional_params(serde_json::json!({
+        "thinking": {"type": "disabled"}
+    }));
+
+    finish_streaming_agent(builder, preamble, config, jail_root, safe_mode)
+}
+
+/// Streaming agent for Gemini with safe_mode.
+pub fn build_gemini_agent_streaming(
+    config: &LlmConfig,
+    preamble: &str,
+    jail_root: Option<&std::path::Path>,
+    safe_mode: bool,
+    http_client: &Arc<reqwest::Client>,
+) -> AgentResult<rig::agent::Agent<rig::providers::gemini::CompletionModel>> {
+    use rig::agent::AgentBuilder;
+
+    let api_key = config.api_key.as_deref().ok_or_else(|| {
+        AgentError::Config(
+            "Gemini requires an API key. Set it via: rupoo config set api_key.gemini <key>".into(),
+        )
+    })?;
+    let client = <rig::providers::gemini::Client<reqwest::Client>>::builder()
+        .api_key(api_key.to_string())
+        .http_client((**http_client).clone())
+        .build()
+        .map_err(|e| AgentError::Llm(format!("Gemini client init failed: {e}")))?;
+    let model = rig::providers::gemini::CompletionModel::new(client, &config.model);
+
+    finish_streaming_agent(
+        AgentBuilder::new(model),
+        preamble,
+        config,
+        jail_root,
+        safe_mode,
+    )
+}
+
+/// Helper to finish building a streaming agent: apply common settings, register tools, build.
 pub fn build_ollama_agent_streaming(
     config: &LlmConfig,
     preamble: &str,

@@ -1,7 +1,12 @@
 use clap::{Parser, Subcommand};
 
 mod cli;
-mod tracing_setup;
+
+/// Re-export the logging module from the library crate so existing
+/// `crate::tracing_setup::*` paths (including cli/) keep working.
+pub mod tracing_setup {
+    pub use rupoo::tracing_setup::*;
+}
 
 mod executor;
 mod main_cli;
@@ -162,6 +167,12 @@ enum Commands {
         /// Shell type (bash, zsh, fish, elvish, powershell)
         shell: String,
     },
+    /// Check for and install the latest release from GitHub
+    Update {
+        /// Only check whether an update is available, do not install
+        #[arg(long)]
+        check: bool,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -169,18 +180,62 @@ enum Commands {
 // ---------------------------------------------------------------------------
 
 #[tokio::main(flavor = "current_thread")]
-async fn main() -> anyhow::Result<()> {
+async fn main() -> miette::Result<()> {
+    // Register a global panic hook to capture crash info before exit.
+    // Instead of dumping a raw backtrace to stderr, the hook writes a
+    // structured crash report to a file under the data directory and
+    // logs it via tracing so the CLI/TUI can surface a friendly message.
+    std::panic::set_hook(Box::new(|info| {
+        // Try to get a human-readable description.
+        let msg = if let Some(s) = info.payload().downcast_ref::<&str>() {
+            (*s).to_string()
+        } else if let Some(s) = info.payload().downcast_ref::<String>() {
+            s.clone()
+        } else {
+            "unknown panic".to_string()
+        };
+        let location = info
+            .location()
+            .map(|l| format!("{}:{}", l.file(), l.line()))
+            .unwrap_or_else(|| "<unknown>".to_string());
+        let report = format!(
+            "CRASH [{location}] {msg}\nBacktrace:\n{}",
+            std::backtrace::Backtrace::capture()
+        );
+        // Emit to the tracing subscriber so it appears in structured logs.
+        tracing::error!(crash_location = %location, "{msg}");
+        // Also write to a dedicated crash file under the data directory.
+        if let Ok(dir) = crate::tracing_setup::data_dir_str() {
+            let crash_file = std::path::PathBuf::from(&dir).join("crash.log");
+            if let Ok(mut f) = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&crash_file)
+            {
+                use std::io::Write;
+                let ts = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ");
+                let _ = writeln!(f, "[{ts}] {report}");
+            }
+        }
+        // Still print a concise message to stderr so the user knows something went wrong.
+        eprintln!(
+            "\n💥 rupoo crashed: {msg}\n   at {location}\n   Crash details saved to {{data_dir}}/crash.log\n   Please report this at https://github.com/Steventsang18/rupoo/issues\n"
+        );
+    }));
+
     let cli = Cli::parse();
-    tracing_setup::init_logging(cli.verbose);
+    crate::tracing_setup::init_logging(cli.verbose);
 
     match cli.command {
         None => {
             // Build the agent engine, then launch the three-panel TUI
-            let data_dir = tracing_setup::data_dir();
+            let data_dir = crate::tracing_setup::data_dir();
             std::fs::create_dir_all(&data_dir).ok();
             let db_path = data_dir.join("agent.db");
             let (repo, agent, tool_executor) =
-                rupoo::build_engine::build_engine(db_path.to_str().unwrap_or("agent.db")).await?;
+                rupoo::build_engine::build_engine(db_path.to_str().unwrap_or("agent.db"))
+                    .await
+                    .map_err(|e| miette::miette!("build engine: {}", e))?;
 
             // Capture tokio handle on the main async thread (not inside spawn_blocking)
             let handle = tokio::runtime::Handle::current();
@@ -189,16 +244,37 @@ async fn main() -> anyhow::Result<()> {
                 crate::cli::run_tui_with_agent(repo, agent, tool_executor, handle)
             })
             .await
-            .map_err(|e| anyhow::anyhow!("TUI task failed: {e}"))?;
+            .map_err(|e| miette::miette!("TUI task failed: {e}"))?;
 
             if let Err(e) = err_msg {
                 // Make sure stderr is flushed so user sees the panic message
                 use std::io::Write;
                 let _ = writeln!(std::io::stderr(), "\nrupoo error: {}", e);
-                anyhow::bail!("TUI error: {}", e);
+                miette::bail!("TUI error: {}", e);
             }
         }
-        Some(cmd) => main_cli::run_cmd(cmd).await?,
+        // Handled separately because self-update is a bin-level concern.
+        Some(Commands::Update { check }) => match check {
+            true => match rupoo::updater::check() {
+                Ok(true) => {
+                    println!("A newer release is available. Run `rupoo update` to install it.")
+                }
+                Ok(false) => println!("You are running the latest version."),
+                Err(e) => miette::bail!("update check failed: {}", e),
+            },
+            false => match rupoo::updater::update() {
+                Ok(rupoo::updater::UpdateOutcome::Updated(v)) => {
+                    println!("Updated to v{v}. Restart rupoo to use the new version.")
+                }
+                Ok(rupoo::updater::UpdateOutcome::UpToDate(v)) => {
+                    println!("Already running the latest version (v{v}).")
+                }
+                Err(e) => miette::bail!("update failed: {}", e),
+            },
+        },
+        Some(cmd) => main_cli::run_cmd(cmd)
+            .await
+            .map_err(|e| miette::miette!("{}", e))?,
     }
     Ok(())
 }

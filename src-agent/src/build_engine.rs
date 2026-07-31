@@ -57,7 +57,7 @@ pub async fn build_engine(
         }
         list
     } else {
-        vec!["anthropic", "openai", "deepseek", "ollama"]
+        vec!["anthropic", "gemini", "openai", "deepseek", "ollama"]
     };
 
     let mut llm_configured = false;
@@ -67,7 +67,9 @@ pub async fn build_engine(
         if let Some(api_key) = settings_map.get(&format!("api_key.{}", provider)) {
             let llm_provider = match *provider {
                 "anthropic" => crate::llm::LlmProvider::Anthropic,
-                "openai" | "deepseek" => crate::llm::LlmProvider::OpenAI,
+                "deepseek" => crate::llm::LlmProvider::DeepSeek,
+                "gemini" => crate::llm::LlmProvider::Gemini,
+                "openai" => crate::llm::LlmProvider::OpenAI,
                 "ollama" => crate::llm::LlmProvider::Ollama,
                 _ => continue,
             };

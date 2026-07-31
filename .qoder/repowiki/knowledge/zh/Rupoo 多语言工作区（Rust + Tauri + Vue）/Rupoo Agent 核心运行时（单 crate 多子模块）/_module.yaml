@@ -1,8 +1,0 @@
-schema_version: 1
-module_path: agent_core
-title: Rupoo Agent 核心运行时（单 crate 多子模块）
-scope:
-    - src-agent/
-source_files: []
-depends_on: []
-related_to: []

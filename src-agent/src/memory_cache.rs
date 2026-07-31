@@ -17,8 +17,7 @@ impl MemoryCache {
         Self {
             repo,
             cache: tokio::sync::Mutex::new(lru::LruCache::new(
-                std::num::NonZeroUsize::new(capacity)
-                    .unwrap_or_else(|| std::num::NonZeroUsize::new(1).expect("1 is non-zero")),
+                std::num::NonZeroUsize::new(capacity).unwrap_or(std::num::NonZeroUsize::MIN),
             )),
             ttl: Duration::from_secs(300),
         }

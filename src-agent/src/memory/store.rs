@@ -286,21 +286,27 @@ impl MemoryStore {
 
         // Perform both searches in parallel
         let fts_future = self.repo.search_memories(query, limit * 2);
-        let embedding_future = self
-            .embedding_service
-            .as_ref()
-            .expect("hybrid_search requires embedding_service — call Agent::with_embedding_service() during setup")
-            .embed(query);
+        let embedding_future = match self.embedding_service.as_ref() {
+            Some(svc) => svc.embed(query),
+            None => {
+                return Err(crate::error::AgentError::Config(
+                    "hybrid_search requires embedding_service".into(),
+                ))
+            }
+        };
 
         let (fts_results, embedding) = tokio::try_join!(fts_future, embedding_future)?;
 
         // Perform vector search
         let vector_results = {
-            let vs = self
-                .vector_store
-                .as_ref()
-                .expect("hybrid_search requires vector_store — call Agent::with_vector_store() during setup")
-                .read().await;
+            let vs = match self.vector_store.as_ref() {
+                Some(vs) => vs.read().await,
+                None => {
+                    return Err(crate::error::AgentError::Config(
+                        "hybrid_search requires vector_store".into(),
+                    ))
+                }
+            };
             vs.semantic_search(embedding, limit * 2).await?
         };
 

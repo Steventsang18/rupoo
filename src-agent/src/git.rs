@@ -13,7 +13,6 @@ use crate::error::{AgentError, AgentResult};
 
 /// Wraps a git repository for programmatic operations.
 pub struct GitRepo {
-    #[allow(dead_code)]
     workdir: String,
 }
 

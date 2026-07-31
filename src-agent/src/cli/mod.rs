@@ -933,6 +933,8 @@ impl ReplSession {
                     output::file_change(f);
                 }
             }
+            // TUI 控制信令只在 ratatui 模式下生效，纯终端逃生舱忽略。
+            AgentToTui::TuiControl { .. } => {}
         }
         true
     }
@@ -1270,7 +1272,14 @@ impl ReplSession {
         print!("  Approve? [y/n/a(ll)] ");
         let _ = io::stdout().flush();
         let answer = loop {
-            if let Event::Key(key) = event::read().ok().unwrap() {
+            let evt = match event::read() {
+                Ok(evt) => evt,
+                Err(e) => {
+                    eprintln!("  ! approval input read failed: {e}");
+                    break "n";
+                }
+            };
+            if let Event::Key(key) = evt {
                 if key.kind == KeyEventKind::Press {
                     match key.code {
                         KeyCode::Char('y' | 'Y') => break "y",

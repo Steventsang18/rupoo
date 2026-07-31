@@ -261,60 +261,10 @@ impl EvaluationResult {
 }
 
 // ---------------------------------------------------------------------------
-// Budget tracking
+// Budget tracking  (extracted to crate::budget_tracker)
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone)]
-pub enum BudgetStatus {
-    Ok,
-    TokenExceeded { used: u64, limit: u64 },
-    TimeExceeded { elapsed_secs: u64, limit_secs: u64 },
-}
-
-/// Tracks accumulated resource consumption across iterations.
-#[derive(Debug, Clone, Default)]
-pub struct BudgetTracker {
-    pub total_tokens: u64,
-    pub started_at: i64,
-}
-
-impl BudgetTracker {
-    pub fn new() -> Self {
-        Self {
-            total_tokens: 0,
-            started_at: chrono::Utc::now().timestamp(),
-        }
-    }
-
-    pub fn add_tokens(&mut self, tokens: u64) {
-        self.total_tokens += tokens;
-    }
-
-    pub fn check(&self, token_budget: Option<u64>, time_budget_secs: Option<u64>) -> BudgetStatus {
-        let now = chrono::Utc::now().timestamp();
-        let elapsed = (now - self.started_at).max(0) as u64;
-
-        if let Some(limit) = token_budget {
-            if self.total_tokens >= limit {
-                return BudgetStatus::TokenExceeded {
-                    used: self.total_tokens,
-                    limit,
-                };
-            }
-        }
-
-        if let Some(limit) = time_budget_secs {
-            if elapsed >= limit {
-                return BudgetStatus::TimeExceeded {
-                    elapsed_secs: elapsed,
-                    limit_secs: limit,
-                };
-            }
-        }
-
-        BudgetStatus::Ok
-    }
-}
+pub use crate::budget_tracker::{BudgetStatus, BudgetTracker};
 
 // ---------------------------------------------------------------------------
 // Convergence guard utilities (pure functions, testable without LLM)

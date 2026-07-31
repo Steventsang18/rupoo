@@ -1,6 +1,6 @@
 [package]
 name = "rupoo"
-version = "0.6.2"
+version = "0.6.3"
 edition = "2021"
 authors = ["Steventsang18"]
 description = "AI-powered Terminal Assistant — native REPL with plan execution, memory, and MCP support"
@@ -54,6 +54,17 @@ tokio-tungstenite = { version = "0.24", default-features = false, features = ["c
 futures-util = "0.3"
 tokio-util = { version = "0.7", features = ["rt"] }
 
+# Ops & security (added in 0.7.0)
+miette = { version = "7", features = ["fancy"] }
+self_update = { version = "0.41", features = ["archive-tar", "compression-flate2", "archive-zip", "rustls"] }
+aes-gcm = "0.10"
+zeroize = "1"
+axum = "0.8"
+tower = { version = "0.5", features = ["limit"] }
+metrics = "0.22"
+metrics-exporter-prometheus = "0.13"
+notify = "8"
+
 [features]
 default = ["keyring"]
 gui = ["eframe"]
@@ -64,6 +75,7 @@ bencher = "0.1"
 rand = "0.8"
 tokio-test = "0.4"
 criterion = { version = "0.5", features = ["async", "html_reports"] }
+http-body-util = "0.1"
 
 [lints.clippy]
 cognitive_complexity = "allow"

@@ -544,6 +544,9 @@ pub async fn run_cmd(cmd: super::Commands) -> anyhow::Result<()> {
         } => {
             crate::cli::cmds::logs::run(follow, lines, level.as_deref(), prev).await?;
         }
+        // Self-update is handled in main.rs before dispatch; this arm exists
+        // only to keep the match exhaustive (never reached in practice).
+        super::Commands::Update { .. } => {}
     }
 
     Ok(())

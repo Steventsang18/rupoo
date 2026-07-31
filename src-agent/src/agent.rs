@@ -141,113 +141,10 @@ pub struct Agent {
 }
 
 // ---------------------------------------------------------------------------
-// Plan Cache - LRU cache for storing generated plans
+// Plan Cache  (extracted to crate::plan_cache)
 // ---------------------------------------------------------------------------
 
-use lru::LruCache;
-use std::collections::hash_map::DefaultHasher;
-use std::hash::{Hash, Hasher};
-
-/// Cache entry for a generated plan
-#[derive(Debug, Clone)]
-pub struct CachedPlan {
-    pub steps: Vec<crate::llm::StepSpec>,
-    pub created_at: chrono::DateTime<chrono::Utc>,
-    pub task_hash: String,
-}
-
-/// Plan cache configuration
-#[derive(Debug, Clone)]
-pub struct PlanCacheConfig {
-    pub capacity: usize,
-    pub ttl_seconds: u64,
-}
-
-impl Default for PlanCacheConfig {
-    fn default() -> Self {
-        Self {
-            capacity: 100,
-            ttl_seconds: 3600, // 1 hour default TTL
-        }
-    }
-}
-
-/// Thread-safe LRU cache for storing generated plans
-pub struct PlanCache {
-    cache: std::sync::RwLock<LruCache<String, CachedPlan>>,
-    config: PlanCacheConfig,
-}
-
-impl PlanCache {
-    pub fn new(config: PlanCacheConfig) -> Self {
-        Self {
-            cache: std::sync::RwLock::new(LruCache::new(
-                std::num::NonZeroUsize::new(config.capacity).unwrap_or(std::num::NonZeroUsize::MIN),
-            )),
-            config,
-        }
-    }
-
-    /// Generate a cache key from task input using simple hashing
-    fn generate_key(task: &str, context: Option<&str>) -> String {
-        let mut hasher = DefaultHasher::new();
-        task.hash(&mut hasher);
-        if let Some(ctx) = context {
-            ctx.hash(&mut hasher);
-        }
-        let hash = hasher.finish();
-        format!("{:016x}", hash)
-    }
-
-    /// Check if a plan exists in cache and is valid
-    pub fn get(&self, task: &str, context: Option<&str>) -> Option<Vec<crate::llm::StepSpec>> {
-        let key = Self::generate_key(task, context);
-        let mut cache = self.cache.write().ok()?;
-
-        if let Some(cached) = cache.get(&key) {
-            // Check TTL
-            let now = chrono::Utc::now();
-            let age = now.signed_duration_since(cached.created_at).num_seconds() as u64;
-            if age < self.config.ttl_seconds {
-                debug!(key = %key, age_secs = age, "plan cache hit");
-                return Some(cached.steps.clone());
-            } else {
-                debug!(key = %key, age_secs = age, "plan cache expired");
-            }
-        }
-        None
-    }
-
-    /// Store a plan in cache
-    pub fn put(&self, task: &str, context: Option<&str>, steps: Vec<crate::llm::StepSpec>) {
-        let key = Self::generate_key(task, context);
-        let entry = CachedPlan {
-            steps,
-            created_at: chrono::Utc::now(),
-            task_hash: key.clone(),
-        };
-
-        if let Ok(mut cache) = self.cache.write() {
-            cache.put(key, entry);
-            debug!("plan cached");
-        }
-    }
-
-    /// Clear the entire cache
-    pub fn clear(&self) {
-        if let Ok(mut cache) = self.cache.write() {
-            cache.clear();
-            info!("plan cache cleared");
-        }
-    }
-
-    /// Get cache statistics
-    pub fn stats(&self) -> (usize, usize) {
-        let cache = self.cache.read().ok();
-        let len = cache.as_ref().map(|c| c.len()).unwrap_or(0);
-        (len, self.config.capacity)
-    }
-}
+pub use crate::plan_cache::{CachedPlan, PlanCache, PlanCacheConfig};
 
 impl Agent {
     pub fn new(repo: Arc<TaskRepo>, tool_executor: std::sync::Arc<dyn ToolExecutor>) -> Self {
@@ -586,10 +483,12 @@ impl Agent {
 
         let llm_provider = match provider {
             "anthropic" => crate::llm::LlmProvider::Anthropic,
+            "deepseek" => crate::llm::LlmProvider::DeepSeek,
+            "gemini" => crate::llm::LlmProvider::Gemini,
             "openai" => crate::llm::LlmProvider::OpenAI,
             "ollama" => crate::llm::LlmProvider::Ollama,
             // 所有 OpenAI 兼容的国产模型都走 OpenAI 驱动
-            "deepseek" | "qwen" | "glm" | "moonshot" | "yi" | "baichuan" | "minimax" | "spark" => {
+            "qwen" | "glm" | "moonshot" | "yi" | "baichuan" | "minimax" | "spark" => {
                 crate::llm::LlmProvider::OpenAI
             }
             _ => {

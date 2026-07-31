@@ -83,7 +83,12 @@ impl DingTalkChannel {
 
     /// 获取钉钉 access token（带缓存，避免每次请求重复鉴权）。
     async fn get_token(&self) -> Result<String> {
-        if let Some((tok, expiry)) = self.token_cache.lock().unwrap().as_ref() {
+        if let Some((tok, expiry)) = self
+            .token_cache
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .as_ref()
+        {
             if expiry.elapsed()
                 < Duration::from_secs(DINGTALK_TOKEN_TTL_SECS - DINGTALK_TOKEN_REFRESH_BUFFER_SECS)
             {
@@ -93,7 +98,10 @@ impl DingTalkChannel {
         let token = self.fetch_token().await?;
         let expiry = Instant::now()
             + Duration::from_secs(DINGTALK_TOKEN_TTL_SECS - DINGTALK_TOKEN_REFRESH_BUFFER_SECS);
-        *self.token_cache.lock().unwrap() = Some((token.clone(), expiry));
+        *self
+            .token_cache
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some((token.clone(), expiry));
         Ok(token)
     }
 
@@ -256,6 +264,7 @@ impl DingTalkChannel {
         if msg_type != "text" && body.get("text").is_none() {
             return Ok(());
         }
+        crate::telemetry::record_message_received("dingtalk");
 
         let text = body
             .get("text")

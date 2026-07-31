@@ -418,7 +418,8 @@ impl RupooApp {
             AgentToTui::ThinkingSummary { .. }
             | AgentToTui::PhaseProgress { .. }
             | AgentToTui::LayoutModeHint(..)
-            | AgentToTui::FileChanges { .. } => {}
+            | AgentToTui::FileChanges { .. }
+            | AgentToTui::TuiControl { .. } => {}
         }
     }
 

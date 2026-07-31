@@ -32,7 +32,7 @@ use crossterm::terminal::{
 use ratatui::backend::{Backend, CrosstermBackend};
 use ratatui::Terminal;
 
-use rupoo::{AgentToTui, MessageRole, PendingTool, ToolPhase, TuiToAgent};
+use rupoo::{AgentToTui, MessageRole, PendingTool, ToolPhase, TuiControlAction, TuiToAgent};
 
 use super::tui_view::{
     apply_event, render_frame, GuideOverlay, Phase, StreamItem, ANIM_MS, HINT_ROTATE_MS, HINT_TIPS,
@@ -181,11 +181,11 @@ impl ReplSession {
                                     && m.column >= r.x
                                     && m.column < r.x.saturating_add(r.width)
                                 {
-                                    self.chat_view.status_expanded =
-                                        !self.chat_view.status_expanded;
+                                    self.chat_view.activity_overlay =
+                                        !self.chat_view.activity_overlay;
                                     self.chat_view.status_scroll = 0;
                                     // Expanding (re)starts live-follow (Issue 3).
-                                    if self.chat_view.status_expanded {
+                                    if self.chat_view.activity_overlay {
                                         self.chat_view.status_follow = true;
                                     }
                                     self.draw_frame(terminal)?;
@@ -350,6 +350,15 @@ impl ReplSession {
                         .push(StreamItem::System(format!("⎇ {}", f.path)));
                 }
             }
+            AgentToTui::TuiControl { action } => match action {
+                TuiControlAction::ToggleActivity => {
+                    self.chat_view.activity_overlay = !self.chat_view.activity_overlay;
+                    self.chat_view.status_scroll = 0;
+                }
+                TuiControlAction::SetDensity(d) => {
+                    self.chat_view.density = *d;
+                }
+            },
             _ => {}
         }
     }
@@ -426,6 +435,12 @@ impl ReplSession {
                 self.draw_frame(terminal)?;
             }
             (KeyCode::Esc, _) => {
+                // Esc first dismisses the activity overlay if it is open.
+                if self.chat_view.activity_overlay {
+                    self.chat_view.activity_overlay = false;
+                    self.draw_frame(terminal)?;
+                    return Ok(());
+                }
                 // Gentle cancel during streaming (same as the first Ctrl+C),
                 // without forcing a quit. Only meaningful while a reply is in
                 // flight; pressing Esc when idle is a no-op.
@@ -489,7 +504,7 @@ impl ReplSession {
             // (1/3 page); PageUp/PageDown move a full page. History recall moves
             // to Ctrl+P / Ctrl+N so the arrows are free for scrolling.
             (KeyCode::Up, _) => {
-                if self.chat_view.status_expanded {
+                if self.chat_view.activity_overlay {
                     // Scroll the expanded mini-log up (toward older activity).
                     self.chat_view.status_scroll = self.chat_view.status_scroll.saturating_add(1);
                     // Manual scroll takes control: freeze the panel (Issue 3).
@@ -501,7 +516,7 @@ impl ReplSession {
                 }
             }
             (KeyCode::Down, _) => {
-                if self.chat_view.status_expanded {
+                if self.chat_view.activity_overlay {
                     // Scroll the expanded mini-log down (toward newest).
                     self.chat_view.status_scroll = self.chat_view.status_scroll.saturating_sub(1);
                     // Manual scroll takes control: freeze the panel (Issue 3).
@@ -556,12 +571,18 @@ impl ReplSession {
             }
             // Toggle the bottom status panel expand/collapse.
             (KeyCode::Char(']'), _) => {
-                self.chat_view.status_expanded = !self.chat_view.status_expanded;
+                self.chat_view.activity_overlay = !self.chat_view.activity_overlay;
                 self.chat_view.status_scroll = 0;
                 // Expanding (re)starts live-follow; collapsing drops the state.
-                if self.chat_view.status_expanded {
+                if self.chat_view.activity_overlay {
                     self.chat_view.status_follow = true;
                 }
+                self.draw_frame(terminal)?;
+            }
+            // Toggle the activity overlay with Shift+A (also `]` and `/activity`).
+            (KeyCode::Char('A' | 'a'), KeyModifiers::SHIFT) => {
+                self.chat_view.activity_overlay = !self.chat_view.activity_overlay;
+                self.chat_view.status_scroll = 0;
                 self.draw_frame(terminal)?;
             }
             (KeyCode::Char(ch), _) => {
@@ -753,13 +774,27 @@ mod tests {
             .iter()
             .map(|c| c.symbol())
             .collect();
-        // CJK glyphs occupy two buffer cells (a space placeholder in the second
-        // cell), so strip whitespace before substring checks on Chinese text.
-        let compact: String = buf.chars().filter(|c| !c.is_whitespace()).collect();
         assert!(buf.contains("fix the bug"), "user line missing");
         assert!(buf.contains("looking at main.rs"), "thinking missing");
-        assert!(compact.contains("读取文件"), "tool missing (summary/panel)");
-        assert!(compact.contains("完成"), "collapsed tool summary missing");
+        // The tool activity collapses into a single inline summary on Idle
+        // (see `collapse_tool_rows`). Assert on the view model (source of truth)
+        // rather than the pixel buffer: TestBackend represents full-width CJK
+        // glyphs as two cells and can interleave a prior frame's ASCII residue
+        // in the trailing cell, breaking a contiguous `contains` match.
+        let summary = session
+            .chat_view
+            .items
+            .iter()
+            .find_map(|i| match i {
+                StreamItem::Summary(s) => Some(s.as_str()),
+                _ => None,
+            })
+            .expect("collapsed tool summary missing");
+        assert!(
+            summary.contains("读取文件"),
+            "tool kind label missing in summary: {summary}"
+        );
+        assert!(summary.contains("完成"), "summary verb missing: {summary}");
         assert!(
             buf.contains("The fix is to add a guard."),
             "assistant missing"
@@ -1069,7 +1104,7 @@ mod tests {
         let mut term = Terminal::new(backend).unwrap();
         session.draw_frame(&mut term).unwrap();
         assert!(
-            !session.chat_view.status_expanded,
+            !session.chat_view.activity_overlay,
             "panel defaults to collapsed"
         );
 
@@ -1080,7 +1115,7 @@ mod tests {
             )
             .unwrap();
         assert!(
-            session.chat_view.status_expanded,
+            session.chat_view.activity_overlay,
             "bracket expands the panel"
         );
 
@@ -1091,7 +1126,7 @@ mod tests {
             )
             .unwrap();
         assert!(
-            !session.chat_view.status_expanded,
+            !session.chat_view.activity_overlay,
             "bracket collapses it again"
         );
     }
@@ -1105,7 +1140,7 @@ mod tests {
         session.app.render_mode = app::RenderMode::Ratatui;
         let backend = TestBackend::new(80, 24);
         let mut term = Terminal::new(backend).unwrap();
-        session.chat_view.status_expanded = true;
+        session.chat_view.activity_overlay = true;
         session.draw_frame(&mut term).unwrap();
         assert!(
             session.chat_view.status_follow,
@@ -1134,7 +1169,7 @@ mod tests {
             "panel freezes after the workflow ends"
         );
         assert!(
-            session.chat_view.status_expanded,
+            session.chat_view.activity_overlay,
             "panel stays expanded, frozen at the last item"
         );
     }
@@ -1155,7 +1190,7 @@ mod tests {
 
         // The user turn is committed by submit_message, as the live loop does.
         session.submit_message("fix the bug");
-        session.chat_view.status_expanded = true; // user had the panel open
+        session.chat_view.activity_overlay = true; // user had the panel open
 
         let events = vec![
             AgentToTui::Thinking,
@@ -1205,7 +1240,7 @@ mod tests {
             "panel must freeze after the workflow ends"
         );
         assert!(
-            session.chat_view.status_expanded,
+            session.chat_view.activity_overlay,
             "panel stays expanded, frozen at the last item"
         );
     }

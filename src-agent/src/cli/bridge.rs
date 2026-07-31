@@ -9,7 +9,7 @@ use super::approval::ApprovalExt;
 use super::ChatMessage;
 use super::{AgentToTui, TuiToAgent};
 use rupoo::agent::ToolExecutor;
-use rupoo::LayoutMode;
+use rupoo::{Density, LayoutMode, TuiControlAction};
 
 // Magic number constants
 const BRIDGE_POLL_MS: u64 = 100;
@@ -127,6 +127,10 @@ impl AgentUiBridge {
             self.handle_status().await;
         } else if text == "/context" {
             self.handle_context().await;
+        } else if text == "/activity" {
+            self.toggle_activity_overlay().await;
+        } else if text.starts_with("/ui") {
+            self.handle_ui(text).await;
         } else if text.starts_with("/deep") {
             self.handle_deep(text).await;
         } else if text == "/help" || text == "/?" {
@@ -343,6 +347,66 @@ impl AgentUiBridge {
         }
     }
 
+    /// Toggle the running-activity overlay (Shift+A / `/activity`).
+    async fn toggle_activity_overlay(&self) {
+        if let Err(e) = self.ui_tx.send(AgentToTui::TuiControl {
+            action: TuiControlAction::ToggleActivity,
+        }) {
+            tracing::warn!("failed to send UI event: {}", e);
+        }
+    }
+
+    /// Handle `/ui` subcommands — currently only `density [compact|comfortable]`.
+    async fn handle_ui(&self, text: &str) {
+        let arg = text.trim_start_matches("/ui").trim();
+        let (density, note) = if arg.starts_with("density") {
+            let mode = arg.trim_start_matches("density").trim();
+            match mode {
+                "compact" => (Density::Compact, "排版密度：compact"),
+                "comfortable" | "" => (Density::Comfortable, "排版密度：comfortable"),
+                other => {
+                    if let Err(e) =
+                        self.ui_tx
+                            .send(AgentToTui::Message(ChatMessage::system(format!(
+                                "未知密度：{other}，可选 compact / comfortable"
+                            ))))
+                    {
+                        tracing::warn!("failed to send UI event: {}", e);
+                    }
+                    if let Err(e) = self.send_idle() {
+                        tracing::warn!("failed to send UI event: {}", e);
+                    }
+                    return;
+                }
+            }
+        } else {
+            if let Err(e) = self.ui_tx.send(AgentToTui::Message(ChatMessage::system(
+                "用法：/ui density [compact|comfortable]".to_string(),
+            ))) {
+                tracing::warn!("failed to send UI event: {}", e);
+            }
+            if let Err(e) = self.send_idle() {
+                tracing::warn!("failed to send UI event: {}", e);
+            }
+            return;
+        };
+
+        if let Err(e) = self.ui_tx.send(AgentToTui::TuiControl {
+            action: TuiControlAction::SetDensity(density),
+        }) {
+            tracing::warn!("failed to send UI event: {}", e);
+        }
+        if let Err(e) = self
+            .ui_tx
+            .send(AgentToTui::Message(ChatMessage::system(note.to_string())))
+        {
+            tracing::warn!("failed to send UI event: {}", e);
+        }
+        if let Err(e) = self.send_idle() {
+            tracing::warn!("failed to send UI event: {}", e);
+        }
+    }
+
     /// Handle /help command.
     async fn handle_help(&self) {
         let help = "\
@@ -360,6 +424,8 @@ Available commands:
   /clear                — Clear conversation history
   /status               — Show current session status
   /context              — Show context-window usage diagnosis
+  /activity             — Toggle running-activity overlay (also Shift+A)
+  /ui density [compact|comfortable] — Set TUI layout density
   /help                 — Show this help message
   Ctrl+C               — Cancel current generation (press twice to quit)";
         if let Err(e) = self

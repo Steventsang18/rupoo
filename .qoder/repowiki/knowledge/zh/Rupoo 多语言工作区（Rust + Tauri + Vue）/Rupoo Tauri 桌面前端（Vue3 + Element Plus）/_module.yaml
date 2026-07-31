@@ -1,8 +1,0 @@
-schema_version: 1
-module_path: vue_frontend
-title: Rupoo Tauri 桌面前端（Vue3 + Element Plus）
-scope:
-    - src-ui/
-source_files: []
-depends_on: []
-related_to: []

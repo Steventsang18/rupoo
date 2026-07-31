@@ -58,7 +58,7 @@ fn dns_cache() -> &'static std::sync::Mutex<LruCache<String, DnsCacheEntry>> {
     DNS_CACHE.get_or_init(|| {
         std::sync::Mutex::new(LruCache::new(
             // SAFETY: 100 is a compile-time constant greater than zero
-            std::num::NonZeroUsize::new(100).unwrap(),
+            std::num::NonZeroUsize::new(100).unwrap_or(std::num::NonZeroUsize::MIN),
         ))
     })
 }

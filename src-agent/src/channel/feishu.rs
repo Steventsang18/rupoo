@@ -348,7 +348,12 @@ impl FeishuChannel {
 
     async fn get_tenant_token(&self) -> Result<String> {
         // 1) 命中缓存且未过期（飞书 token TTL=2h，留 5min 余量）直接返回。
-        if let Some((tok, expiry)) = self.token_cache.lock().unwrap().as_ref() {
+        if let Some((tok, expiry)) = self
+            .token_cache
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .as_ref()
+        {
             if expiry.elapsed()
                 < Duration::from_secs(FEISHU_TOKEN_TTL_SECS - FEISHU_TOKEN_REFRESH_BUFFER_SECS)
             {
@@ -359,7 +364,10 @@ impl FeishuChannel {
         let token = self.fetch_tenant_token().await?;
         let expiry = Instant::now()
             + Duration::from_secs(FEISHU_TOKEN_TTL_SECS - FEISHU_TOKEN_REFRESH_BUFFER_SECS);
-        *self.token_cache.lock().unwrap() = Some((token.clone(), expiry));
+        *self
+            .token_cache
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some((token.clone(), expiry));
         Ok(token)
     }
 
@@ -450,6 +458,8 @@ impl FeishuChannel {
                 .and_then(|m| m.as_str())
                 .unwrap_or("unknown");
             warn!(status = %status, error = %msg, "feishu send message failed");
+        } else {
+            crate::telemetry::record_message_replied("feishu");
         }
 
         Ok(())
@@ -467,7 +477,7 @@ impl FeishuChannel {
         let (mut write, mut read) = ws_stream.split();
 
         let seen_events = Arc::new(Mutex::new(LruCache::<String, ()>::new(
-            NonZeroUsize::new(DEDUP_MAX_EVENTS).unwrap(),
+            NonZeroUsize::new(DEDUP_MAX_EVENTS).unwrap_or(std::num::NonZeroUsize::MIN),
         )));
 
         let ping_secs = client_config.ping_interval.unwrap_or(120).max(10);
@@ -547,7 +557,7 @@ impl FeishuChannel {
 
                     // Dedup by event_id（有界 LRU，超过容量时淘汰最旧而非整集清空）
                     {
-                        let mut seen = seen_events.lock().unwrap();
+                        let mut seen = seen_events.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
                         if seen.contains(&event.header.event_id) {
                             info!(event_id = %event.header.event_id, "duplicate event, skipping");
                             continue;
@@ -606,6 +616,7 @@ impl FeishuChannel {
         if sender_type == "app" || sender_type == "bot" {
             return Ok(());
         }
+        crate::telemetry::record_message_received("feishu");
 
         let sender_open_id = sender
             .get("sender_id")

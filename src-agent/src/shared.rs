@@ -207,6 +207,9 @@ pub enum AgentToTui {
 
     /// 文件变更事件。工具执行完成后发送一次。
     FileChanges { files: Vec<FileChangeInfo> },
+    /// TUI 偏好 / 控制信令（由斜杠命令经 bridge 发送给 TUI 会话）。
+    /// 例如 `/activity` 切换运行纪要浮层、`/ui density` 设置排版密度。
+    TuiControl { action: TuiControlAction },
 }
 
 /// Phase of a tool call for status display.
@@ -216,6 +219,25 @@ pub enum ToolPhase {
     Calling,
     /// Tool has returned a result
     Completed,
+}
+
+/// TUI 排版密度（影响轮次留白与正文对比度）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum Density {
+    /// 紧凑：信息密度高，适合小窗口。
+    Compact,
+    /// 舒适：轮次间留白、助手正文提亮，默认。
+    #[default]
+    Comfortable,
+}
+
+/// bridge → TUI 的控制动作。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum TuiControlAction {
+    /// 切换"运行纪要"浮层（快照当前工具活动，静态、不闪烁）。
+    ToggleActivity,
+    /// 设置排版密度。
+    SetDensity(Density),
 }
 
 impl AgentToTui {
@@ -234,6 +256,7 @@ impl AgentToTui {
                 | Self::PhaseProgress { .. }
                 | Self::LayoutModeHint(_)
                 | Self::FileChanges { .. }
+                | Self::TuiControl { .. }
         )
     }
 
