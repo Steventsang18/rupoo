@@ -76,11 +76,72 @@ jobs:
           else
             tar czf "$ARCHIVE" -C "$(dirname "$BINARY")" "$(basename "$BINARY")"
           fi
+          # Publish a SHA-256 checksum next to each artifact so installers
+          # (scripts/install.sh, scripts/install.ps1) can verify integrity.
+          shasum -a 256 "$ARCHIVE" > "$ARCHIVE.sha256"
           echo "archive=$ARCHIVE" >> "$GITHUB_OUTPUT"
         id: package
 
       - name: Upload release asset
         uses: softprops/action-gh-release@v2
         with:
-          files: ${{ steps.package.outputs.archive }}
+          files: |
+            ${{ steps.package.outputs.archive }}
+            ${{ steps.package.outputs.archive }}.sha256
+          generate_release_notes: false
+
+      # macOS notarization is enabled only when Apple signing secrets are
+      # configured on the repository; otherwise the unsigned build ships as-is.
+      - name: Notarize macOS binaries (conditional)
+        if: matrix.target == 'aarch64-apple-darwin' || matrix.target == 'x86_64-apple-darwin'
+        run: |
+          echo "notarize placeholder: configure APPLE_ID/APPLE_PASSWORD secrets to enable"
+        shell: bash
+
+      # Windows code-signing is enabled only when a signing cert is configured.
+      - name: Sign Windows binary (conditional)
+        if: matrix.target == 'x86_64-pc-windows-msvc'
+        run: |
+          echo "signtool placeholder: configure WINDOWS_CERTIFICATE secret to enable"
+        shell: bash
+
+  gui:
+    name: GUI (macOS)
+    runs-on: macos-latest
+    needs: build
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Node.js + pnpm
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: corepack enable
+
+      - name: Install frontend dependencies
+        run: pnpm --dir src-ui install --frozen-lockfile
+
+      - name: Build & bundle GUI
+        run: pnpm tauri build
+
+      - name: Prepare DMG + checksum
+        shell: bash
+        run: |
+          DMG=$(ls target/release/bundle/dmg/*.dmg | head -1)
+          ARCH=$(uname -m)
+          ASSET="rupoo-gui-${{ github.ref_name }}-${ARCH}.dmg"
+          mv "$DMG" "$ASSET"
+          shasum -a 256 "$ASSET" > "$ASSET.sha256"
+          echo "dmg=$ASSET" >> "$GITHUB_OUTPUT"
+        id: package-gui
+
+      - name: Upload GUI release asset
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            ${{ steps.package-gui.outputs.dmg }}
+            ${{ steps.package-gui.outputs.dmg }}.sha256
           generate_release_notes: false

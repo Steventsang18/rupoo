@@ -5,6 +5,7 @@
 # IDE
 .idea/
 .vscode/
+.qoder/
 *.swp
 *.swo
 *~
@@ -32,6 +33,7 @@ credentials.toml
 !MILESTONE*.md
 !PROJECT-AUDIT-REPORT*.md
 !docs/**/*.md
+!.github/**/*.md
 
 # macOS metadata
 .DS_Store
@@ -40,8 +42,11 @@ credentials.toml
 spike/
 target/
 
-# Old dev scripts (moved to cargo install)
-scripts/
+# Old dev scripts (moved to cargo install) — installers are tracked
+scripts/*
+!scripts/install.sh
+!scripts/install.ps1
+!scripts/rupoo.command
 
 Thumbs.db
 
@@ -51,3 +56,6 @@ Thumbs.db
 # Optional: ignore docs-generated HTML (keep src/ docs)
 # docs/*.html
 node_modules/
+
+# Frontend build output
+src-ui/dist/

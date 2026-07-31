@@ -5,8 +5,8 @@
 Rupoo is a terminal-based AI assistant with a native REPL interface, featuring rendered code blocks, Markdown rendering, theme switching, and Claude Code–style tool call display — driven by a triple-mode agent engine (Chat + Plan + Loop).
 
 ```
-Version:   0.6.1          Language: Rust 2021
-Lines:     ~48,000        Tests:    291 ✅
+Version:   0.6.3          Language: Rust 2021
+Lines:     ~65,000        Tests:    373 ✅
 Interface: Native REPL    LLM:      Anthropic / OpenAI / DeepSeek / Ollama
 DB:        SQLite (FTS5)  Memory:   Hybrid Search (FTS5 + Vector)
 Safety:    path_jail sandbox + SSRF protection + MCP auth + command blocklist hardening
@@ -84,23 +84,37 @@ rupoo serve-status    # Check daemon status
 
 ## 🚀 Quick Start
 
+### Install with the official installer (recommended)
+
+One-line installers download the latest release, verify its SHA-256 checksum, and install `rupoo` to your local bin directory:
+
+```bash
+# macOS / Linux
+curl -fsSL https://raw.githubusercontent.com/Steventsang18/rupoo/master/scripts/install.sh | sh
+
+# Windows (PowerShell 5.1+)
+powershell -ExecutionPolicy Bypass -c "irm https://raw.githubusercontent.com/Steventsang18/rupoo/master/scripts/install.ps1 | iex"
+```
+
+Options: `sh install.sh -v 0.6.3` (pin a version), `sh install.sh -d /opt/bin` (custom dir).
+
 ### Download Pre-built Binary
 
 Download the archive for your platform from the [latest release](https://github.com/Steventsang18/rupoo/releases/latest):
 
 | Platform | Download |
 |----------|----------|
-| 🍎 **macOS Apple Silicon** (M1/M2/M3/M4) | `rupoo-v0.6.1-aarch64-apple-darwin.tar.gz` |
-| 🍎 **macOS Intel** | `rupoo-v0.6.1-x86_64-apple-darwin.tar.gz` |
-| 🐧 **Linux x86_64** | `rupoo-v0.6.1-x86_64-unknown-linux-gnu.tar.gz` |
-| 🐧 **Linux ARM64** (Raspberry Pi, AWS Graviton) | `rupoo-v0.6.1-aarch64-unknown-linux-gnu.tar.gz` |
-| 🪟 **Windows x86_64** | `rupoo-v0.6.1-x86_64-pc-windows-msvc.zip` |
+| 🍎 **macOS Apple Silicon** (M1/M2/M3/M4) | `rupoo-v0.6.3-aarch64-apple-darwin.tar.gz` |
+| 🍎 **macOS Intel** | `rupoo-v0.6.3-x86_64-apple-darwin.tar.gz` |
+| 🐧 **Linux x86_64** | `rupoo-v0.6.3-x86_64-unknown-linux-gnu.tar.gz` |
+| 🐧 **Linux ARM64** (Raspberry Pi, AWS Graviton) | `rupoo-v0.6.3-aarch64-unknown-linux-gnu.tar.gz` |
+| 🪟 **Windows x86_64** | `rupoo-v0.6.3-x86_64-pc-windows-msvc.zip` |
 
 #### macOS
 
 ```bash
 # Replace <file> with your platform's archive
-tar xzf rupoo-v0.6.1-aarch64-apple-darwin.tar.gz
+tar xzf rupoo-v0.6.3-aarch64-apple-darwin.tar.gz
 mv rupoo /usr/local/bin/
 # Verify
 rupoo --help
@@ -113,22 +127,22 @@ rupoo --help
 
 ```bash
 # x86_64
-tar xzf rupoo-v0.6.1-x86_64-unknown-linux-gnu.tar.gz
+tar xzf rupoo-v0.6.3-x86_64-unknown-linux-gnu.tar.gz
 sudo mv rupoo /usr/local/bin/
 
 # ARM64 (e.g. Raspberry Pi)
-tar xzf rupoo-v0.6.1-aarch64-unknown-linux-gnu.tar.gz
+tar xzf rupoo-v0.6.3-aarch64-unknown-linux-gnu.tar.gz
 sudo mv rupoo /usr/local/bin/
 ```
 
 #### Windows
 
-1. Download `rupoo-v0.6.1-x86_64-pc-windows-msvc.zip`
+1. Download `rupoo-v0.6.3-x86_64-pc-windows-msvc.zip`
 2. Extract the archive
 3. Move `rupoo.exe` to a directory in your `PATH` (e.g., `C:\Windows\System32\` or create a custom path)
 4. Open a new terminal and run `rupoo --help`
 
-> 💡 Or use PowerShell: `Expand-Archive rupoo-v0.6.1-x86_64-pc-windows-msvc.zip -DestinationPath C:\Users\YourName\bin`
+> 💡 Or use PowerShell: `Expand-Archive rupoo-v0.6.3-x86_64-pc-windows-msvc.zip -DestinationPath C:\Users\YourName\bin`
 
 ### Install from Source
 
@@ -209,7 +223,7 @@ trait, providing backward compatibility while enabling the unified recall path.
 
 ### Quality & Safety
 
-- **255 unit tests** + **27 integration tests** + **9 doc tests** = **291 total**
+- **380 unit tests** + **5 integration tests** (orchestrator ×4, smoke ×1)
 - **Clippy clean** — zero warnings across all targets
 - **Hygiene fixes**: memory leak patched (vector store `remove()`), placeholder implementations emit runtime warnings, `clippy --fix` applied project-wide
 - **Safety alignment**: `SafetyContext` now reads config file defaults and merges with runtime rules

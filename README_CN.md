@@ -3,8 +3,8 @@
 Rupoo 是一个基于终端的 AI 助手，采用原生 REPL 界面，支持渲染代码块、Markdown 渲染、主题切换和 Claude Code 风格的工具调用显示 —— 所有功能都由双模式代理引擎（聊天 + 计划）驱动。
 
 ```
-版本:    0.6.1          语言: Rust 2021
-代码行数: ~48,000       测试:    291 ✅
+版本:    0.6.3          语言: Rust 2021
+代码行数: ~65,000       测试:    373 ✅
 界面:    原生 REPL      LLM:     Anthropic / OpenAI / DeepSeek / Ollama
 数据库:  SQLite (FTS5)  记忆:    混合搜索 (FTS5 + 向量)
 安全:    path_jail 沙箱 + SSRF 防护 + MCP 认证 + 命令黑名单加固
@@ -83,23 +83,37 @@ rupoo serve-status    # 查看运行状态
 
 ## 🚀 快速开始
 
+### 官方安装脚本（推荐）
+
+一行安装脚本会下载最新 release、校验 SHA-256 校验和，并安装到本地 bin 目录：
+
+```bash
+# macOS / Linux
+curl -fsSL https://raw.githubusercontent.com/Steventsang18/rupoo/master/scripts/install.sh | sh
+
+# Windows（PowerShell 5.1+）
+powershell -ExecutionPolicy Bypass -c "irm https://raw.githubusercontent.com/Steventsang18/rupoo/master/scripts/install.ps1 | iex"
+```
+
+选项：`sh install.sh -v 0.6.3`（指定版本）、`sh install.sh -d /opt/bin`（自定义目录）。
+
 ### 下载预编译二进制
 
 从 [最新 Release 页面](https://github.com/Steventsang18/rupoo/releases/latest) 下载对应平台的压缩包：
 
 | 平台 | 下载文件 |
 |------|----------|
-| 🍎 **macOS Apple Silicon** (M1/M2/M3/M4) | `rupoo-v0.6.1-aarch64-apple-darwin.tar.gz` |
-| 🍎 **macOS Intel** | `rupoo-v0.6.1-x86_64-apple-darwin.tar.gz` |
-| 🐧 **Linux x86_64** | `rupoo-v0.6.1-x86_64-unknown-linux-gnu.tar.gz` |
-| 🐧 **Linux ARM64** (树莓派、AWS Graviton) | `rupoo-v0.6.1-aarch64-unknown-linux-gnu.tar.gz` |
-| 🪟 **Windows x86_64** | `rupoo-v0.6.1-x86_64-pc-windows-msvc.zip` |
+| 🍎 **macOS Apple Silicon** (M1/M2/M3/M4) | `rupoo-v0.6.3-aarch64-apple-darwin.tar.gz` |
+| 🍎 **macOS Intel** | `rupoo-v0.6.3-x86_64-apple-darwin.tar.gz` |
+| 🐧 **Linux x86_64** | `rupoo-v0.6.3-x86_64-unknown-linux-gnu.tar.gz` |
+| 🐧 **Linux ARM64** (树莓派、AWS Graviton) | `rupoo-v0.6.3-aarch64-unknown-linux-gnu.tar.gz` |
+| 🪟 **Windows x86_64** | `rupoo-v0.6.3-x86_64-pc-windows-msvc.zip` |
 
 #### macOS
 
 ```bash
 # 将 <文件> 替换为你平台的压缩包
-tar xzf rupoo-v0.6.1-aarch64-apple-darwin.tar.gz
+tar xzf rupoo-v0.6.3-aarch64-apple-darwin.tar.gz
 mv rupoo /usr/local/bin/
 # 验证
 rupoo --help
@@ -112,22 +126,22 @@ rupoo --help
 
 ```bash
 # x86_64
-tar xzf rupoo-v0.6.1-x86_64-unknown-linux-gnu.tar.gz
+tar xzf rupoo-v0.6.3-x86_64-unknown-linux-gnu.tar.gz
 sudo mv rupoo /usr/local/bin/
 
 # ARM64（如树莓派）
-tar xzf rupoo-v0.6.1-aarch64-unknown-linux-gnu.tar.gz
+tar xzf rupoo-v0.6.3-aarch64-unknown-linux-gnu.tar.gz
 sudo mv rupoo /usr/local/bin/
 ```
 
 #### Windows
 
-1. 下载 `rupoo-v0.6.1-x86_64-pc-windows-msvc.zip`
+1. 下载 `rupoo-v0.6.3-x86_64-pc-windows-msvc.zip`
 2. 解压压缩包
 3. 将 `rupoo.exe` 移动到 `PATH` 环境变量中的目录（如 `C:\Windows\System32\` 或自定义路径）
 4. 打开新终端，运行 `rupoo --help`
 
-> 💡 或用 PowerShell：`Expand-Archive rupoo-v0.6.1-x86_64-pc-windows-msvc.zip -DestinationPath C:\Users\你的用户名\bin`
+> 💡 或用 PowerShell：`Expand-Archive rupoo-v0.6.3-x86_64-pc-windows-msvc.zip -DestinationPath C:\Users\你的用户名\bin`
 
 ### 从源码安装
 
@@ -207,7 +221,7 @@ v0.5.0 引入重大架构升级：正式的五层管线取代了单体代理核�
 
 ### 质量与安全
 
-- **239 个单元测试** + **4 个集成测试** + **9 个文档测试** = **275 总计**
+- **380 个单元测试** + **5 个集成测试**（编排器 ×4、冒烟 ×1）
 - **Clippy 零警告** — 全 targets 无警告
 - **问题修复**：向量存储 `remove()` 内存泄漏已修补、占位符实现添加运行时警告、项目级 `clippy --fix` 已执行
 - **安全对齐**：`SafetyContext` 现在读取配置文件默认值并与运行时规则合并
