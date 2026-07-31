@@ -121,8 +121,10 @@ jobs:
           node-version: 20
       - run: corepack enable
 
-      - name: Install frontend dependencies
-        run: pnpm --dir src-ui install --frozen-lockfile
+      - name: Install dependencies (root tauri CLI + frontend)
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm --dir src-ui install --frozen-lockfile
 
       - name: Build & bundle GUI
         run: pnpm tauri build
