@@ -41,7 +41,7 @@ const quickActions: QuickAction[] = [
   },
 ];
 
-/* Setup wizard mock — in production this would be a multi-step flow */
+/* Provider quick-setup flow: persists API key + model via app store. */
 const providerOptions = [
   { id: "openai", label: "OpenAI", models: ["gpt-4o", "gpt-4o-mini", "o3-mini"] },
   { id: "anthropic", label: "Anthropic", models: ["claude-sonnet-4", "claude-haiku-4"] },

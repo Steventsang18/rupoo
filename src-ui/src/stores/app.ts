@@ -17,7 +17,7 @@ export const useAppStore = defineStore("app", () => {
 
   // ── Agent state ──
   const agentStatus = ref<"initializing" | "ready" | "error" | "offline">("initializing");
-  const version = ref("0.4.1");
+  const version = ref("0.6.3");
   const modelInfo = ref<string | null>(null);
   const tokenUsage = ref({ prompt: 0, completion: 0, total: 0 });
 
