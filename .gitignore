@@ -23,6 +23,7 @@ credentials.toml
 # Demo HTML pages
 *.html
 !docs/**/*.html
+!src-ui/index.html
 
 # Internal dev notes
 *.md

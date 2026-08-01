@@ -105,10 +105,7 @@ impl SystemResourceInfo {
         info.cpu_cores = std::thread::available_parallelism().ok().map(|n| n.get());
 
         // Process memory (macOS-specific via sysctl or /proc fallback)
-        #[cfg(target_os = "macos")]
-        {
-            info.process_memory_mb = Self::macos_memory_usage();
-        }
+        info.process_memory_mb = Self::macos_memory_usage();
 
         info
     }

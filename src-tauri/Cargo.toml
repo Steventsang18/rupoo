@@ -3,6 +3,7 @@ name = "rupoo-tauri"
 version = "0.6.3"
 edition = "2021"
 description = "Tauri desktop app for rupoo AI agent"
+license = "MIT OR Apache-2.0"
 
 [lib]
 name = "rupoo_tauri_lib"

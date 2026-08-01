@@ -22,6 +22,13 @@ allow = [
     "MPL-2.0",
     "OpenSSL",
     "Zlib",
+    # Fonts shipped by egui (epaint_default_fonts)
+    "OFL-1.1",
+    "LicenseRef-UFL-1.0",
+    # notify (file watching) is public-domain style
+    "CC0-1.0",
+    # webpki-roots data license
+    "CDLA-Permissive-2.0",
 ]
 confidence-threshold = 0.8
 exceptions = [
