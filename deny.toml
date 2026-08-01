@@ -2,11 +2,10 @@
 # Docs: https://embarkstudios.github.io/cargo-deny/
 
 [advisories]
-vulnerability = "deny"
-unmaintained = "warn"
-unsound = "deny"
+# Since cargo-deny 0.16 the vulnerability/unmaintained/unsound/notice
+# fields were removed: all advisory types are denied by default, which is
+# the desired policy here. Only yanked/ignore remain configurable.
 yanked = "deny"
-notice = "warn"
 ignore = []
 
 [licenses]
@@ -24,8 +23,6 @@ allow = [
     "OpenSSL",
     "Zlib",
 ]
-copyleft = "warn"
-default = "deny"
 confidence-threshold = 0.8
 exceptions = [
     # Allow ring's license (ISC + OpenSSL)

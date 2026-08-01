@@ -206,18 +206,19 @@ pub mod inner {
             visuals.window_fill = token::BG_DEEPEST;
 
             visuals.widgets.noninteractive.bg_fill = token::BG_ELEVATED;
-            visuals.widgets.noninteractive.fg_stroke = egui::Stroke::new(1.0, token::TEXT_PRIMARY);
+            visuals.widgets.noninteractive.fg_stroke =
+                egui::Stroke::new(1.0_f32, token::TEXT_PRIMARY);
             visuals.widgets.inactive.bg_fill = token::BG_INPUT;
-            visuals.widgets.inactive.fg_stroke = egui::Stroke::new(1.0, token::TEXT_PRIMARY);
+            visuals.widgets.inactive.fg_stroke = egui::Stroke::new(1.0_f32, token::TEXT_PRIMARY);
             visuals.widgets.hovered.bg_fill = token::BG_HOVER;
-            visuals.widgets.hovered.fg_stroke = egui::Stroke::new(1.0, token::TEXT_PRIMARY);
+            visuals.widgets.hovered.fg_stroke = egui::Stroke::new(1.0_f32, token::TEXT_PRIMARY);
             visuals.widgets.active.bg_fill = token::ACCENT;
-            visuals.widgets.active.fg_stroke = egui::Stroke::new(1.0, Color32::WHITE);
+            visuals.widgets.active.fg_stroke = egui::Stroke::new(1.0_f32, Color32::WHITE);
             visuals.widgets.open.bg_fill = token::BG_HOVER;
-            visuals.widgets.open.fg_stroke = egui::Stroke::new(1.0, token::TEXT_PRIMARY);
+            visuals.widgets.open.fg_stroke = egui::Stroke::new(1.0_f32, token::TEXT_PRIMARY);
 
             visuals.selection.bg_fill = token::ACCENT;
-            visuals.selection.stroke = egui::Stroke::new(1.0, token::ACCENT);
+            visuals.selection.stroke = egui::Stroke::new(1.0_f32, token::ACCENT);
             visuals.hyperlink_color = token::ACCENT_BRIGHT;
 
             visuals.window_rounding = egui::Rounding::same(6.0);
@@ -300,7 +301,7 @@ pub mod inner {
                     egui::RichText::new(format!("  {}  {}", tab.icon(), tab.label())).size(12.0),
                 )
                 .fill(bg)
-                .stroke(egui::Stroke::new(0.0, Color32::TRANSPARENT))
+                .stroke(egui::Stroke::new(0.0_f32, Color32::TRANSPARENT))
                 .min_size(egui::vec2(ui.available_width() - 4.0, 32.0))
                 .rounding(4.0),
             );
@@ -326,7 +327,7 @@ pub mod inner {
             ui.painter().hline(
                 rect.x_range(),
                 rect.top(),
-                egui::Stroke::new(1.0, token::BORDER_SUBTLE),
+                egui::Stroke::new(1.0_f32, token::BORDER_SUBTLE),
             );
 
             ui.horizontal(|ui| {
@@ -434,7 +435,7 @@ pub mod inner {
                     ui.add(
                         egui::Button::new(egui::RichText::new(text).size(12.0))
                             .fill(token::BG_ELEVATED)
-                            .stroke(egui::Stroke::new(1.0, token::BORDER_DEFAULT))
+                            .stroke(egui::Stroke::new(1.0_f32, token::BORDER_DEFAULT))
                             .min_size(egui::vec2(320.0, 32.0))
                             .rounding(4.0),
                     );
@@ -494,7 +495,7 @@ pub mod inner {
             ui.painter().hline(
                 rect.x_range(),
                 rect.top(),
-                egui::Stroke::new(1.0, token::BORDER_SUBTLE),
+                egui::Stroke::new(1.0_f32, token::BORDER_SUBTLE),
             );
 
             ui.add_space(4.0);
@@ -516,7 +517,7 @@ pub mod inner {
                     } else {
                         token::BG_INPUT
                     })
-                    .stroke(egui::Stroke::new(0.0, Color32::TRANSPARENT))
+                    .stroke(egui::Stroke::new(0.0_f32, Color32::TRANSPARENT))
                     .min_size(egui::vec2(56.0, 30.0))
                     .rounding(4.0);
 
@@ -557,7 +558,7 @@ pub mod inner {
                     .add(
                         egui::Button::new(egui::RichText::new("+ New Plan").size(12.0))
                             .fill(token::ACCENT)
-                            .stroke(egui::Stroke::new(0.0, Color32::TRANSPARENT))
+                            .stroke(egui::Stroke::new(0.0_f32, Color32::TRANSPARENT))
                             .min_size(egui::vec2(80.0, 26.0))
                             .rounding(4.0),
                     )
@@ -618,7 +619,7 @@ pub mod inner {
                                     egui::RichText::new(format!("  {}", snap.name)).size(12.0),
                                 )
                                 .fill(bg)
-                                .stroke(egui::Stroke::new(0.0, Color32::TRANSPARENT))
+                                .stroke(egui::Stroke::new(0.0_f32, Color32::TRANSPARENT))
                                 .min_size(egui::vec2(ui.available_width() - 4.0, 36.0))
                                 .rounding(4.0),
                             );
@@ -727,7 +728,7 @@ pub mod inner {
                     .add(
                         egui::Button::new(egui::RichText::new("Install Built-in").size(12.0))
                             .fill(token::ACCENT)
-                            .stroke(egui::Stroke::new(0.0, Color32::TRANSPARENT))
+                            .stroke(egui::Stroke::new(0.0_f32, Color32::TRANSPARENT))
                             .rounding(4.0),
                     )
                     .clicked()
@@ -896,7 +897,7 @@ pub mod inner {
                 .add(
                     egui::Button::new(egui::RichText::new("Save Settings").size(12.0))
                         .fill(token::ACCENT)
-                        .stroke(egui::Stroke::new(0.0, Color32::TRANSPARENT))
+                        .stroke(egui::Stroke::new(0.0_f32, Color32::TRANSPARENT))
                         .min_size(egui::vec2(120.0, 30.0))
                         .rounding(4.0),
                 )
@@ -942,7 +943,7 @@ pub mod inner {
         egui::Frame::none()
             .fill(token::BG_ELEVATED)
             .rounding(6.0)
-            .stroke(egui::Stroke::new(1.0, token::BORDER_SUBTLE))
+            .stroke(egui::Stroke::new(1.0_f32, token::BORDER_SUBTLE))
             .show(ui, |ui| {
                 ui.add_space(16.0);
 
@@ -991,13 +992,13 @@ pub mod inner {
                     ui.add(
                         egui::Button::new(egui::RichText::new("Execute").size(12.0))
                             .fill(token::ACCENT)
-                            .stroke(egui::Stroke::new(0.0, Color32::TRANSPARENT))
+                            .stroke(egui::Stroke::new(0.0_f32, Color32::TRANSPARENT))
                             .rounding(4.0),
                     );
                     ui.add(
                         egui::Button::new(egui::RichText::new("Delete").size(12.0))
                             .fill(Color32::TRANSPARENT)
-                            .stroke(egui::Stroke::new(1.0, token::BORDER_DEFAULT))
+                            .stroke(egui::Stroke::new(1.0_f32, token::BORDER_DEFAULT))
                             .rounding(4.0),
                     );
                 });
@@ -1015,7 +1016,7 @@ pub mod inner {
         egui::Frame::none()
             .fill(token::BG_ELEVATED)
             .rounding(6.0)
-            .stroke(egui::Stroke::new(1.0, token::BORDER_SUBTLE))
+            .stroke(egui::Stroke::new(1.0_f32, token::BORDER_SUBTLE))
             .show(ui, |ui| {
                 ui.add_space(12.0);
                 ui.label(
@@ -1061,7 +1062,7 @@ pub mod inner {
         egui::Frame::none()
             .fill(token::BG_ELEVATED)
             .rounding(6.0)
-            .stroke(egui::Stroke::new(1.0, border_color))
+            .stroke(egui::Stroke::new(1.0_f32, border_color))
             .show(ui, |ui| {
                 ui.add_space(12.0);
                 ui.horizontal(|ui| {
@@ -1099,7 +1100,7 @@ pub mod inner {
                     ui.add(
                         egui::Button::new(egui::RichText::new(label).size(12.0))
                             .fill(token::ACCENT)
-                            .stroke(egui::Stroke::new(0.0, Color32::TRANSPARENT))
+                            .stroke(egui::Stroke::new(0.0_f32, Color32::TRANSPARENT))
                             .rounding(4.0),
                     );
                 });
